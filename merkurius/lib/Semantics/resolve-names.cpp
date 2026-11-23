@@ -730,6 +730,19 @@ llvm::SmallVector<const Symbol *, 4> Resolver::Lookup(
     LookupIn(Visible{result_.primitive_.get(), false, false}, name, use, arity,
         anyArity, found);
   }
+  // A field access function that the field's module declares is used
+  // instead of the generated one (reference manual, "User-supplied field
+  // access function declarations"); its clauses are the generated ones
+  // (desugar.cpp, FieldAccessClauses).
+  llvm::erase_if(found, [&](const Symbol *field) {
+    return (field->kind == SymbolKind::Field ||
+               field->kind == SymbolKind::FieldUpdate) &&
+        llvm::any_of(found, [&](const Symbol *function) {
+          return function->kind == SymbolKind::Function &&
+              function->module == field->module &&
+              function->name == field->name && function->arity == field->arity;
+        });
+  });
   return found;
 }
 

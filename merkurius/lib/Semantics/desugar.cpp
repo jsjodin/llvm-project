@@ -227,6 +227,11 @@ public:
   // func(m/N) is f as m(X1, ..., XN) = Y :- Y = f(X1, ..., XN), as mmc
   // checks them: f is a data-term.
   const ClauseForm *Desugar(const parser::MethodByName &);
+  // The clause of a declared field access function for one constructor
+  // with the field, its `index`th argument: F(c(X1, ..., Xn)) = Xi, or
+  // 'F :='(c(X1, ..., Xn), V) = c(X1, ..., V, ..., Xn).
+  const ClauseForm *FieldAccess(const parser::PredDecl &,
+      const parser::Constructor &, std::size_t index, bool update);
 
 private:
   template <typename T, typename... A> const T *Make(A &&...args) {
@@ -2222,6 +2227,96 @@ const ClauseForm *ClauseDesugarer::Desugar(const parser::MethodByName &method) {
   return Finish(method.tokens, method.kind, method.method->name, goals);
 }
 
+const ClauseForm *ClauseDesugarer::FieldAccess(const parser::PredDecl &decl,
+    const parser::Constructor &constructor, std::size_t index, bool update) {
+  TokenRange range{decl.tokens};
+  VarId term{Fresh(range)};
+  head_.push_back(term);
+  VarId value{0};
+  if (update) {
+    value = Fresh(range);
+    head_.push_back(value);
+  }
+  VarId result{Fresh(range)};
+  head_.push_back(result);
+  llvm::SmallVector<VarId, 4> fields;
+  for (std::size_t i{0}; i < constructor.arguments.size(); ++i) {
+    fields.push_back(Fresh(range));
+  }
+  const parser::SymName *name{Make<parser::SymName>(range,
+      constructor.name->qualifiers, constructor.name->name)};
+  Goals goals;
+  goals.push_back(Make<Unify>(range, Number(), term, false, VarId{0},
+      Functor{FunctorKind::Name, name, nullptr, nullptr},
+      Save(llvm::ArrayRef<VarId>{fields})));
+  if (update) {
+    llvm::SmallVector<VarId, 4> updated{fields};
+    updated[index] = value;
+    goals.push_back(Make<Unify>(range, Number(), result, false, VarId{0},
+        Functor{FunctorKind::Name, name, nullptr, nullptr},
+        Save(llvm::ArrayRef<VarId>{updated})));
+  } else {
+    goals.push_back(Make<Unify>(range, Number(), result, true, fields[index],
+        Functor{}, llvm::ArrayRef<VarId>{}));
+  }
+  return Finish(range, parser::PredOrFunc::Function, decl.name, goals);
+}
+
+// The clauses of the field access functions that the module declares for
+// its own fields and does not define (reference manual, "User-supplied
+// field access function declarations"): the generated ones, for each
+// constructor of the declaration's type with the field.
+void FieldAccessClauses(const parser::ParseTree &tree,
+    const parser::TokenSequence &tokens, SemanticArena &arena,
+    parser::Messages &messages, bool processImported,
+    llvm::SmallVectorImpl<const ClauseForm *> &clauses) {
+  llvm::StringSet<> defined;
+  for (const parser::Item &item : tree.items) {
+    if (const auto *rule{std::get_if<const parser::FactOrRule *>(&item)};
+        rule && (*rule)->kind == parser::PredOrFunc::Function) {
+      defined.insert(((*rule)->name->name + "/" +
+          llvm::Twine((*rule)->arguments.size())).str());
+    }
+  }
+  for (const parser::Item &item : tree.items) {
+    const auto *decl{std::get_if<const parser::PredDecl *>(&item)};
+    if (!decl || (*decl)->kind != parser::PredOrFunc::Function ||
+        (*decl)->withType || (*decl)->arguments.empty()) {
+      continue;
+    }
+    llvm::StringRef label{(*decl)->name->name};
+    bool update{label.consume_back(" :=")};
+    if ((*decl)->arguments.size() != (update ? 2u : 1u) ||
+        defined.contains(((*decl)->name->name + "/" +
+            llvm::Twine((*decl)->arguments.size())).str())) {
+      continue;
+    }
+    const auto *named{std::get_if<const parser::NamedType *>(
+        &(*decl)->arguments.front()->type)};
+    if (!named) {
+      continue;
+    }
+    for (const parser::Item &other : tree.items) {
+      const auto *type{std::get_if<const parser::DuTypeDefn *>(&other)};
+      if (!type || (*type)->name->name != (*named)->name->name ||
+          (*type)->parameters.size() != (*named)->arguments.size()) {
+        continue;
+      }
+      for (const parser::Constructor *constructor : (*type)->constructors) {
+        for (std::size_t i{0}; i < constructor->arguments.size(); ++i) {
+          const parser::SymName *field{constructor->arguments[i]->field};
+          if (field && field->name == label) {
+            ClauseDesugarer desugarer{tokens, arena, messages, processImported};
+            clauses.push_back(&Quantify(
+                *desugarer.FieldAccess(**decl, *constructor, i, update),
+                tokens, arena, messages));
+          }
+        }
+      }
+    }
+  }
+}
+
 // An instance's clause cannot be for one mode, as in mmc, which reports
 // each argument as a use of an undefined function ::/2. The reference
 // manual ("Instance declarations") says an instance's clauses are like a
@@ -2313,6 +2408,7 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
           "desugaring %s"_todo_en_US, "mutable declarations");
     }
   }
+  FieldAccessClauses(tree, tokens, arena, messages, processImported, clauses);
   return *arena.Make<SemanticForm>(
       arena.SaveArray(llvm::ArrayRef<const ClauseForm *>{clauses}),
       arena.SaveArray(llvm::ArrayRef<MethodClause>{methods}));
