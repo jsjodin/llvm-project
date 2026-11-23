@@ -285,6 +285,7 @@ private:
       std::optional<parser::Determinism>,
       llvm::ArrayRef<const parser::InstConstraint *> constraints,
       parser::CharBlock where);
+  bool IsFunctionMode(const parser::ModeDecl &);
   const Symbol *ModeDeclTarget(const parser::ModeDecl &,
       const Symbol *typeclass, const ModuleSymbols &);
   std::vector<ArgMode> ErasedModes(llvm::ArrayRef<ArgMode>);
@@ -910,12 +911,33 @@ ModeChecker::Declared ModeChecker::ConvertDeclaration(
   return declared;
 }
 
+// Whether a mode declaration is a function's: it has a result, or its
+// `with_inst` inst is a function's, which gives the result's mode, as in
+// `:- mode f(in) `with_inst` foldl_func` (reference manual, "Predicate and
+// function mode declarations").
+bool ModeChecker::IsFunctionMode(const parser::ModeDecl &decl) {
+  if (decl.result || !decl.withInst) {
+    return decl.result.has_value();
+  }
+  InstScope scope;
+  scope.id = ++scopes_;
+  Collect(*decl.withInst, scope);
+  const Inst *inst{Convert(*decl.withInst, scope)};
+  for (unsigned steps{0}; inst->kind == InstKind::Defined && steps < 100;
+       ++steps) {
+    inst = insts_.Expand(inst);
+  }
+  return inst->kind == InstKind::HigherOrder &&
+      inst->predOrFunc == parser::PredOrFunc::Function;
+}
+
 const Symbol *ModeChecker::ModeDeclTarget(const parser::ModeDecl &decl,
     const Symbol *typeclass, const ModuleSymbols &own) {
-  parser::PredOrFunc kind{decl.result ? parser::PredOrFunc::Function
-                                      : parser::PredOrFunc::Predicate};
-  SymbolKind symbolKind{decl.result ? SymbolKind::Function
-                                    : SymbolKind::Predicate};
+  bool function{IsFunctionMode(decl)};
+  parser::PredOrFunc kind{function ? parser::PredOrFunc::Function
+                                   : parser::PredOrFunc::Predicate};
+  SymbolKind symbolKind{function ? SymbolKind::Function
+                                 : SymbolKind::Predicate};
   unsigned arity{static_cast<unsigned>(decl.arguments.size())};
   std::string qualifier{llvm::join(decl.name->qualifiers, ".")};
   llvm::SmallVector<unsigned, 2> others;
@@ -952,7 +974,7 @@ const Symbol *ModeChecker::ModeDeclTarget(const parser::ModeDecl &decl,
             " and ");
   }
   if (otherKind) {
-    hint += decl.result
+    hint += function
         ? "; there is a pred of that name and arity, whose mode declaration has no result"
         : "; there is a func of that name and arity, whose mode declaration has a result, as in `:- mode f(in) = out'";
   }
