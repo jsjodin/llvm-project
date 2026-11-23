@@ -44,6 +44,9 @@ def freceive_goal : Flag<["-"], "freceive-goal">,
   HelpText<"Read receive [Params] ( Arms ) goals, an extension of the language">;
 def fprocess_declarations : Flag<["-"], "fprocess-declarations">,
   HelpText<"Read :- process declarations, an extension of the language">;
+def fno_infer_types : Flag<["-"], "fno-infer-types">,
+  HelpText<"Report each predicate or function without a type declaration, "
+           "as mmc does without --infer-types; its type is still inferred">;
 def fopen_types : Flag<["-"], "fopen-types">,
   HelpText<"Allow open(T) types, whose values may hold unbound variables, "
            "an extension of the language">;
@@ -99,9 +102,6 @@ def fno_copy_device_procedures : Flag<["-"], "fno-copy-device-procedures">,
   HelpText<"In a device's compile, leave the other modules' procedures that "
            "the device's code reaches as declarations; for writing a "
            "module's merk bytecode for the other modules' device compiles">;
-def fno_infer_types : Flag<["-"], "fno-infer-types">,
-  HelpText<"Report each predicate or function without a type declaration, "
-           "as mmc does without --infer-types; its type is still inferred">;
 def ftype_inference_iteration_limit_EQ :
   Joined<["-"], "ftype-inference-iteration-limit=">, MetaVarName<"<n>">,
   HelpText<"Perform at most <n> passes of type inference (default: 60)">;

@@ -91,6 +91,9 @@ static void addFrontendOptions(const InputArgList &args, Job &job,
   if (args.hasArg(OPT_fopen_types)) {
     job.push_back("-fopen-types");
   }
+  if (args.hasArg(OPT_fno_infer_types)) {
+    job.push_back("-fno-infer-types");
+  }
   if (args.hasArg(OPT_fstub_unimplemented)) {
     job.push_back("-fstub-unimplemented");
   }
