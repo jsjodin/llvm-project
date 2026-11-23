@@ -8384,6 +8384,177 @@ and the program in `main`, as now.
      device"), nor `try`, and cannot make a univ; its uncaught exceptions
      are the library's errors, whose text the device gives (step 3).
 
+## A conformance suite
+
+Decided 2026-11-23, at the user's request: a test suite of the language
+and its interactions, organized as the commercial C and C++ validation
+suites and Ada's ACATS are, in a directory of its own, with mmc as the
+oracle. Its tests are our own; mmc's test suite is not used.
+
+**Why.** The tests so far came with the features: each was written for
+what was being built, in `test/CodeGen` (about 430) and `test/Semantics`
+(about 245), organized by the compiler's parts. Nothing says which rules of
+the language they cover, or which combinations of features. The bugs that
+`utils/codegen-oracle` found (2026-11-04) were all in combinations nobody
+had written.
+
+**What the established suites do.** Plum Hall's and Perennial's suites for
+C and C++ have a directory for each clause of the standard, and a
+self-checking test for each requirement, a "shall" sentence, so that a
+failure names the sentence. SuperTest traces each requirement it extracts
+from the standard to its tests, and adds tests of combinations and of the
+library. ACATS names each test by the section of the reference manual and
+by its class: B, must be rejected with errors at the marked lines; C, must
+run and check itself; L, must fail to link; and classes for limits and for
+behaviour the implementation chooses. All grade results mechanically,
+and all keep a map from the definition to the tests, so that what is not
+tested shows.
+
+**Proposed.**
+- *The definition is the reference manual (22.01)* and the library
+  reference; *the oracle is mmc 22.01.9,* for what a program prints, its
+  exit status and its standard error, and for which programs are
+  rejected and at which line. Wording of errors is not compared
+  (Semantic equivalence only), and mmc is needed only to write a test's
+  expected output, not to run the suite.
+- *A difference from mmc is triaged, never just recorded.* Each is one
+  of: a bug of ours, fixed at once as its own commit; an mmc bug or a
+  disagreement with the manual, which goes in the design document's
+  register ("Where mmc and the manual disagree") and, if mmc is wrong, in
+  "mmc bugs to report", as for the front end so far; or behaviour the
+  language leaves to the implementation, as the header of an uncaught
+  exception's report, overflow, or what a GPU process may make, which goes
+  in a list of its own in the design document, "Implementation-defined
+  behaviour". The test then says which, and expects our behaviour.
+- *The directory,* `test/Conformance`, has a subdirectory for each
+  chapter of the manual, and in it one for each section, so that no
+  directory holds more than a few dozen tests:
+  `syntax/`, `types/`, `modes/`, `unique-modes/`, `determinism/`,
+  `equality-comparison/`, `higher-order/`, `modules/`, `type-classes/`,
+  `existential-types/`, `type-conversions/`, `exceptions/`,
+  `semantics/`, `foreign/`, `impurity/`, `solver-types/`,
+  `trace-goals/`, `pragmas/`, `implementation-dependent/`; for example
+  `types/field-access/`, `modes/different-clauses/`,
+  `determinism/committed-choice/`. Beside them `library/`, with a
+  directory for each library module; `interactions/`, below; and
+  `generated/`, the random programs, below.
+- *Merkurius's own extensions* are a part of the suite as large as a
+  chapter, in `extensions/`, whose definition is the design document's
+  sections, which their `MANUAL:` lines name instead (`% DESIGN:
+  Processes and mailboxes / The receive goal`):
+  - `processes/`: spawn, send, receive and its goal, selectors and
+    timeouts, closed mailboxes, stop, places, process kinds and
+    declarations;
+  - `monitors/`: monitor, demonitor, each down reason, the fault
+    injector's replay, across nodes;
+  - `gpu-processes/`: kinds on a GPU, flat messages, direct sends, team
+    loops, cooperative kernels, and what a GPU process may not do, each
+    as a `reject-` or `nyi-` test;
+  - `do-loops/`: Schimpf-style loops, their translation and their
+    reductions;
+  - `openmp/`: a directory for each construct, `parallel`, `target`,
+    `teams`, `distribute`, `target data`, reductions, schedules, atomic
+    updates, and the directives as promises;
+  - `open-types/`: open(T) and closed(T), their unifications, messages
+    and collection;
+  - `flat-records/`, `fixed/`, and `distribution/` (nodes, remote
+    mailboxes, the wire format).
+  
+  mmc has none of them, so their expectations are written by hand and
+  reviewed, and an oracle of our own stands in where one exists: a do
+  loop or OpenMP directive is a promise, so its program must print the
+  same without `-fopenmp` (OpenMP tests run sequentially too); an open
+  type's program must print what the same program with closed types
+  prints, where one can be written; a process program's output is made
+  deterministic by its messages, or the test checks a property of it, as
+  a count, rather than an order. GPU tests are `-gpu.test` files, run one
+  at a time.
+- *A test's class is the start of its name:* `run-` must compile, run
+  and print mmc's output with mmc's exit status; `reject-` must be
+  rejected, with an error at each line marked in it; `warn-` must give the
+  marked warnings and still run; `nyi-` must give our "not yet
+  implemented" error, and becomes a `run-` test when the feature lands, so
+  that the suite also lists what is missing; `differs-` expects our
+  behaviour where it differs from mmc for one of the reasons above, which
+  its header names, with mmc's.
+- *A test's header* names the manual's section it tests, on a line of its
+  own, `% MANUAL: Types / Field access functions`, and quotes or
+  paraphrases the rule. One test checks one rule, or a few closely
+  related, so that a failure names the rule.
+- *A run test* runs at `-O0` and `-O2`, and with a collection at every
+  allocation (`MERK_GC_EVERY_ALLOC=1`), as CodeGen's runtime tests do; its
+  `OUTPUT` lines are mmc's, written by the oracle script below, and are
+  checked in. A reject test checks merkc's errors by line, with FileCheck's
+  `[[@LINE]]`.
+- *The oracle script,* `utils/conformance/oracle.py`, compiles a test with
+  mmc, runs it, and writes or checks its expected lines; over the whole
+  suite it reports each test whose lines no longer match mmc's, which
+  catches a hand-edited expectation. It also says, for each failing test,
+  whether merkc and mmc differ in output, status, standard error, or
+  acceptance, for the triage.
+- *The map,* `utils/conformance/matrix.py`, reads the `MANUAL:` lines and
+  prints each section of the manual with its tests by class. A section
+  with no `run-` or `reject-` test is a gap; the `nyi-` count is what is
+  missing. A run of the compiler built with coverage
+  (`-DLLVM_BUILD_INSTRUMENTED_COVERAGE`) over the suite shows what code no
+  test reaches, the other way round.
+- *Interactions* are where compilers break, and the part worth most. Two
+  lists: features (unification of each layout, each determinism,
+  higher-order calls, type classes, existential types, unique modes,
+  `try`, field access, equivalence types, user-defined equality, open
+  types) and contexts (a closure, a typeclass method, a polymorphic
+  procedure, a nondet context, a `try` goal, a do loop, a parallel
+  region, a host process, a GPU process, a message's type, another module,
+  a collection at every allocation). Every pair by hand is too many; a
+  generator, `utils/conformance/generate-interactions.py`, writes a test
+  for each pair from a template for each feature and each context, and
+  pairwise combinations of three for the contexts that nest. The tests it
+  writes are checked in, in `interactions/<context>/`, so that a failure
+  reproduces and the expectation is reviewed; the generator is rerun when
+  a list grows. A GPU context's tests are `-gpu.test` files, which host
+  lit leaves out, and which run one at a time as the other GPU tests do.
+- *Random programs:* `utils/codegen-oracle`'s generators, of layouts,
+  arithmetic and type classes, move under the suite as
+  `generated/`, their seeds checked in as `CodeGen/oracle/*.test` are now,
+  and grow towards the features they leave out (disjunctions, strings,
+  higher-order code, modes other than in and out). They find what nobody
+  thought to write; the hand-written tests say what each rule means.
+- *Existing tests stay where they are.* They test bugs and the compiler's
+  parts, not the manual; they get `MANUAL:` lines where they fit, so that
+  the map counts them, but are not moved.
+
+**Rejected:**
+- *mmc's own test suite.* The user prefers not to rely on it: its
+  expected outputs encode mmc's choices, including its bugs, without
+  saying which, and its harness and grades are mmc's. Our tests, with
+  mmc as an oracle we question, make each difference a decision.
+- *Organizing by the compiler's parts,* as `test/Semantics` and
+  `test/CodeGen` are. The parts change; the manual does not, and a
+  section with no tests shows only in the manual's order.
+- *A file per chapter or section,* as a self-checking program that tests
+  many rules. One failure hides the rest, and a crash says nothing about
+  which rule. A file per rule costs more files, which the directories
+  keep manageable.
+
+**Steps:**
+1. The skeleton: the directories, the header and class conventions, the
+   oracle script and the map (which reads `DESIGN:` lines too), with
+   `types/` written in full as the model, and the map run over the
+   existing tests' `MANUAL:` and `DESIGN:` lines.
+2. The chapters, in the order the compiler meets them: syntax, types,
+   modes, determinism, unique modes, higher-order, modules, type classes,
+   existential types, equality and comparison, type conversions,
+   exceptions, semantics, impurity, foreign language interface, pragmas,
+   trace goals, solver types, implementation-dependent; then the library,
+   module by module. Each difference triaged as it is found.
+3. The extensions, in parallel with step 2 rather than after it, as most
+   of the code written since 2026-11 is theirs: processes and monitors,
+   do loops and OpenMP, GPU processes, open types, flat records,
+   distribution.
+4. The interaction generator, with the features and contexts above.
+5. The coverage run, and tests for what it shows unreached.
+6. The random generators moved under `generated/` and extended.
+
 ## Spawning from a GPU process: later
 
 Noted 2026-11-22, at the user's request, as a design to do later. A GPU
