@@ -8039,6 +8039,16 @@ Sketched for a later stage:
    no name for a process. A partition silences a connection until the
    ticks lose it, so it ends in the fence; one that heals is not possible
    with refusing a lost node's id. `kernel` waits for step 4.
+   - *Fixed 2026-11-23,* as `CodeGen/process-faults.m` failed under load
+     (`runtime/faults.cpp`). A replay dropped a fault whose process a
+     supervisor had not restarted yet at its time ("found no target"): it
+     now waits until that process is spawned; one that has ended is still
+     no target. And a schedule's last line was sometimes written twice:
+     `exit` flushes every stream without its lock, at the time the
+     injector flushed its line, so the schedule is unbuffered. The test
+     takes `noproc` as a worker's down too, as a fault can hit a
+     restarted worker before its supervisor monitors it. 96 runs, 24 at a
+     time, pass.
 4. **D1 at host places, then GPU places:** the stop flag at polls, a
    kernel's processes ended together, `kernel_ended`. Built 2026-11-22,
    and passing at host places and on the gfx1030
@@ -8263,8 +8273,7 @@ and the program in `main`, as now.
      NaNs through a type variable stays a fatal error, as in mmc
      (`CodeGen/exceptions-library.m`, mmc's output). A GPU's code reports
      them as before, as nothing catches there yet (step 3).
-     `det_univ_to_type`'s message lacks the two types' names, which needs
-     a type_info's name (step 4).
+     `det_univ_to_type`'s message lacked the two types' names (step 4).
 2. `try_all` and `finally`, done 2026-11-23. A det or semidet goal's
    `try_all` is a `try`. A multi or nondet goal's calls the runtime's
    `merk_try_nondet` as a nondet closure, which keeps its TryFrame while
@@ -8355,6 +8364,25 @@ and the program in `main`, as now.
      against 55 on gfx1030, 64 against 53 on gfx90a.
 4. The univ's text for `failed(Text)` and the report on the standard error,
    as mmc prints an uncaught exception.
+   - *Done 2026-11-23.* Step 1 already gave both as mmc's: an uncaught
+     exception of 10 more kinds (a univ, a pair, operators, a character, a
+     negative number, an array, `{}`, `domain_error`, a text of several
+     lines, `det_univ_to_type`'s) gives mmc's output, status and standard
+     error, but for the header's "Merkurius". What was left was
+     `det_univ_to_type`'s message, which names the univ's type and the
+     one asked for, as `type_desc.type_name` writes them: the runtime's
+     `merk_type_name` (`runtime/write.cpp`) writes a type_info's type,
+     qualified by its module but for builtin types, tuples (`{A, B}`) and
+     higher-order types (`pred(A)`, `func(A) = R`, `((func) = R)`); an
+     equivalence type is what it stands for, as its type_info is. The
+     library names a free variable's type by a function whose argument
+     is `unused`, as mmc's `type_of`; the univ's value has its own, `in`,
+     since a bound argument in an `unused` position is an implied mode,
+     a test. `CodeGen/univ-type-names.m` has mmc's output for 16
+     conversions, one uncaught.
+   - *Not done:* a GPU process cannot call `throw` ("not compiled for the
+     device"), nor `try`, and cannot make a univ; its uncaught exceptions
+     are the library's errors, whose text the device gives (step 3).
 
 ## Spawning from a GPU process: later
 

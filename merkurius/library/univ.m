@@ -23,7 +23,7 @@
 :- some [T] func univ_value(univ) = T.
 
 :- implementation.
-:- import_module exception.
+:- import_module exception, string.
 
 :- type univ
     --->    some [T] univ_cons(T).
@@ -48,12 +48,31 @@ det_univ_to_type(Univ, T) :-
     ( if univ_to_type(Univ, T0) then
         T = T0
     else
-        % Temporary (docs/INPROGRESS.md, Exceptions, step 4): mmc's message
-        % goes on with the two types' names, which need a type_info's name.
-        throw(software_error("univ.det_univ_to_type: conversion failed"))
+        Univ = univ_cons(Value),
+        throw(software_error("det_univ_to_type: conversion failed\n" ++
+            "\tUniv Type: " ++ value_type_name(Value) ++ "\n" ++
+            "\tObject Type: " ++ type_name_of(T)))
     ).
 
 univ_value(univ_cons(T)) = T.
+
+    % The name of T, as type_desc.type_name gives it.
+:- func type_name_of(T::unused) = (string::out) is det.
+:- pragma foreign_proc("C",
+    type_name_of(_Value::unused) = (Name::out),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    Name = merk_type_name(TypeInfo_for_T);
+").
+
+    % The name of a value's type.
+:- func value_type_name(T::in) = (string::out) is det.
+:- pragma foreign_proc("C",
+    value_type_name(_Value::in) = (Name::out),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    Name = merk_type_name(TypeInfo_for_T);
+").
 
     % The value as a U, if U is its type T.
 :- pred same_type_value(T::in, U::out) is semidet.
@@ -68,4 +87,5 @@ univ_value(univ_cons(T)) = T.
 
 :- pragma foreign_decl("C", local, "
 int merk_compare_type_infos(MR_Word x, MR_Word y);
+char *merk_type_name(MR_Word type_info);
 ").

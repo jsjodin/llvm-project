@@ -774,3 +774,72 @@ extern "C" char *merk_string_of(Word typeInfo, Word value) {
   write.Free();
   return out.Take();
 }
+
+namespace {
+
+void PutTypeName(Out &out, Word typeInfo);
+
+// A type's arguments' names, separated by commas.
+void PutTypeNames(Out &out, const Word *arguments, Word count) {
+  for (Word i{0}; i < count; ++i) {
+    if (i != 0) {
+      out.Put(", ");
+    }
+    PutTypeName(out, arguments[i]);
+  }
+}
+
+// A type's name as mmc's type_desc.type_name writes it: qualified by its
+// module, but for a builtin type, a tuple's {A, B}, a function's
+// func(A) = R, or ((func) = R) without arguments.
+void PutTypeName(Out &out, Word typeInfo) {
+  const TypeCtor *ctor;
+  const Word *arguments{nullptr};
+  Word arity{0};
+  if ((typeInfo & kTagMask) == 0) {
+    ctor = reinterpret_cast<const TypeCtor *>(typeInfo);
+  } else {
+    const Word *cell{reinterpret_cast<const Word *>(typeInfo - 1)};
+    ctor = reinterpret_cast<const TypeCtor *>(cell[0]);
+    bool variable{ctor->kind == Tuple || ctor->kind == Closure};
+    arguments = cell + (variable ? 2 : 1);
+    arity = variable ? cell[1] : ctor->arity;
+  }
+  // A descriptor of a builtin type, a tuple or a closure has no module.
+  if (*ctor->module) {
+    out.Put(ctor->module);
+    out.Put('.');
+  }
+  bool function{ctor->kind == Closure && std::strcmp(ctor->name, "func") == 0};
+  if (ctor->kind == Tuple) {
+    out.Put('{');
+    PutTypeNames(out, arguments, arity);
+    out.Put('}');
+  } else if (arity == 0) {
+    out.Put(ctor->name);
+  } else if (function && arity == 1) {
+    out.Put("((func) = ");
+    PutTypeName(out, arguments[0]);
+    out.Put(')');
+  } else if (function) {
+    out.Put("func(");
+    PutTypeNames(out, arguments, arity - 1);
+    out.Put(") = ");
+    PutTypeName(out, arguments[arity - 1]);
+  } else {
+    out.Put(ctor->name);
+    out.Put('(');
+    PutTypeNames(out, arguments, arity);
+    out.Put(')');
+  }
+}
+
+} // namespace
+
+// The name of a type_info's type, as a string, for univ.det_univ_to_type's
+// message.
+extern "C" char *merk_type_name(Word typeInfo) {
+  Out out;
+  PutTypeName(out, typeInfo);
+  return out.Take();
+}
