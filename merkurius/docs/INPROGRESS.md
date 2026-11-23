@@ -8070,6 +8070,20 @@ Sketched for a later stage:
      host fires the record's monitors with the stop's reason. A loop
      between receives runs to its end; the back-edge check (6) waits for
      a need.
+   - *A dead slot stays dead while its kernel lives,* and a kernel ends
+     only with its last live process, so on a GPU where a recovering
+     program always keeps some places alive, every stop takes a slot for
+     good, and every team with a dead slot stops being a worker team
+     (`ReserveWorkers` takes only whole free teams). Reasoned, not run: on
+     the gfx1030's 80 teams with 4 places, a respawned place finds no team
+     for its loops after about 150 stops in one kernel, about 16 s of
+     `compare-recover.sh`'s faults; before that, each respawned place has
+     fewer workers. `kernel` faults give the slots back. The errors of a
+     full kernel say how many slots are dead (they said "they are all
+     running" before, found 2026-11-22). The fix is that a stop returns the
+     wave to its slot loop, which the way out of a process that exceptions
+     need gives (Exceptions, below); decided 2026-11-22 to fix it that way
+     rather than on its own, as stops are rare.
    - *`kernel_ended`,* the injector's `kernel`: every process of a random
      GPU's kernel gets its stop word with that reason, as a trap would end
      them all. The kernel ends when its last process does, and the next
@@ -8109,6 +8123,86 @@ Sketched for a later stage:
 **Decided 2026-11-22:** refusing a down node, not epochs; typed reasons;
 `stop` in step 1; D3 in MC-transport-plan.md, with these steps as its
 milestones; separate programs for the demos.
+
+## Exceptions
+
+Started 2026-11-22, at the user's request; a draft to agree on before any
+code. Today `library/exception.m` only declares, and a library error, such
+as a division by zero, reports the exception and ends the process, or the
+program in `main` (`runtime/exception.cpp`). Nothing can catch one. The
+design document's plan (Code generation, 5) was LLVM's zero-cost tables,
+`invoke` and landing pads; this draft proposes another way, below.
+
+A second reason to do them now: a stopped GPU process leaves a dead slot
+(Failure, step 4), as its wave cannot get back to its slot loop from deep
+in the process's body. A stop that leaves a process as an exception would
+lets it, and a slot is reused at once.
+
+**What Mercury asks** (library reference, exception): `throw(T)`, which is
+`erroneous`; `try`, `try_io`, `try_all` and `finally`, which call a closure
+and give `succeeded(R)`, `failed` or `exception(univ)`, and are
+`cc_multi`, as which exception comes out depends on the order of
+evaluation; `rethrow`; and the errors the library throws, as
+`software_error` and `domain_error`, which code may catch too. An uncaught
+exception ends its process with `failed(Text)`, already the reason today,
+and the program in `main`, as now.
+
+**Proposed: a jump to the innermost `try`, saved by the runtime.**
+- *`try` is a runtime call* that saves where to come back to, as
+  `setjmp` does, pushes it on the process's list of handlers, and calls the
+  closure. Coming back normally, it pops the handler and gives
+  `succeeded` or `failed`; coming back by a throw, it gives `exception`.
+  The save is in the runtime's C, not in Mercury code, so generated code
+  has no call that returns twice, and the statepoint of Mercury's call of
+  `try` relocates its roots as at any call: the frames between the handler
+  and the throw are dropped whole, and hold nothing the collector needs.
+- *`throw` is a runtime call* that takes the innermost handler of the
+  current process and jumps to it, as `longjmp` does, with the univ. With
+  none, the process ends as an uncaught exception does today.
+- *The cost* is a save of the callee-saved registers and a push at each
+  `try`, which is rare; nothing at calls, and nothing in code with no
+  `try`.
+- *What a jump crosses* must hold nothing that needs undoing: the
+  runtime's C++ calls back into Mercury holding no lock and nothing with a
+  destructor, and a `foreign_proc` that may call Mercury is C. A throw out
+  of a parallel or target region ends the program, as the design document
+  says, since libomp's team cannot be left by one thread; the handler list
+  is per process, and a region's worker sees none of the process's.
+- *On a GPU,* the same in the device runtime, for lane 0, which alone runs
+  process code: the save is the stack and frame pointers, the return
+  address and the callee-saved registers, in a small piece of assembly,
+  since the target has no `setjmp`. `RunProcess` keeps a handler of its
+  own below every `try`, so a stop, or an uncaught exception, jumps there
+  and returns to the slot loop. That ends dead slots (Failure, step 4),
+  and lets a GPU process's errors end only the process, as on the host.
+  The piece must not block `norecurse` for `merk_place`, or its stack
+  becomes dynamic again (`CodeGen/process-kernels.m`), so it cannot be
+  inline asm in `merk_place`'s callees.
+
+**Rejected:**
+- *LLVM's zero-cost tables.* AMDGPU has no unwinder, so GPU code would need
+  another way anyway; the runtime's C++ would need its exceptions on; a
+  throw has to unwind frame by frame through `tailcc` frames whose call
+  frame information is unusual (Code generation, 7, the reserve); and a
+  `musttail` call cannot be an `invoke`. What it saves, the cost at `try`,
+  is small, as a `try` is rare.
+- *A flag returned from every call that can throw,* as Swift and Rust's
+  `Result` do. It costs a test after each such call, everywhere, and
+  performance is king.
+
+**Steps, once agreed:**
+1. On the host: `throw`, `try`, `try_io`, `rethrow`, in the library and the
+   runtime; library errors thrown as their exceptions, so that a catch
+   sees them. Tests against mmc's output.
+2. `try_all` and `finally`, then nondeterministic closures in `try_all`.
+3. On a GPU: the save and jump in the device runtime; a GPU process's
+   uncaught exception ends it alone; a stop goes back to the slot loop, and
+   `kDeadSlot` goes.
+4. The univ's text for `failed(Text)` and the report on the standard error,
+   as mmc prints an uncaught exception.
+
+**To decide:** whether exceptions need a flag, as `-fopen-types` is, or
+are always on, since a program that does not call `try` pays nothing.
 
 ## Spawning from a GPU process: later
 
