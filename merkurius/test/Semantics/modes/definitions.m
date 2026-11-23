@@ -1,5 +1,6 @@
 % Errors in inst and mode definitions (reference manual, "Insts, modes,
-% and mode definitions"): reserved names, an inst variable that is not a
+% and mode definitions"): reserved names, of which mmc keeps only >> and is
+% of the manual's mode names, an inst variable that is not a
 % parameter, which leaves the definition undefined, as in mmc, and
 % definitions that expand to themselves.
 %
@@ -13,6 +14,10 @@
 % CHECK: [[@LINE-1]]:9: error: the inst name ground is reserved for the implementation
 :- mode (>>) == in.
 % CHECK: [[@LINE-1]]:10: error: the mode name >> is reserved for the implementation
+% The manual reserves these mode names too, but mmc accepts them.
+:- mode (=) == in.
+:- mode any_pred == in.
+:- mode (func) == out.
 :- inst bad(I) == bound(f(J)).
 % CHECK: [[@LINE-1]]:9: error: inst parameter J is not a parameter of the inst bad/1
 :- mode badm(I) == J >> I.

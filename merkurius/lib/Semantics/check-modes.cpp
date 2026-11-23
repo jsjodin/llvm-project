@@ -101,9 +101,11 @@ bool ReservedInst(llvm::StringRef name) {
       name);
 }
 
+// Of the manual's reserved mode names, only >> and is, as in mmc, which
+// accepts =, any_func, any_pred, func and pred as a mode's name (design
+// document, "Where mmc and the manual disagree", "Reserved mode names").
 bool ReservedMode(llvm::StringRef name) {
-  return llvm::is_contained(
-      {"=", ">>", "any_func", "any_pred", "func", "is", "pred"}, name);
+  return llvm::is_contained({">>", "is"}, name);
 }
 
 std::string Text(const Symbol &symbol) {
