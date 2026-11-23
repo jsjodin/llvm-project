@@ -390,6 +390,9 @@ private:
   }
   void DesugarAtomic(const parser::AtomicGoal &, Goals &out);
   Goal Conjoin(TokenRange, const Goals &);
+  // if C then T else E, with the conjunctions of T and E.
+  Goal NumberedIfThenElse(TokenRange, Goal condition, TokenRange thenRange,
+      const Goals &then, TokenRange otherwiseRange, const Goals &otherwise);
   // As mmc has it, the negation of a conjunction of negations is the
   // disjunction of their goals, and the negation of a negation its goal,
   // which may then bind variables used outside (see the register).
@@ -777,9 +780,8 @@ void ClauseDesugarer::UnifyWith(VarId left, const parser::DataTerm &term,
             ends[1] = state_;
             Merge(start, ends, arms, conditional->tokens);
             next_ = std::move(next);
-            out.push_back(Make<IfThenElse>(conditional->tokens, Number(),
-                condition, Conjoin(conditional->tokens, arms[0]),
-                Conjoin(conditional->tokens, arms[1])));
+            out.push_back(NumberedIfThenElse(conditional->tokens, condition,
+                conditional->tokens, arms[0], conditional->tokens, arms[1]));
           },
           [&](const parser::FieldSelection *selection) {
             Select(left, &selection->term, VarId{0}, selection->fields, range,
@@ -889,6 +891,18 @@ void ClauseDesugarer::UnifyList(VarId left, TokenRange range,
   AddUnify(out, at, range, left,
       Functor{FunctorKind::Cons, nullptr, nullptr, nullptr},
       Save(llvm::ArrayRef<VarId>{head, rest}));
+}
+
+// The arms' conjunctions are numbered before the if-then-else, the else
+// part's first, as they always were: as arguments of one call they would be
+// numbered in whatever order the host compiler evaluates them, GCC's from
+// the right and clang's from the left.
+Goal ClauseDesugarer::NumberedIfThenElse(TokenRange range, Goal condition,
+    TokenRange thenRange, const Goals &then, TokenRange otherwiseRange,
+    const Goals &otherwise) {
+  Goal otherwiseGoal{Conjoin(otherwiseRange, otherwise)};
+  Goal thenGoal{Conjoin(thenRange, then)};
+  return Make<IfThenElse>(range, Number(), condition, thenGoal, otherwiseGoal);
 }
 
 Goal ClauseDesugarer::Conjoin(TokenRange range, const Goals &goals) {
@@ -1023,9 +1037,9 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
             StateMap ends[2]{Branch(ite->then, afterCondition, arms[0]),
                 Branch(ite->otherwise, start, arms[1])};
             Merge(start, ends, arms, ite->tokens);
-            out.push_back(Make<IfThenElse>(ite->tokens, Number(), condition,
-                Conjoin(GoalTokens(ite->then), arms[0]),
-                Conjoin(GoalTokens(ite->otherwise), arms[1])));
+            out.push_back(NumberedIfThenElse(ite->tokens, condition,
+                GoalTokens(ite->then), arms[0], GoalTokens(ite->otherwise),
+                arms[1]));
           },
           [&](const parser::Unification *unification) {
             // mmc: "!S cannot appear as a unification argument".
@@ -1278,9 +1292,9 @@ void ClauseDesugarer::DesugarInto(const parser::DcgGoal &goal, Goals &out) {
             StateMap ends[2]{Branch(ite->then, afterCondition, arms[0]),
                 Branch(ite->otherwise, start, arms[1])};
             Merge(start, ends, arms, ite->tokens);
-            out.push_back(Make<IfThenElse>(ite->tokens, Number(), condition,
-                Conjoin(GoalTokens(ite->then), arms[0]),
-                Conjoin(GoalTokens(ite->otherwise), arms[1])));
+            out.push_back(NumberedIfThenElse(ite->tokens, condition,
+                GoalTokens(ite->then), arms[0], GoalTokens(ite->otherwise),
+                arms[1]));
           },
           [&](const parser::DcgNegation *negation) {
             StateMap start{state_};
@@ -1872,10 +1886,12 @@ void ClauseDesugarer::DesugarLoop(const parser::LoopGoal &loop, Goals &out) {
     }
   }
   visible_ = std::move(visible);
+  // The body's conjunction is numbered before the loop, as it always was
+  // (NumberedIfThenElse).
+  Goal conjoined{Conjoin(GoalTokens(loop.body), body)};
   out.push_back(Make<Loop>(loop.tokens, Number(),
       Save(llvm::ArrayRef<LoopIterator>{iterators}),
-      Save(llvm::ArrayRef<LoopState>{states}),
-      Conjoin(GoalTokens(loop.body), body)));
+      Save(llvm::ArrayRef<LoopState>{states}), conjoined));
 }
 
 const parser::Variable *ClauseDesugarer::ExpansionVar(
