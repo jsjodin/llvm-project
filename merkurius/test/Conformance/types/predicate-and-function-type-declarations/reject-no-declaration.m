@@ -2,9 +2,10 @@
 % Each predicate and function must have a type declaration. merkc infers
 % the types of local ones by default, as mmc does with --infer-types, and
 % reports them with -fno-infer-types (design document, "Type inference").
+% MERKC-FLAGS: -fno-infer-types
 %
-% RUN: not merkc %s -o %t 2>&1 | FileCheck %s --check-prefix=ERRORS --implicit-check-not=error:
-% ERRORS-DAG: {{.*}}:16:{{[0-9]+}}: error:
+% RUN: not merkc -fno-infer-types %s -o %t 2>&1 | FileCheck %s --check-prefix=ERRORS --implicit-check-not=error:
+% ERRORS-DAG: {{.*}}:17:{{[0-9]+}}: error:
 
 :- module reject_no_declaration.
 :- interface.
