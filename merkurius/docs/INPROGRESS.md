@@ -8263,7 +8263,28 @@ and the program in `main`, as now.
      them as before, as nothing catches there yet (step 3).
      `det_univ_to_type`'s message lacks the two types' names, which needs
      a type_info's name (step 4).
-2. `try_all` and `finally`, then nondeterministic closures in `try_all`.
+2. `try_all` and `finally`, done 2026-11-23. A det or semidet goal's
+   `try_all` is a `try`. A multi or nondet goal's calls the runtime's
+   `merk_try_nondet` as a nondet closure, which keeps its TryFrame while
+   the goal gives each solution to the continuation, through
+   `merk_try_nondet_solution`, as (0, value, 0); a throw gives (1, 0, the
+   univ) to the continuation in a tail call, and no more solutions. The
+   continuation is `collect_all`'s, a step of `unsorted_aggregate2`, whose
+   accumulators are in the slots of the frame outside the try, so the
+   solutions before the exception survive the jump, in the order they
+   came, as mmc's do. The entry catches an exception of the continuation
+   as the goal's, so only that step, which cannot throw, may be its
+   continuation; the entry stays private to `exception.m`. The walk steps
+   over its frame by `merk_try_nondet_return`, as over the others.
+   `finally` is a `try_io`, the cleanup, then a `rethrow` of the goal's
+   exception; one of the cleanup's own goes on in its place, as in mmc
+   (`CodeGen/exceptions-all.m`, mmc's output, also with a collection at
+   every allocation).
+   - *Rejected:* a heap cell that the step updates, in a failure-driven
+     loop: the collector's write barrier would have to see it, and the
+     design document already rejects it for `solutions`. A nondet try
+     whose solutions go on to an arbitrary continuation, as a public
+     predicate: the continuation would run under the goal's handler.
 3. On a GPU: the save and jump in the device runtime; a GPU process's
    uncaught exception ends it alone; a stop goes back to the slot loop, and
    `kDeadSlot` goes.

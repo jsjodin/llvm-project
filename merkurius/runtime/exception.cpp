@@ -309,11 +309,99 @@ __asm__("    .text\n"
         "    movq %rax, %rdx\n"
         "    xorl %eax, %eax\n"
         "    xorl %ecx, %ecx\n"
-        MERK_TRY_EPILOGUE(merk_try_io));
+        MERK_TRY_EPILOGUE(merk_try_io)
+
+        // merk_try_nondet: a nondet or multi pred(out), for try_all, called
+        // as a nondet closure, with the closure, the goal, the continuation
+        // and its environment. It calls the goal with merk_try_nondet_solution
+        // as the continuation and, as its environment, the continuation and
+        // the environment it was given, stored above the TryFrame. Each
+        // solution goes on to the continuation as (0, the value, 0), with the
+        // TryFrame still on the list; if the goal throws, the exception goes
+        // as (1, 0, the univ), in a tail call, and the goal gives no more.
+        // The continuation's flag, whether to stop, comes back in al. An
+        // exception that the continuation throws is caught here too, so its
+        // caller's continuation must not throw, as try_all's does not: it
+        // only adds the solution to the list (exception.m).
+        "    .p2align 4\n"
+        "    .globl merk_try_nondet\n"
+        "    .hidden merk_try_nondet\n"
+        "    .type merk_try_nondet, @function\n"
+        "merk_try_nondet:\n"
+        "    pushq %rbp\n"
+        "    movq %rsp, %rbp\n"
+        "    pushq %rbx\n"
+        "    pushq %r12\n"
+        "    pushq %r13\n"
+        "    pushq %r14\n"
+        "    pushq %r15\n"
+        "    subq $56, %rsp\n"
+        "    movq %rsi, %r12\n"
+        "    movq %rdx, 40(%rsp)\n"
+        "    movq %rcx, 48(%rsp)\n"
+        "    movq %rbp, 8(%rsp)\n"
+        "    leaq .Lmerk_try_nondet_resume(%rip), %rax\n"
+        "    movq %rax, 16(%rsp)\n"
+        "    stmxcsr 32(%rsp)\n"
+        "    fnstcw 36(%rsp)\n"
+        "    movq %rsp, %rdi\n"
+        "    callq merk_try_push\n"
+        "    movq %r12, %rdi\n"
+        "    leaq merk_try_nondet_solution(%rip), %rsi\n"
+        "    leaq 40(%rsp), %rdx\n"
+        "    subq $16, %rsp\n"
+        "    callq *(%rdi)\n"
+        "    .globl merk_try_nondet_return\n"
+        "    .hidden merk_try_nondet_return\n"
+        "merk_try_nondet_return:\n"
+        "    leaq -96(%rbp), %rsp\n"
+        "    movl %eax, %r13d\n"
+        "    movq %rsp, %rdi\n"
+        "    callq merk_try_pop\n"
+        "    movl %r13d, %eax\n"
+        "    leaq -40(%rbp), %rsp\n"
+        "    popq %r15\n"
+        "    popq %r14\n"
+        "    popq %r13\n"
+        "    popq %r12\n"
+        "    popq %rbx\n"
+        "    popq %rbp\n"
+        "    ret $8\n"
+        ".Lmerk_try_nondet_resume:\n"
+        "    ldmxcsr 32(%rsp)\n"
+        "    fldcw 36(%rsp)\n"
+        "    movq 40(%rsp), %r10\n"
+        "    movq 48(%rsp), %rdi\n"
+        "    movl $1, %esi\n"
+        "    xorl %edx, %edx\n"
+        "    movq %rax, %rcx\n"
+        "    leaq -40(%rbp), %rsp\n"
+        "    popq %r15\n"
+        "    popq %r14\n"
+        "    popq %r13\n"
+        "    popq %r12\n"
+        "    popq %rbx\n"
+        "    popq %rbp\n"
+        "    jmpq *%r10\n"
+        "    .size merk_try_nondet, .-merk_try_nondet\n"
+
+        // A solution of merk_try_nondet's goal, which goes on to the
+        // continuation in its environment, as a tail call.
+        "    .p2align 4\n"
+        "    .type merk_try_nondet_solution, @function\n"
+        "merk_try_nondet_solution:\n"
+        "    movq %rsi, %rdx\n"
+        "    movq (%rdi), %r10\n"
+        "    movq 8(%rdi), %rdi\n"
+        "    xorl %esi, %esi\n"
+        "    xorl %ecx, %ecx\n"
+        "    jmpq *%r10\n"
+        "    .size merk_try_nondet_solution, .-merk_try_nondet_solution\n");
 
 extern "C" void merk_try_det(void);
 extern "C" void merk_try_semidet(void);
 extern "C" void merk_try_io(void);
+extern "C" void merk_try_nondet(void);
 
 // The entries as closures of nothing captured: a closure's cell has its
 // entry's code, then the layout of what it captured, which a cell outside
@@ -324,6 +412,8 @@ extern "C" const Word merk_try_semidet_closure[2]{
     reinterpret_cast<Word>(&merk_try_semidet), 0};
 extern "C" const Word merk_try_io_closure[2]{
     reinterpret_cast<Word>(&merk_try_io), 0};
+extern "C" const Word merk_try_nondet_closure[2]{
+    reinterpret_cast<Word>(&merk_try_nondet), 0};
 
 #endif
 

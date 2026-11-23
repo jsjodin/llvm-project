@@ -85,8 +85,9 @@ and comparisons of `int`, `uint`, the sized integers and `float` are
 built into code generation, so those modules need no implementation for
 them. The build compiles the modules that have an implementation into
 `libmerkstd.a` (the list is in `CMakeLists.txt`), which the driver links
-into every program. `exception.m` implements `throw`, `try`, `try_io` and
-`rethrow` on the runtime's entries (`runtime/exception.cpp`;
+into every program. `exception.m` implements `throw`, `try`, `try_io`,
+`try_all`, `finally` and `rethrow` on the runtime's entries
+(`runtime/exception.cpp`;
 docs/INPROGRESS.md, Exceptions), and `univ.m` all of its
 predicates and functions, as an existentially typed cell; both are for the
 host only so far. An error the library throws itself, such as math's

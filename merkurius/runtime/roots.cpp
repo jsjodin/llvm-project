@@ -572,12 +572,13 @@ void VisitLoneBases(
 // the frame of their caller.
 #if defined(__x86_64__)
 extern "C" char merk_try_det_return[], merk_try_semidet_return[],
-    merk_try_io_return[];
+    merk_try_io_return[], merk_try_nondet_return[];
 
 bool IsTryReturn(Word address) {
   return address == reinterpret_cast<Word>(merk_try_det_return) ||
       address == reinterpret_cast<Word>(merk_try_semidet_return) ||
-      address == reinterpret_cast<Word>(merk_try_io_return);
+      address == reinterpret_cast<Word>(merk_try_io_return) ||
+      address == reinterpret_cast<Word>(merk_try_nondet_return);
 }
 #else
 bool IsTryReturn(Word) { return false; }

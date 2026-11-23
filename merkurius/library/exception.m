@@ -3,8 +3,7 @@
 % yet; see README.md. A try calls one of the runtime's entries
 % (runtime/exception.cpp) as a closure, which keeps a handler in its frame and
 % calls the goal; a throw jumps to the innermost handler (docs/INPROGRESS.md,
-% Exceptions). try_all, finally and throw_if_near_stack_limits are not
-% written yet.
+% Exceptions). throw_if_near_stack_limits is not written yet.
 
 :- module exception.
 :- interface.
@@ -63,6 +62,8 @@
 
 :- implementation.
 
+:- import_module solutions.
+
 throw(Exception) = _ :-
     throw(Exception).
 
@@ -120,6 +121,117 @@ try_io(Goal::(pred(out, di, uo) is cc_multi), Result::out(cannot_fail),
     try_cc_multi_io_entry(Entry),
     Entry(Goal, Value, Exception, IO0, IO),
     det_result(Value, Exception, Result).
+
+% Declared cc_multi, as which exception comes out, and which solutions
+% before it, may depend on the order of evaluation.
+:- pragma no_determinism_warning(try_all/3).
+:- pragma promise_equivalent_clauses(try_all/3).
+
+try_all(Goal::(pred(out) is det), MaybeException::out,
+        Solutions::out(nil_or_singleton_list)) :-
+    try(Goal, Result),
+    (
+        Result = succeeded(Solution),
+        MaybeException = no,
+        Solutions = [Solution]
+    ;
+        Result = exception(Exception),
+        MaybeException = yes(Exception),
+        Solutions = []
+    ).
+try_all(Goal::(pred(out) is semidet), MaybeException::out,
+        Solutions::out(nil_or_singleton_list)) :-
+    try(Goal, Result),
+    (
+        Result = succeeded(Solution),
+        MaybeException = no,
+        Solutions = [Solution]
+    ;
+        Result = failed,
+        MaybeException = no,
+        Solutions = []
+    ;
+        Result = exception(Exception),
+        MaybeException = yes(Exception),
+        Solutions = []
+    ).
+try_all(Goal::(pred(out) is multi), MaybeException::out, Solutions::out) :-
+    try_multi_entry(Entry),
+    collect_all(
+        ( pred(Solution::out) is nondet :-
+            Entry(Goal, Kind, Value, Exception),
+            all_solution(Kind, Value, Exception, Solution)
+        ), MaybeException, Solutions).
+try_all(Goal::(pred(out) is nondet), MaybeException::out, Solutions::out) :-
+    try_nondet_entry(Entry),
+    collect_all(
+        ( pred(Solution::out) is nondet :-
+            Entry(Goal, Kind, Value, Exception),
+            all_solution(Kind, Value, Exception, Solution)
+        ), MaybeException, Solutions).
+
+    % A solution of a try_all's goal, or its exception, which comes last.
+:- type all_solution(T)
+    --->    all_succeeded(T)
+    ;       all_threw(univ).
+
+    % Kind is 0 for a solution, 1 for the exception.
+:- pred all_solution(int::in, T::in, univ::in, all_solution(T)::out) is det.
+
+all_solution(Kind, Value, Exception, Solution) :-
+    ( if Kind = 0 then
+        Solution = all_succeeded(Value)
+    else
+        Solution = all_threw(Exception)
+    ).
+
+    % The solutions in the order they came, and the exception if one ended
+    % them. The step that adds a solution must not throw, as the runtime's
+    % entry would catch it as the goal's.
+:- pred collect_all(pred(all_solution(T))::in(pred(out) is nondet),
+    maybe(univ)::out, list(T)::out) is cc_multi.
+
+collect_all(Generator, MaybeException, Solutions) :-
+    unsorted_aggregate2(Generator, add_solution, no, MaybeException,
+        [], Reversed),
+    list.reverse(Reversed, Solutions).
+
+:- pred add_solution(all_solution(T)::in, maybe(univ)::in, maybe(univ)::out,
+    list(T)::in, list(T)::out) is det.
+
+add_solution(all_succeeded(Solution), !MaybeException, !Reversed) :-
+    !:Reversed = [Solution | !.Reversed].
+add_solution(all_threw(Exception), _, yes(Exception), !Reversed).
+
+% The cleanup runs whether the goal succeeded or threw; then the goal's
+% exception is thrown again. An exception of the cleanup's own goes on in
+% its place.
+:- pragma promise_equivalent_clauses(finally/6).
+
+finally(Goal::(pred(out, di, uo) is det), Value::out,
+        Cleanup::(pred(out, di, uo) is det), CleanupResult::out,
+        !.IO::di, !:IO::uo) :-
+    promise_equivalent_solutions [Result, !:IO] (
+        try_io(Goal, Result, !IO)
+    ),
+    Cleanup(CleanupResult, !IO),
+    (
+        Result = succeeded(Value)
+    ;
+        Result = exception(_),
+        rethrow(Result)
+    ).
+finally(Goal::(pred(out, di, uo) is cc_multi), Value::out,
+        Cleanup::(pred(out, di, uo) is cc_multi), CleanupResult::out,
+        !.IO::di, !:IO::uo) :-
+    try_io(Goal, Result, !IO),
+    Cleanup(CleanupResult, !IO),
+    (
+        Result = succeeded(Value)
+    ;
+        Result = exception(_),
+        rethrow(Result)
+    ).
 
     % An entry gives the goal's value, which is 0 if it threw, and the
     % exception, which is 0 if it did not, a word that no univ is. Neither is
@@ -222,6 +334,28 @@ semidet_result(Kind, Value, Exception, Result) :-
     Entry = (MR_Word) merk_try_io_closure;
 ").
 
+:- pred try_multi_entry(pred(pred(T), int, T, univ)::
+    out(pred(in(pred(out) is multi), out, out, out) is nondet)) is det.
+:- pragma foreign_proc("C",
+    try_multi_entry(
+        Entry::out(pred(in(pred(out) is multi), out, out, out) is nondet)),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    (void)TypeInfo_for_T;
+    Entry = (MR_Word) merk_try_nondet_closure;
+").
+
+:- pred try_nondet_entry(pred(pred(T), int, T, univ)::
+    out(pred(in(pred(out) is nondet), out, out, out) is nondet)) is det.
+:- pragma foreign_proc("C",
+    try_nondet_entry(
+        Entry::out(pred(in(pred(out) is nondet), out, out, out) is nondet)),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    (void)TypeInfo_for_T;
+    Entry = (MR_Word) merk_try_nondet_closure;
+").
+
 :- pragma foreign_code("C", "
 /* The descriptors of the library's own errors, for the runtime's
    merk_library_error, which throws them as values. index_out_of_bounds's
@@ -245,4 +379,5 @@ void merk_throw(MR_Word univ, MR_Word type_info, MR_Word value)
 extern const MR_Word merk_try_det_closure[];
 extern const MR_Word merk_try_semidet_closure[];
 extern const MR_Word merk_try_io_closure[];
+extern const MR_Word merk_try_nondet_closure[];
 ").
