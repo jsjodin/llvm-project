@@ -18,8 +18,8 @@ namespace merkurius::codegen::mlirgen {
 // Temporary (chunk 1 step 6, docs/INPROGRESS.md): the library's modules not
 // compiled yet, whose types' descriptors each module using them makes.
 static constexpr llvm::StringLiteral kUncompiledLibrary[]{"bool", "builtin",
-    "exception", "int", "int16", "int32", "int64", "int8", "uint", "uint16",
-    "uint32", "uint64", "uint8", "univ"};
+    "int", "int16", "int32", "int64", "int8", "uint", "uint16", "uint32",
+    "uint64", "uint8"};
 
 // A type's arguments in its type_info: a higher-order type's are its
 // arguments' types and then a function's result's, as polymorphism analysis

@@ -85,9 +85,13 @@ and comparisons of `int`, `uint`, the sized integers and `float` are
 built into code generation, so those modules need no implementation for
 them. The build compiles the modules that have an implementation into
 `libmerkstd.a` (the list is in `CMakeLists.txt`), which the driver links
-into every program. An exception the library throws, such as math's
-`domain_error`, is reported by the runtime's `merk_uncaught_exception`
-until exceptions can be caught; on a GPU, the device runtime's
+into every program. `exception.m` implements `throw`, `try`, `try_io` and
+`rethrow` on the runtime's entries (`runtime/exception.cpp`;
+docs/INPROGRESS.md, Exceptions), and `univ.m` all of its
+predicates and functions, as an existentially typed cell; both are for the
+host only so far. An exception the library throws itself, such as math's
+`domain_error`, is not yet a value that `try` catches: the runtime's
+`merk_uncaught_exception` reports it; on a GPU, the device runtime's
 `merk_device_uncaught_exception`, which the C names under `__AMDGPU__`. `write_float` writes as mmc
 does, with the fewest significant digits, from 15 to 17, that read back
 as the same float, and `.0` if that has no fraction or exponent; the

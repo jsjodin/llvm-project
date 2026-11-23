@@ -2942,7 +2942,8 @@ private:
           Text(), DeterminismName(*declared), DeterminismName(*body_.determinism))};
       Report(message, body_.body, *declared);
     } else if (*body_.determinism != *declared &&
-        !body_.procedure->source.empty() && !body_.method) {
+        !body_.procedure->source.empty() && !body_.method &&
+        !checking_.quiet_.contains(body_.procedure->symbol)) {
       // mmc: "warning: determinism declaration could be tighter." Not
       // for an instance's method, whose declaration is its type class's,
       // as in mmc.
@@ -3013,8 +3014,21 @@ static void AnalyseBody(const DeterminismChecking &checking,
 
 std::unique_ptr<DeterminismChecking> CheckDeterminism(
     const parser::TokenSequence &tokens, TypeChecking &types,
-    ModeChecking &modes, parser::Messages &messages, bool analyse) {
+    ModeChecking &modes, parser::Messages &messages, bool analyse,
+    const parser::ParseTree *tree, const NameResolution *resolution) {
   auto result{std::make_unique<DeterminismChecking>()};
+  if (tree && resolution) {
+    for (const parser::Item &item : tree->items) {
+      const auto *pragma{std::get_if<const parser::PredPragma *>(&item)};
+      if (pragma &&
+          (*pragma)->kind == parser::PredPragmaKind::NoDeterminismWarning) {
+        for (const Symbol *symbol :
+            PragmaTargets(resolution->module(), *(*pragma)->pred)) {
+          result->quiet_.insert(symbol);
+        }
+      }
+    }
+  }
   for (const Procedure &procedure : modes.procedures()) {
     BodyBuilder::AddBody(
         *result, modes.ops(), procedure, nullptr, modes.ClausesOf(procedure));

@@ -1,7 +1,10 @@
-% A declaration-only stub of the standard library module exception, for name
-% resolution until the library is written. The declarations are those of
-% the library reference manual (22.01), less those that need modules not
-% stubbed yet; see README.md.
+% The standard library module exception. The declarations are those of the
+% library reference manual (22.01), less those that need modules not stubbed
+% yet; see README.md. A try calls one of the runtime's entries
+% (runtime/exception.cpp) as a closure, which keeps a handler in its frame and
+% calls the goal; a throw jumps to the innermost handler (docs/INPROGRESS.md,
+% Exceptions). try_all, finally and throw_if_near_stack_limits are not
+% written yet.
 
 :- module exception.
 :- interface.
@@ -57,3 +60,172 @@
 :- type near_stack_limits
     --->    near_stack_limits.
 :- impure pred throw_if_near_stack_limits is det.
+
+:- implementation.
+
+throw(Exception) = _ :-
+    throw(Exception).
+
+throw(Exception) :-
+    throw_univ(univ(Exception), Exception).
+
+rethrow(exception(Univ)) :-
+    throw_univ(Univ, univ_value(Univ)).
+
+rethrow(Result) = _ :-
+    rethrow(Result).
+
+    % Jumps to the innermost try with the univ. The value and its type are
+    % for the report if nothing catches it.
+:- pred throw_univ(univ::in, T::in) is erroneous.
+:- pragma foreign_proc("C",
+    throw_univ(Univ::in, Value::in),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    merk_throw(Univ, TypeInfo_for_T, Value);
+").
+
+% Declared cc_multi, as which exception comes out may depend on the order of
+% evaluation; this implementation is det.
+:- pragma no_determinism_warning((try)/2).
+:- pragma no_determinism_warning(try_io/4).
+:- pragma promise_equivalent_clauses((try)/2).
+
+try(Goal::(pred(out) is det), Result::out(cannot_fail)) :-
+    try_det_entry(Entry),
+    Entry(Goal, Value, Exception),
+    det_result(Value, Exception, Result).
+try(Goal::(pred(out) is semidet), Result::out) :-
+    try_semidet_entry(Entry),
+    Entry(Goal, Kind, Value, Exception),
+    semidet_result(Kind, Value, Exception, Result).
+try(Goal::(pred(out) is cc_multi), Result::out(cannot_fail)) :-
+    try_cc_multi_entry(Entry),
+    Entry(Goal, Value, Exception),
+    det_result(Value, Exception, Result).
+try(Goal::(pred(out) is cc_nondet), Result::out) :-
+    try_cc_nondet_entry(Entry),
+    Entry(Goal, Kind, Value, Exception),
+    semidet_result(Kind, Value, Exception, Result).
+
+:- pragma promise_equivalent_clauses(try_io/4).
+
+try_io(Goal::(pred(out, di, uo) is det), Result::out(cannot_fail),
+        IO0::di, IO::uo) :-
+    try_io_entry(Entry),
+    Entry(Goal, Value, Exception, IO0, IO),
+    det_result(Value, Exception, Result).
+try_io(Goal::(pred(out, di, uo) is cc_multi), Result::out(cannot_fail),
+        IO0::di, IO::uo) :-
+    try_cc_multi_io_entry(Entry),
+    Entry(Goal, Value, Exception, IO0, IO),
+    det_result(Value, Exception, Result).
+
+    % An entry gives the goal's value, which is 0 if it threw, and the
+    % exception, which is 0 if it did not, a word that no univ is. Neither is
+    % kept past a test of the exception, before anything is allocated.
+:- pred det_result(T::in, univ::in, exception_result(T)::out(cannot_fail))
+    is det.
+
+det_result(Value, Exception, Result) :-
+    ( if no_exception(Exception) then
+        Result = succeeded(Value)
+    else
+        Result = exception(Exception)
+    ).
+
+    % Kind is 0 if the goal succeeded, 1 if it failed, 2 if it threw.
+:- pred semidet_result(int::in, T::in, univ::in, exception_result(T)::out)
+    is det.
+
+semidet_result(Kind, Value, Exception, Result) :-
+    ( if Kind = 0 then
+        Result = succeeded(Value)
+    else if Kind = 1 then
+        Result = failed
+    else
+        Result = exception(Exception)
+    ).
+
+:- pred no_exception(univ::in) is semidet.
+:- pragma foreign_proc("C",
+    no_exception(Exception::in),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    SUCCESS_INDICATOR = Exception == 0;
+").
+
+    % The runtime's entries, as closures.
+:- pred try_det_entry(pred(pred(T), T, univ)::
+    out(pred(in(pred(out) is det), out, out) is det)) is det.
+:- pragma foreign_proc("C",
+    try_det_entry(Entry::out(pred(in(pred(out) is det), out, out) is det)),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    (void)TypeInfo_for_T;
+    Entry = (MR_Word) merk_try_det_closure;
+").
+
+:- pred try_cc_multi_entry(pred(pred(T), T, univ)::
+    out(pred(in(pred(out) is cc_multi), out, out) is det)) is det.
+:- pragma foreign_proc("C",
+    try_cc_multi_entry(
+        Entry::out(pred(in(pred(out) is cc_multi), out, out) is det)),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    (void)TypeInfo_for_T;
+    Entry = (MR_Word) merk_try_det_closure;
+").
+
+:- pred try_semidet_entry(pred(pred(T), int, T, univ)::
+    out(pred(in(pred(out) is semidet), out, out, out) is det)) is det.
+:- pragma foreign_proc("C",
+    try_semidet_entry(
+        Entry::out(pred(in(pred(out) is semidet), out, out, out) is det)),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    (void)TypeInfo_for_T;
+    Entry = (MR_Word) merk_try_semidet_closure;
+").
+
+:- pred try_cc_nondet_entry(pred(pred(T), int, T, univ)::
+    out(pred(in(pred(out) is cc_nondet), out, out, out) is det)) is det.
+:- pragma foreign_proc("C",
+    try_cc_nondet_entry(
+        Entry::out(pred(in(pred(out) is cc_nondet), out, out, out) is det)),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    (void)TypeInfo_for_T;
+    Entry = (MR_Word) merk_try_semidet_closure;
+").
+
+:- pred try_io_entry(pred(pred(T, io, io), T, univ, io, io)::
+    out(pred(in(pred(out, di, uo) is det), out, out, di, uo) is det)) is det.
+:- pragma foreign_proc("C",
+    try_io_entry(Entry::out(pred(in(pred(out, di, uo) is det), out, out,
+        di, uo) is det)),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    (void)TypeInfo_for_T;
+    Entry = (MR_Word) merk_try_io_closure;
+").
+
+:- pred try_cc_multi_io_entry(pred(pred(T, io, io), T, univ, io, io)::
+    out(pred(in(pred(out, di, uo) is cc_multi), out, out, di, uo) is det))
+    is det.
+:- pragma foreign_proc("C",
+    try_cc_multi_io_entry(Entry::out(pred(in(pred(out, di, uo) is cc_multi),
+        out, out, di, uo) is det)),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    (void)TypeInfo_for_T;
+    Entry = (MR_Word) merk_try_io_closure;
+").
+
+:- pragma foreign_decl("C", local, "
+void merk_throw(MR_Word univ, MR_Word type_info, MR_Word value)
+    __attribute__((noreturn));
+extern const MR_Word merk_try_det_closure[];
+extern const MR_Word merk_try_semidet_closure[];
+extern const MR_Word merk_try_io_closure[];
+").

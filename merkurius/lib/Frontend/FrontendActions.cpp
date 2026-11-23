@@ -769,7 +769,8 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
   }
   std::unique_ptr<semantics::DeterminismChecking> determinism{
       semantics::CheckDeterminism(
-          r.tokens, *types, *modes, r.messages, !earlier)};
+          r.tokens, *types, *modes, r.messages, !earlier, r.tree,
+          r.resolution.get())};
   semantics::CheckUniqueness(
       r.tokens, *modes, *determinism, r.messages, frontend.mmcUniqueness);
   semantics::CheckGpuCode(*r.tree, r.tokens, *modes, *determinism,

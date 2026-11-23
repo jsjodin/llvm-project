@@ -38,6 +38,7 @@
 #include "merkurius/Semantics/insts.h"
 #include "merkurius/Semantics/semantic-form.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include <deque>
 #include <memory>
@@ -202,12 +203,16 @@ private:
   friend class DeterminismAnalyser;
   friend std::unique_ptr<DeterminismChecking> CheckDeterminism(
       const parser::TokenSequence &, TypeChecking &, ModeChecking &,
-      parser::Messages &, bool);
+      parser::Messages &, bool, const parser::ParseTree *,
+      const NameResolution *);
   std::deque<Body> nodes_;
   std::deque<ProcedureBody> bodies_;
   llvm::DenseMap<const Procedure *, const ProcedureBody *> byProcedure_;
   // The determinisms inferred for the procedures declared without one.
   std::map<const Procedure *, parser::Determinism> inferred_;
+  // The predicates and functions of a no_determinism_warning pragma, whose
+  // declarations that could be tighter are not warned of.
+  llvm::DenseSet<const Symbol *> quiet_;
 };
 
 // Whether mode analysis reaches the end of a goal, as in mmc.
@@ -221,10 +226,13 @@ void DumpProcedureBody(llvm::raw_ostream &, const ProcedureBody &,
 
 // The bodies are analysed only with `analyse`: not after errors found
 // before mode analysis, after which mmc stops. After mode errors, those of
-// the other procedures are, as in mmc.
+// the other procedures are, as in mmc. The module's tree and its names give
+// its no_determinism_warning pragmas.
 std::unique_ptr<DeterminismChecking> CheckDeterminism(
     const parser::TokenSequence &, TypeChecking &, ModeChecking &,
-    parser::Messages &, bool analyse = true);
+    parser::Messages &, bool analyse = true,
+    const parser::ParseTree *tree = nullptr,
+    const NameResolution *resolution = nullptr);
 
 } // namespace merkurius::semantics
 #endif // MERKURIUS_SEMANTICS_CHECK_DETERMINISM_H_

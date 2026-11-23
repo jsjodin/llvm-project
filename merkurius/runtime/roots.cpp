@@ -567,6 +567,22 @@ void VisitLoneBases(
 
 // The frames from that of merk_alloc_slow, or false if its caller is not at a
 // safepoint. `visit` takes each frame's safepoint and stack pointer.
+// The return addresses of the entries of a try, which call its goal from a
+// frame of their own (exception.cpp); the walk goes through that frame to
+// the frame of their caller.
+#if defined(__x86_64__)
+extern "C" char merk_try_det_return[], merk_try_semidet_return[],
+    merk_try_io_return[];
+
+bool IsTryReturn(Word address) {
+  return address == reinterpret_cast<Word>(merk_try_det_return) ||
+      address == reinterpret_cast<Word>(merk_try_semidet_return) ||
+      address == reinterpret_cast<Word>(merk_try_io_return);
+}
+#else
+bool IsTryReturn(Word) { return false; }
+#endif
+
 template <typename Visit>
 bool VisitFrames(void *frame, Visit visit) {
   // The callee's frame pointer, and where its return address is: next to
@@ -576,6 +592,12 @@ bool VisitFrames(void *frame, Visit visit) {
   Word *returnAddress{callee + 1};
   bool first{true};
   for (;;) {
+    if (IsTryReturn(*returnAddress)) {
+      // The entry's frame has no reserve, and no roots.
+      callee = reinterpret_cast<Word *>(callee[0]);
+      returnAddress = callee + 1;
+      continue;
+    }
     const Safepoint *safepoint{Find(*returnAddress)};
     if (!safepoint) {
       return !first;

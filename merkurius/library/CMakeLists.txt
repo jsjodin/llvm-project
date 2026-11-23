@@ -37,10 +37,12 @@ install(FILES ${sound_array} DESTINATION lib/merkurius/sound
 # foreign_procs are compiled by clang, so it is built first when it is part
 # of the build.
 set(compiled_modules io float math require pair maybe list solutions
-  process string char array open)
+  process string char array open univ exception)
 # Open types are for the host only (design document, "Open terms as built"), and
-# their module needs the flag.
-set(host_only_modules open)
+# their module needs the flag. Temporary (docs/INPROGRESS.md, Exceptions, step
+# 3): exceptions are for the host until the device runtime has a try's
+# entries.
+set(host_only_modules open univ exception)
 set(compiled_objects)
 foreach(module ${compiled_modules})
   set(object ${CMAKE_CURRENT_BINARY_DIR}/${module}.o)
@@ -100,7 +102,7 @@ if("AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
         "${declaration}")
       string(REGEX MATCHALL "[a-z_]+" names "${declaration}")
       foreach(name ${names})
-        if(NOT name STREQUAL module AND name IN_LIST compiled_modules)
+        if(NOT name STREQUAL module AND name IN_LIST device_modules)
           list(APPEND imported_outputs ${device_dir}/${name}.merkbc)
         endif()
       endforeach()

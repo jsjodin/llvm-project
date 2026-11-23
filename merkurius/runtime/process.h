@@ -39,6 +39,7 @@
 #include "trail.h"
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <pthread.h>
 
 namespace merkurius::runtime {
@@ -52,6 +53,9 @@ struct ArrivalCounts {
 
 struct Monitor;
 struct ChunkLink;
+
+// A try's handler, in its entry's frame (exception.cpp).
+struct TryFrame;
 
 struct Process {
   // The next free byte of its heap and that chunk's end, while it does not
@@ -115,6 +119,8 @@ struct Process {
   // For a GPU process's record, its running process (gpu-processes.cpp),
   // while it runs.
   void *gpuProcess{nullptr};
+  // Its innermost try, or null (exception.cpp).
+  TryFrame *tries{nullptr};
 };
 
 // Guards the timers, and a stack freed until its process has switched away.
@@ -123,6 +129,11 @@ extern pthread_mutex_t schedulerLock;
 // The process this thread runs, or null on a thread that runs none, as a
 // parallel loop's team threads do not.
 Process *CurrentProcess();
+
+// What io.write writes, to a stream, with no allocation on the heap
+// (write.cpp).
+void WriteValue(
+    std::FILE *file, std::uint64_t typeInfo, std::uint64_t value);
 
 // This thread runs `next` from now on, which may be null: the current
 // process's heap goes to its record, and next's comes from its own.

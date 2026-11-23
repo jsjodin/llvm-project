@@ -753,6 +753,17 @@ extern "C" void merk_write(Word typeInfo, Word value, Word flags) {
   write.Free();
 }
 
+// What io.write writes, to a stream: the report of an uncaught exception
+// (exception.cpp), which must not allocate on the process's heap.
+void merkurius::runtime::WriteValue(std::FILE *file, Word typeInfo, Word value) {
+  Out out{file};
+  OpenWrite write;
+  callWrite = &write;
+  WriteTyped(out, value, Resolve(typeInfo, nullptr), kAnyPriority);
+  callWrite = nullptr;
+  write.Free();
+}
+
 // string.string: what io.write writes, as a string.
 extern "C" char *merk_string_of(Word typeInfo, Word value) {
   Out out;

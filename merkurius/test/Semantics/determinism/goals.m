@@ -172,6 +172,12 @@ explicit(X) = X.
 % CHECK: call pred goals.undeclared/1 mode 0: undeclared(Y) [det]
 inferred_callee(Y) :- undeclared(Y).
 
+% One that pragma no_determinism_warning names has no warning, as in mmc.
+:- pred quiet_loose(int::out) is semidet.
+:- pragma no_determinism_warning(quiet_loose/1).
+% CHECK-LABEL: quiet_loose(out) is semidet, inferred det
+quiet_loose(1).
+
 % An instance's method whose clauses are tighter than its type class's
 % declaration has no warning: its declaration is not the instance's, as in
 % mmc.

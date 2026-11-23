@@ -8,7 +8,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module array, bool, exception, int, list.
+:- import_module array, bool, int, list.
 
 main(!IO).
 
@@ -44,9 +44,3 @@ negate(B) = bool.not(B).
 :- func total(array(int)) = int.
 total(A) = array.foldr((func(X, S) = X + S), A, 0).
 % CHECK: not-yet.m:[[@LINE-1]]:12: error: not yet implemented: code generation for calls of array.foldr/3
-
-:- pred thrown(int::out) is det.
-thrown(X) :-
-    X = 1,
-    throw(X).
-% CHECK: not-yet.m:[[@LINE-1]]:5: error: not yet implemented: code generation for calls of exception.throw/1

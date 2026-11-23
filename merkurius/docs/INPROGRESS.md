@@ -8126,12 +8126,13 @@ milestones; separate programs for the demos.
 
 ## Exceptions
 
-Started 2026-11-22, at the user's request; a draft to agree on before any
-code. Today `library/exception.m` only declares, and a library error, such
-as a division by zero, reports the exception and ends the process, or the
-program in `main` (`runtime/exception.cpp`). Nothing can catch one. The
-design document's plan (Code generation, 5) was LLVM's zero-cost tables,
-`invoke` and landing pads; this draft proposes another way, below.
+Started 2026-11-22, at the user's request; agreed the same day, always
+on, with no flag, as a program that does not call `try` pays nothing.
+Before step 1, `library/exception.m` only declared, and a library error,
+such as a division by zero, reported the exception and ended the process,
+or the program in `main` (`runtime/exception.cpp`); nothing could catch
+one. The design document's plan (Code generation, 5) was LLVM's zero-cost
+tables, `invoke` and landing pads; this design takes another way, below.
 
 A second reason to do them now: a stopped GPU process leaves a dead slot
 (Failure, step 4), as its wave cannot get back to its slot loop from deep
@@ -8162,6 +8163,19 @@ and the program in `main`, as now.
 - *The cost* is a save of the callee-saved registers and a push at each
   `try`, which is rare; nothing at calls, and nothing in code with no
   `try`.
+- *No root only in a callee-saved register across a call.* The jump
+  restores the callee-saved registers from the save at `try`, so a root
+  kept only in one would come back with its old address after a
+  collection between the `try` and the throw. Today none is: LLVM's
+  statepoints keep every root in a stack slot, which the collector updates,
+  by their defaults `max-registers-for-gc-values=0` and
+  `fixup-allow-gcptr-in-csr=false`, which merkc does not change. Turning
+  either on for speed would break a catch after a collection; a test
+  collects between a `try` and its throw. Tables would not have this rule,
+  but cost more elsewhere: calls that can throw lose `nounwind`, an
+  `invoke` cannot be `musttail`, and a statepoint on an `invoke` keeps
+  values alive into its landing pad. A throw is a jump, constant time,
+  where tables decode each frame's call frame information.
 - *What a jump crosses* must hold nothing that needs undoing: the
   runtime's C++ calls back into Mercury holding no lock and nothing with a
   destructor, and a `foreign_proc` that may call Mercury is C. A throw out
@@ -8190,19 +8204,61 @@ and the program in `main`, as now.
   `Result` do. It costs a test after each such call, everywhere, and
   performance is king.
 
-**Steps, once agreed:**
+**Steps:**
 1. On the host: `throw`, `try`, `try_io`, `rethrow`, in the library and the
    runtime; library errors thrown as their exceptions, so that a catch
    sees them. Tests against mmc's output.
+   - *Built 2026-11-23, but for the library's errors.* A try calls one of
+     three entries in assembly (`runtime/exception.cpp`, x86-64), as a
+     closure the library gets from the runtime: for a det or cc_multi
+     goal, a semidet or cc_nondet one, and `try_io`'s. So the call is an
+     ordinary closure call, with its safepoint and the tail calling
+     convention, and code generation knows nothing of exceptions. The
+     entry keeps its frame pointer, saves the callee-saved registers and
+     the floating-point control words, puts a `TryFrame` at its stack
+     pointer on the process's list (a thread's own on a team thread that
+     runs no process), and calls the goal. It gives back the value and
+     the exception, a univ, or 0, a word that no univ is, which the
+     library tests before it allocates. `throw` (`merk_throw`) takes the
+     innermost frame, restores the stack and frame pointers and jumps to
+     the entry's resume point, which restores the registers. A frame made
+     at another OpenMP level is not the throw's: a throw that would leave
+     a parallel region ends the program. The collector's walk goes from
+     the goal's frames through the entry's to its caller's, by the
+     entry's return address (`roots.cpp`, `IsTryReturn`). An uncaught
+     exception is reported as mmc reports it, `Software Error: ` and the
+     text for a `software_error`, else the value as `io.write` writes it,
+     and the same text is the reason, `failed(Text)`, that a monitor of
+     the process sees. `univ` is `some [T] univ_cons(T)`, and a
+     conversion back compares type_infos (`merk_compare_type_infos`).
+     Tests: `CodeGen/exceptions.m` (mmc's output, every mode, nested
+     tries, `rethrow`, with a collection at every allocation),
+     `CodeGen/process-exceptions.m` (a try around a receive, on one and on
+     four workers; an uncaught exception ends its process alone), and
+     `CodeGen/exceptions-region.m` (tries in a parallel loop's body; a
+     throw out of the region).
+   - *Found on the way:* a callee in the tail calling convention pops 8
+     bytes above its return address, which its caller gives back, so an
+     entry returns with `ret $8` and calls the goal with 8 unused bytes
+     below its `TryFrame`; without them the first `try` jumped into the
+     stack. `exception` and `univ` were on code generation's list of
+     modules not compiled, so their types had no descriptors and a root
+     of type `univ` could not be described. `pragma
+     no_determinism_warning`, which the library's `try` needs as it is
+     declared `cc_multi` and is `det` here, was read but not applied
+     (`Semantics/determinism/goals.m`).
+   - *Left:* the library's own errors as values: `require`'s
+     `software_error`, the `domain_error`s that code generation's checks
+     throw (`merk.throw_if`), and `array`'s `index_out_of_bounds`. Each is
+     still reported by `merk_uncaught_exception`, so nothing catches it.
+     `det_univ_to_type`'s message lacks the two types' names, which needs
+     a type_info's name (step 4).
 2. `try_all` and `finally`, then nondeterministic closures in `try_all`.
 3. On a GPU: the save and jump in the device runtime; a GPU process's
    uncaught exception ends it alone; a stop goes back to the slot loop, and
    `kDeadSlot` goes.
 4. The univ's text for `failed(Text)` and the report on the standard error,
    as mmc prints an uncaught exception.
-
-**To decide:** whether exceptions need a flag, as `-fopen-types` is, or
-are always on, since a program that does not call `try` pays nothing.
 
 ## Spawning from a GPU process: later
 
