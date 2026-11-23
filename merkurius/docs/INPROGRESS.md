@@ -8629,6 +8629,22 @@ tested shows.
    inference. The coverage build needs its precompiled headers deleted
    when build-merk's clang changes commit, as they record its version.
 
+   *Modes, done (2026-11-23):* every section has tests. Bugs fixed as
+   found:
+   - reserved mode names follow mmc, which keeps only `>>` and `is` of
+     the manual's list (register, "Reserved mode names");
+   - a mode declaration whose `with_inst` inst is a function's is a
+     function's mode;
+   - a bare inst parameter is constrained to ground, or to its `<=`
+     constraint, so it can be inconsistent with another occurrence;
+   - the oracle took mmc's capitalised "Warning:" lines for errors.
+
+   Coverage with the conformance tests alone (83 then): check-modes.cpp
+   66% of lines. Of its 20 unreached messages, the chapter's ten now
+   have `reject-` tests; the rest are foreign_procs, determinism
+   declarations, modules, loops and mode inference's limit. Mode errors
+   inside clauses are built as text, so this count does not see them.
+
    *Subtypes have no code generation yet* (`nyi-` tests in
    `types/subtypes/`). The user put it after the fixes to existing
    features (2026-11-23). The design worked out:
