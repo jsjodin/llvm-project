@@ -1,7 +1,7 @@
 % MANUAL: Subtypes
 % The manual's subtypes: one that omits constructors, one that replaces an
-% argument's type with a subtype, a polymorphic one of list, and the
-% mutually recursive bipartite graph.
+% argument's type with a subtype, a polymorphic one of list, one of a
+% higher-order constructor, and the mutually recursive bipartite graph.
 % Terms convert to the supertype with coerce, and a subtype's values compare
 % as its base type's.
 %
@@ -33,6 +33,13 @@
 
 :- type non_empty_list(T) =< list(T)
     --->    [T | list(T)].
+
+:- type task
+    --->    create(pred(int::in, io::di, io::uo) is det)
+    ;       delete(pred(int::in, io::di, io::uo) is det).
+
+:- type create_task =< task
+    --->    create(pred(int::in, io::di, io::uo) is det).
 
 :- type source_id == int.
 
@@ -67,6 +74,8 @@ main(!IO) :-
     L = coerce(NE) : list(int),
     io.write_line(list.length(L) : int, !IO),
     io.write_line(head(NE), !IO),
+    T = create(show) : create_task,
+    run(coerce(T), !IO),
     G = logical_or(and_source(1),
         logical_and_list(or_source(2), or_source(3), or_source(4), []))
         : binary_or_node,
@@ -85,6 +94,14 @@ main(!IO) :-
 
 :- func head(non_empty_list(T)) = T.
 head([X | _]) = X.
+
+:- pred show(int::in, io::di, io::uo) is det.
+show(N, !IO) :-
+    io.format("create %d\n", [i(N)], !IO).
+
+:- pred run(task::in, io::di, io::uo) is det.
+run(create(P), !IO) :- P(7, !IO).
+run(delete(P), !IO) :- P(8, !IO).
 
 :- func sources(or_node) = int.
 sources(or_source(N)) = N.

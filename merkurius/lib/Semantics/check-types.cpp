@@ -533,6 +533,11 @@ private:
   // on a cycle of them, which are reported when their expansion ends.
   llvm::SetVector<const Symbol *> expanding_;
   llvm::DenseSet<const Symbol *> circular_;
+  // The constructor's argument being converted, if it is a higher-order
+  // type, which alone may have modes and a determinism; and those reported
+  // for having them elsewhere.
+  const parser::HigherOrderType *instsAllowed_{nullptr};
+  llvm::DenseSet<const parser::HigherOrderType *> instsReported_;
   // The hidden equivalences' bodies, and the types seen through.
   llvm::DenseMap<const Symbol *, const Type *> hiddenBodies_;
   llvm::DenseMap<const Type *, const Type *> seenThrough_;
@@ -688,6 +693,18 @@ const Type *TypeChecker::Convert(
             return types_.Tuple(elements);
           },
           [&](const parser::HigherOrderType *higher) -> const Type * {
+            // Reference manual, "Combined higher-order types and insts".
+            // mmc: "the type ... contains higher order inst information,
+            // but this is not allowed in a predicate's argument".
+            bool insts{higher->determinism.has_value() ||
+                (higher->result && higher->result->mode) ||
+                llvm::any_of(higher->arguments,
+                    [](const parser::TypeAndMode *a) { return a->mode; })};
+            if (insts && higher != instsAllowed_ &&
+                instsReported_.insert(higher).second) {
+              messages_->Say(Source(higher->tokens),
+                  "a higher-order type with modes or a determinism is allowed only as an argument of a constructor"_err_en_US);
+            }
             llvm::SmallVector<const Type *, 4> arguments;
             for (const parser::TypeAndMode *argument : higher->arguments) {
               arguments.push_back(Convert(argument->type, names));
@@ -1088,7 +1105,11 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
     names.closed = true;
     llvm::SmallVector<const Type *, 4> fields;
     for (const parser::ConstructorArg *argument : (*constructor)->arguments) {
+      const auto *higher{
+          std::get_if<const parser::HigherOrderType *>(&argument->type)};
+      instsAllowed_ = higher ? *higher : nullptr;
       fields.push_back(Convert(argument->type, names));
+      instsAllowed_ = nullptr;
     }
     llvm::SmallVector<ClassConstraint, 2> existentialConstraints;
     for (const parser::ClassConstraint *c : (*constructor)->constraints) {

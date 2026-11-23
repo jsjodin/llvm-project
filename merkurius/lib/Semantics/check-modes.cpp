@@ -211,6 +211,11 @@ public:
   // manual, "Creating higher-order terms"). None if they have inst
   // variables.
   std::optional<std::vector<ArgMode>> LambdaModes(const Lambda &);
+  // The higher-order inst that the type of a constructor's argument
+  // declares, as `job(pred(int::out, io::di, io::uo) is det)` does
+  // (reference manual, "Combined higher-order types and insts"); null if
+  // its type declares none.
+  const Inst *DeclaredInst(const Symbol &constructor, std::size_t argument);
   // Whether a clause is one of a procedure's: it is if it is for every
   // mode, or for the procedure's; one whose modes are none of its
   // predicate's is reported, and is for every mode, as in mmc.
@@ -333,6 +338,9 @@ private:
   llvm::DenseSet<const Symbol *> cyclic_;
   // The declarations' inst variable scopes so far.
   unsigned scopes_{0};
+  // DeclaredInst's, by constructor and argument.
+  llvm::DenseMap<std::pair<const Symbol *, std::size_t>, const Inst *>
+      declaredInsts_;
 };
 
 //===----------------------------------------------------------------------===//
@@ -643,6 +651,44 @@ std::optional<std::vector<ArgMode>> ModeChecker::LambdaModes(
     }
   }
   return modes;
+}
+
+const Inst *ModeChecker::DeclaredInst(
+    const Symbol &constructor, std::size_t argument) {
+  auto [it, inserted]{declaredInsts_.try_emplace({&constructor, argument})};
+  if (!inserted) {
+    return it->second;
+  }
+  const auto *declaration{
+      std::get_if<const parser::Constructor *>(&constructor.declaration)};
+  if (!declaration || argument >= (*declaration)->arguments.size()) {
+    return nullptr;
+  }
+  const auto *higher{std::get_if<const parser::HigherOrderType *>(
+      &(*declaration)->arguments[argument]->type)};
+  if (!higher || !(*higher)->determinism) {
+    return nullptr;
+  }
+  // Every argument has a mode where the type has a determinism; a
+  // function's result too.
+  std::vector<const parser::TypeAndMode *> parts{
+      (*higher)->arguments.begin(), (*higher)->arguments.end()};
+  if ((*higher)->result) {
+    parts.push_back((*higher)->result);
+  }
+  InstScope scope;
+  scope.id = ++scopes_;
+  std::vector<ArgMode> modes;
+  for (const parser::TypeAndMode *part : parts) {
+    if (!part->mode) {
+      return nullptr;
+    }
+    modes.push_back(Convert(*part->mode, scope));
+  }
+  const Inst *inst{insts_.HigherOrder(
+      (*higher)->kind, false, modes, *(*higher)->determinism)};
+  declaredInsts_[{&constructor, argument}] = inst;
+  return inst;
 }
 
 void ModeChecker::DefineInst(const Symbol &symbol) {
@@ -1649,6 +1695,8 @@ private:
   // The insts after a field access or update, that of the term and those
   // of the result and the value, as the unifications it stands for give
   // them, from those before it.
+  const Inst *Declared(
+      const Symbol *constructor, std::size_t argument, const Inst *);
   void FieldInsts(const Symbol &, llvm::ArrayRef<VarId> arguments,
       llvm::ArrayRef<const Inst *> before, InstMap &, const Live &);
   // An error if the modes clobber an argument that is used after the
@@ -3310,6 +3358,25 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
             Name(var) + " has inst " + InstText(arguments.front()),
         {var});
   }
+  if (ops_.IsFree(a) && symbol && symbol->kind == SymbolKind::Constructor) {
+    // An argument whose type declares a higher-order inst must have it
+    // (reference manual, "Combined higher-order types and insts"); a free
+    // one waits until it is bound. mmc: "mode error in unification of
+    // `HeadVar__1' and `bad.job(V_2)'".
+    for (std::size_t i{0}; i < unify.arguments.size(); ++i) {
+      const Inst *declared{declarations_.DeclaredInst(*symbol, i)};
+      VarId var{unify.arguments[i]};
+      if (declared && !ops_.Matches(arguments[i], declared, TypeOf(var))) {
+        return Error(goal,
+            "mode error in the unification of " + Name(x) + " and " +
+                TermText(*form_, unify) + ": " + Name(var) + " has inst " +
+                InstText(arguments[i]) + ", but the type of argument " +
+                std::to_string(i + 1) + " of " + symbol->name.str() +
+                " declares inst " + InstText(declared),
+            {var});
+      }
+    }
+  }
   if (ops_.IsFree(a)) {
     // A construction. An argument with free parts that is used again
     // would be aliased to the new term's, which mode analysis does not
@@ -3467,7 +3534,7 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
       sharing |= part != (*parts)[i];
       (*parts)[i] = part;
     }
-    map[var] = parts ? (*parts)[i] : insts_.NotReached();
+    map[var] = parts ? Declared(symbol, i, (*parts)[i]) : insts_.NotReached();
   }
   // An argument bound where X's is too is tested against a fresh variable
   // for X's, as in mmc, so X learns only the functor there, not the
@@ -3510,6 +3577,21 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
   modes.functor = functor;
   last_ = Start(unify.tokens);
   return Ok();
+}
+
+// A ground argument extracted from a term, of a type that declares a
+// higher-order inst, has that inst (reference manual, "Combined
+// higher-order types and insts").
+const Inst *ProcedureChecker::Declared(
+    const Symbol *constructor, std::size_t argument, const Inst *inst) {
+  if (!constructor ||
+      (constructor->kind != SymbolKind::Constructor &&
+          constructor->kind != SymbolKind::Field) ||
+      ops_.Plain(inst)->kind != InstKind::Ground) {
+    return inst;
+  }
+  const Inst *declared{declarations_.DeclaredInst(*constructor, argument)};
+  return declared ? declared : inst;
 }
 
 // A field access is a deconstruction of the term by the field's constructor
@@ -3573,7 +3655,7 @@ void ProcedureChecker::FieldInsts(const Symbol &symbol,
     map[term] = learned;
   }
   if (!update) {
-    map[result] = kept[index];
+    map[result] = Declared(&symbol, index, kept[index]);
     return;
   }
   VarId value{arguments[1]};
