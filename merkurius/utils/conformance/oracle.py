@@ -185,8 +185,10 @@ def mmc_errors(test, mmc):
         lines = set()
         for number, text in messages:
             joined = " ".join(text)
-            if re.search(r"\berror\b", joined) or not re.search(
-                    r"\bwarning\b", joined):
+            # mmc writes "Error:" and "Warning:"; a message that is
+            # neither, as "In clause for ...", leads to an error.
+            if re.search(r"\berror\b", joined, re.I) or not re.search(
+                    r"\bwarning\b", joined, re.I):
                 lines.add(number)
         return lines
 
