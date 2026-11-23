@@ -89,3 +89,24 @@
 % CHECK-NEXT: | | | | | arguments:
 % CHECK-NEXT: | | | | | | NamedMode
 % CHECK-NEXT: | | | | | | | name: SymName in
+
+% A function declaration with a type has no result of its own: the type's
+% is the function's (reference manual, "Predicate and function type
+% declarations").
+:- type adder == (func(int) = int).
+:- func add(int) : adder.
+% CHECK:      | | PredDecl
+% CHECK-NEXT: | | | kind: Function
+% CHECK-NEXT: | | | universalVars:
+% CHECK-NEXT: | | | existentialVars:
+% CHECK-NEXT: | | | purity: Pure
+% CHECK-NEXT: | | | name: SymName add
+% CHECK-NEXT: | | | arguments:
+% CHECK-NEXT: | | | | TypeAndMode
+% CHECK-NEXT: | | | | | type: NamedType
+% CHECK-NEXT: | | | | | | name: SymName int
+% CHECK-NEXT: | | | | | | arguments:
+% CHECK-NEXT: | | | | | mode: none
+% CHECK-NEXT: | | | result: none
+% CHECK-NEXT: | | | withType: NamedType
+% CHECK-NEXT: | | | | name: SymName adder

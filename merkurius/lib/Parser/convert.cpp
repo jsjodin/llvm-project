@@ -678,7 +678,10 @@ public:
                         : Apply(predicateHead, *body.head, state)};
     ok &= head.has_value();
     const TypeAndMode *result{nullptr};
-    if (isFunction && !body.result) {
+    // With a type, as `:- func f(int) : foldl_func(T, U)`, the result is
+    // that type's (reference manual, "Predicate and function type
+    // declarations").
+    if (isFunction && !body.result && !body.withType) {
       SayExpected(state, StripParentheses(*body.head),
           "a function's arguments and result, as in 'f(int) = int'");
       ok = false;
