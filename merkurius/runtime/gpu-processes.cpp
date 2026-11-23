@@ -1062,6 +1062,24 @@ bool Free(const Place &place, std::uint64_t slot) {
   return !place.processes[slot] && place.owners[slot] == 0;
 }
 
+// For an error that no slot or team is free: how many of the kernel's slots
+// are dead, those of stopped processes, if any. They are free again only
+// when the kernel ends, after its last live process.
+const char *DeadSlotsNote(const Place &place, char *note, std::size_t size) {
+  std::uint64_t dead{0};
+  for (std::uint64_t i{0}; i < place.table->slots; ++i) {
+    dead += place.owners[i] == kDeadSlot;
+  }
+  if (dead == 0) {
+    return "";
+  }
+  std::snprintf(note, size,
+      "; %llu of its slots are those of stopped processes, which are free "
+      "again only when the kernel ends, after its last process",
+      static_cast<unsigned long long>(dead));
+  return note;
+}
+
 // Reserves as worker teams for the process in `slot` the teams of the kernel
 // whose slots are all free, other than the process's own: every one, or with
 // a share of K, the first of them up to a K'th of the kernel's teams, at
@@ -1148,15 +1166,17 @@ const char *TakeSlot(const Gpu &gpu, const LoadedImage &image, const char *kind,
       if (loops) {
         workers = ReserveWorkers(*place, slot, gpuPlace.share);
         if (workers == 0) {
-          char *text{static_cast<char *>(Malloc(512))};
-          std::snprintf(text, 512,
+          char note[160];
+          char *text{static_cast<char *>(Malloc(640))};
+          std::snprintf(text, 640,
               "GPU %d has no team for the loops of the process kind %s: the "
               "module %s's kernel there has %llu teams, and none is free of "
               "processes, which a kind that runs loops across teams takes as "
-              "its workers",
+              "its workers%s",
               gpu.number, kind, image.module,
               static_cast<unsigned long long>(
-                  place->table->slots / place->teamSlots));
+                  place->table->slots / place->teamSlots),
+              DeadSlotsNote(*place, note, sizeof note));
           return text;
         }
       }
@@ -1174,12 +1194,17 @@ const char *TakeSlot(const Gpu &gpu, const LoadedImage &image, const char *kind,
       return nullptr;
     }
   }
-  char *text{static_cast<char *>(Malloc(512))};
-  std::snprintf(text, 512,
+  // A stopped process's slot is dead until the kernel ends (place.h,
+  // kPlaceDead), so "all running" would not be true.
+  char note[160];
+  const char *dead{DeadSlotsNote(*place, note, sizeof note)};
+  char *text{static_cast<char *>(Malloc(640))};
+  std::snprintf(text, 640,
       "GPU %d has no room for another process: the module %s's kernel there "
-      "runs %llu processes at once, and they are all running",
+      "runs %llu processes at once, and %s%s",
       gpu.number, image.module,
-      static_cast<unsigned long long>(place->table->slots));
+      static_cast<unsigned long long>(place->table->slots),
+      *dead ? "no slot is free" : "they are all running", dead);
   return text;
 }
 
