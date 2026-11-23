@@ -12,7 +12,8 @@
 % SCHEDULE-COUNT-6:{{[0-9]+}} fail job {{[0-9]+}}
 % SCHEDULE-NOT:{{.}}
 %
-% The replay injects the same faults at the same times.
+% The replay injects the same faults at the same times, or waits for a
+% restart that comes later than in the first run.
 % RUN: env MERK_FAULTS="replay=%t.schedule log=%t.replayed" %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: tail -n +2 %t.schedule | diff - %t.replayed
 %
@@ -34,12 +35,14 @@
 % RUN: not env MERK_FAULTS="replay=%t.schedule mtbf=10" %t 2>&1 | FileCheck %s --check-prefix=REPLAY
 % REPLAY:Merkurius runtime: MERK_FAULTS: replay takes no other settings but log
 
-% OUTPUT:failed: injected
-% OUTPUT-NEXT:failed: injected
-% OUTPUT-NEXT:failed: injected
-% OUTPUT-NEXT:failed: injected
-% OUTPUT-NEXT:failed: injected
-% OUTPUT-NEXT:failed: injected
+% A fault may hit a restarted worker before its supervisor monitors it, which
+% the monitor reports as noproc, as Erlang's does.
+% OUTPUT:failed: {{injected|noproc}}
+% OUTPUT-NEXT:failed: {{injected|noproc}}
+% OUTPUT-NEXT:failed: {{injected|noproc}}
+% OUTPUT-NEXT:failed: {{injected|noproc}}
+% OUTPUT-NEXT:failed: {{injected|noproc}}
+% OUTPUT-NEXT:failed: {{injected|noproc}}
 % OUTPUT-NEXT:the bystander: killed
 % OUTPUT-NOT:{{.}}
 

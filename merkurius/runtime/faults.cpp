@@ -38,7 +38,8 @@
 // with the GPU's number. Replay
 // repeats the times and the targets, which name the same processes and
 // peers in a program that spawns and connects in the same order; it does
-// not repeat the threads' interleaving.
+// not repeat the threads' interleaving. A process not spawned yet at its
+// fault's time is waited for; one that has ended is no target.
 //
 //===----------------------------------------------------------------------===//
 
@@ -218,7 +219,6 @@ void Record(std::int64_t at, const char *line) {
   long long milliseconds{static_cast<long long>((at - started) / 1000000)};
   if (settings.log[0]) {
     std::fprintf(schedule, "%lld %s\n", milliseconds, line);
-    std::fflush(schedule);
   } else {
     std::fprintf(
         stderr, "Merkurius runtime: fault: %lld %s\n", milliseconds, line);
@@ -265,6 +265,21 @@ bool FailOne(std::uint64_t &state, int kind, std::uint64_t number,
   }
   pthread_mutex_unlock(&lock);
   return chosen != nullptr;
+}
+
+// Waits until the process of the kind with the number has been spawned, for
+// a replay whose program runs slower than the one that wrote the schedule:
+// a supervisor's restart may come after the fault's time.
+void AwaitSpawned(int kind, std::uint64_t number) {
+  for (;;) {
+    pthread_mutex_lock(&lock);
+    bool spawnedYet{spawned[kind] >= number};
+    pthread_mutex_unlock(&lock);
+    if (spawnedYet) {
+      return;
+    }
+    SleepUntil(Now() + 1000000);
+  }
 }
 
 bool PartitionOne(std::uint64_t &state, char (&line)[2 * kNameBytes]) {
@@ -372,6 +387,9 @@ void Replay() {
       for (int i{0}; i < settings.kindCount && kind < 0; ++i) {
         kind = std::strcmp(settings.kinds[i], name) == 0 ? i : -1;
       }
+      if (kind >= 0) {
+        AwaitSpawned(kind, number);
+      }
       done = kind >= 0 && FailOne(unused, kind, number, line);
       if (!done) {
         std::snprintf(line, sizeof line, "fail %s %llu", name, number);
@@ -470,6 +488,9 @@ void StartFaults() {
     if (!schedule) {
       Fail("MERK_FAULTS: cannot write the schedule ", settings.log);
     }
+    // Unbuffered: exit flushes every stream without its lock, and so wrote a
+    // line that the injector was flushing at the same time a second time.
+    std::setvbuf(schedule, nullptr, _IONBF, 0);
   }
   if (!settings.replay[0]) {
     char header[64];
@@ -477,7 +498,6 @@ void StartFaults() {
         static_cast<unsigned long long>(settings.seed));
     if (schedule) {
       std::fprintf(schedule, "%s\n", header);
-      std::fflush(schedule);
     } else {
       std::fprintf(stderr, "Merkurius runtime: fault: %s\n", header);
     }
