@@ -8040,10 +8040,19 @@ Sketched for a later stage:
    ticks lose it, so it ends in the fence; one that heals is not possible
    with refusing a lost node's id. `kernel` waits for step 4.
 4. **D1 at host places, then GPU places:** the stop flag at polls, a
-   kernel's processes ended together, `kernel_ended`. Built 2026-11-22;
-   tested at host places, and the GPU runs wait for the user's leave
+   kernel's processes ended together, `kernel_ended`. Built 2026-11-22,
+   and passing at host places and on the gfx1030
    (`CodeGen/process-stop-places-gpu.test`,
-   `Benchmarks/mandel-recover-gpu.test`, `compare-recover.sh`).
+   `Benchmarks/mandel-recover-gpu.test`). On the GPU, 40 frames of 512
+   pixels square kept mandel.m's checksum with 8 places stopped, and with
+   3 kernel ends of 4 places each. All 118 GPU tests pass, one at a time
+   (439 s). Step 4's code first hung `process-library-errors-gpu.test`,
+   though it never ran: it moved the code of `merk_device_place`, whose
+   lanes 1-31 waited for lane 0's `RunProcess`, which a process that
+   never ends made noreturn. The fix went into the commit that brought
+   the wait, with `CodeGen/process-endless.m`. Done: `compare-recover.sh`
+   finds no cost in monitoring places or in losing one, and about 8 ms in
+   an ended kernel (design document, Measurements, Recovering places).
    - *A GPU stop ends one process, not its kernel,* unlike (4) above.
      `PlaceSlot` gains a stop word, which the host sets to the process's
      incarnation, so that it never hits the slot's next process. The

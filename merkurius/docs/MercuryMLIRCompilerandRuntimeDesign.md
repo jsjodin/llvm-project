@@ -6697,6 +6697,35 @@ Instructions are callgrind's, for 10 rounds, per element of a round.
 - Building the two lists is now most of the time: 140 instructions an element
   of a round, for two elements.
 
+### Recovering places
+
+`benchmarks/mandel/compare-recover.sh` on the gfx1030 with
+`LIBOMPTARGET_AMDGPU_CU_MASK=0-39`, 2026-11-22, at 9d585b5a6cc2, Firefox
+closed. 40 frames of 2048 pixels square in tiles of 128 (10,240 tiles), on 4
+places, chunks of 4 tiles; the median of 5 rounds, each round's faults from
+its seed, with a mean time between failures of 100 ms. Every run gave the
+same iterations and checksum as `mandel-places.m` under the pool policy.
+
+| Program | Seconds | Giterations/s | Places lost | Tiles given back |
+| --- | --- | --- | --- | --- |
+| `mandel-places.m`, pool | 4.025 | 33.24 | | |
+| `mandel-recover.m`, no faults | 4.023 | 33.26 | 0 | 0 |
+| Places fail (`fail=order`) | 4.019 | 33.30 | 38 | 120 |
+| Kernels end (`kernel`) | 4.355 | 30.72 | 144 | 516 |
+
+- **Keeping each place's chunk and monitoring the places costs nothing
+  measurable**: 4.023 s against 4.025 s.
+- **A lost place costs nothing measurable either.** 34 to 42 places failed in
+  a run, and their 96 to 136 tiles, about 1.2% of the work, were stepped
+  again. Within a round the three programs were within 0.4% of each other:
+  the tiles given back fit in the time that the other places spend on a
+  frame's last chunks.
+- **An ended kernel costs about 8 ms.** 39 to 45 kernels ended in a run, each
+  with its 4 places, and the runs took 4.03 to 4.56 s, against 4.02 s with
+  no faults. Each end gives back about 5% of the work in all, and a new
+  kernel must be launched and its teams started before its places ask for
+  tiles.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.
