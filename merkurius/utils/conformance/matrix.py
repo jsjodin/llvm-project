@@ -107,7 +107,8 @@ def scan(dirs):
                         m = re.match(r"[%#] KNOWN-BUG:\s*(.*\S)", line)
                         if m:
                             known.append(m.group(1))
-                conformance = "/Conformance/" in path.replace(os.sep, "/")
+                conformance = "/Conformance/" in os.path.abspath(path).replace(
+                    os.sep, "/")
                 kind = name.split("-", 1)[0] if conformance else "other"
                 yield path, kind, manual, design, known, conformance
 
@@ -130,7 +131,7 @@ def main():
         print("\n".join(extract_sections(args.extract_sections)))
         return
     sections = read_sections(args.sections)
-    known = {name for _, name in sections}
+    nodes = {name for _, name in sections}
     chapter = chapters_of(sections)
     counts = collections.defaultdict(collections.Counter)
     designs = collections.defaultdict(collections.Counter)
@@ -140,7 +141,7 @@ def main():
         for reason in known:
             knowns.append((path, reason))
         for name in manual:
-            if name not in known:
+            if name not in nodes:
                 problems.append("%s: no manual node `%s'" % (path, name))
                 continue
             counts[name][kind] += 1

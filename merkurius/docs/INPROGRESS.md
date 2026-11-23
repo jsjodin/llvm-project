@@ -8606,6 +8606,36 @@ tested shows.
    exceptions, semantics, impurity, foreign language interface, pragmas,
    trace goals, solver types, implementation-dependent; then the library,
    module by module. Each difference triaged as it is found.
+
+   *Types, so far (2026-11-23):* the builtin types, discriminated unions,
+   equivalence, abstract and subtypes. Their bugs were fixed as found:
+   coerce to a supertype of another module, reserved type names, an
+   abstract type with no definition, and a cycle of equivalences reported
+   once for each of its types. Left: predicate and function type
+   declarations, field access and the standard ordering, then the
+   chapter's coverage. Combined higher-order types and insts, which mode
+   analysis does not implement, are fixed next, before the rest.
+
+   *Subtypes have no code generation yet* (`nyi-` tests in
+   `types/subtypes/`). The user put it after the fixes to existing
+   features (2026-11-23). The design worked out:
+   - A subtype's values have its base type's representation, so a coerce
+     costs nothing. `Represent` of a subtype is that of its base type,
+     the chain of supertypes followed and their arguments substituted.
+   - A construction or deconstruction uses the base type's constructor
+     and cell fields. A value whose term type differs from the field's,
+     as `list(citrus)` stored where the base has `list(fruit)`, converts
+     through its word: the two have one layout.
+   - A coerce is a construction, the value converted to the result's
+     term type, or a test, comparing in the result's type.
+   - A subtype keeps a descriptor of its own, so `type_of` names it, but
+     with its base type's term, functors and unify and compare entries,
+     as lowering pairs a descriptor's functors with its term's layout by
+     position. Its values unify and compare as the base type's, as the
+     manual says.
+   - The type checker computes the supertype of every subtype of the
+     modules loaded, not only those it needed, so that code generation
+     can follow an imported subtype's chain.
 3. The extensions, in parallel with step 2 rather than after it, as most
    of the code written since 2026-11 is theirs: processes and monitors,
    do loops and OpenMP, GPU processes, open types, flat records,
