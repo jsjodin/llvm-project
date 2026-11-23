@@ -232,6 +232,14 @@ private:
   const Type *Convert(const parser::Type &, TypeVarNames &);
   const Type *Expand(const Symbol &, llvm::ArrayRef<const Type *> arguments,
       parser::CharBlock where);
+  // After checking, the types of the results with each imported abstract
+  // type that hides an equivalence replaced by the type it is
+  // (NameResolution::HiddenEquivalence).
+  void SeeThroughHidden();
+  const Type *SeeThrough(const Type *);
+  llvm::ArrayRef<const Type *> SeeThrough(llvm::ArrayRef<const Type *>);
+  llvm::ArrayRef<ClassConstraint> SeeThrough(llvm::ArrayRef<ClassConstraint>);
+  void SeeThrough(Signature &);
   const Signature *SignatureOf(const Symbol &);
   std::optional<Signature> MakeSignature(const Symbol &);
   Signature SavedSignature(parser::PredOrFunc, parser::Purity,
@@ -521,6 +529,9 @@ private:
   Symbol &error_{result_.error_};
   llvm::DenseMap<const Symbol *, const Type *> equivalences_;
   llvm::DenseSet<const Symbol *> expanding_;
+  // The hidden equivalences' bodies, and the types seen through.
+  llvm::DenseMap<const Symbol *, const Type *> hiddenBodies_;
+  llvm::DenseMap<const Type *, const Type *> seenThrough_;
 
   // The clause being checked.
   const ClauseForm *clause_{nullptr};
@@ -721,6 +732,119 @@ const Type *TypeChecker::Expand(const Symbol &symbol,
   return types_.Substitute(it->second, [&](unsigned var) {
     return var < arguments.size() ? arguments[var] : types_.Named(error_, {});
   });
+}
+
+// An abstract type is distinct from the type it hides while types are
+// checked, so a client cannot use one as the other; after, it is that type,
+// so that its values have the representation, the calling convention and
+// the type_info they have in the module that defines it (reference manual,
+// "Abstract types"). mmc does the same, by its .int files' equivalences.
+void TypeChecker::SeeThroughHidden() {
+  if (!resolution_.HasHiddenEquivalences()) {
+    return;
+  }
+  for (ClauseTypes &clause : result_.clauses_) {
+    clause.vars = SeeThrough(clause.vars);
+  }
+  for (auto &entry : result_.signatures_) {
+    if (entry.second) {
+      SeeThrough(*entry.second);
+    }
+  }
+  for (MethodDefinition &method : result_.methods_) {
+    SeeThrough(method.signature);
+  }
+  for (auto &entry : result_.supertypes_) {
+    entry.second = SeeThrough(entry.second);
+  }
+}
+
+void TypeChecker::SeeThrough(Signature &signature) {
+  signature.arguments = SeeThrough(signature.arguments);
+  signature.constraints = SeeThrough(signature.constraints);
+  signature.existentialConstraints =
+      SeeThrough(signature.existentialConstraints);
+}
+
+llvm::ArrayRef<const Type *> TypeChecker::SeeThrough(
+    llvm::ArrayRef<const Type *> types) {
+  llvm::SmallVector<const Type *, 8> seen;
+  bool changed{false};
+  for (const Type *type : types) {
+    seen.push_back(type ? SeeThrough(type) : nullptr);
+    changed |= seen.back() != type;
+  }
+  return changed ? result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{seen})
+                 : types;
+}
+
+llvm::ArrayRef<ClassConstraint> TypeChecker::SeeThrough(
+    llvm::ArrayRef<ClassConstraint> constraints) {
+  llvm::SmallVector<ClassConstraint, 4> seen;
+  bool changed{false};
+  for (const ClassConstraint &constraint : constraints) {
+    seen.push_back({constraint.typeclass, SeeThrough(constraint.arguments)});
+    changed |= seen.back().arguments.data() != constraint.arguments.data();
+  }
+  return changed
+      ? result_.arena_.SaveArray(llvm::ArrayRef<ClassConstraint>{seen})
+      : constraints;
+}
+
+const Type *TypeChecker::SeeThrough(const Type *type) {
+  if (auto it{seenThrough_.find(type)}; it != seenThrough_.end()) {
+    return it->second;
+  }
+  const Type *seen{type};
+  switch (type->kind) {
+  case TypeKind::Variable:
+  case TypeKind::Existential:
+    break;
+  case TypeKind::Named: {
+    llvm::ArrayRef<const Type *> arguments{SeeThrough(type->arguments)};
+    if (const parser::EquivalenceTypeDefn *defn{
+            resolution_.HiddenEquivalence(*type->constructor)}) {
+      auto [body, inserted]{hiddenBodies_.try_emplace(type->constructor)};
+      if (inserted) {
+        InTokensOf in{*this, *type->constructor};
+        TypeVarNames names;
+        for (llvm::StringRef parameter : defn->parameters) {
+          names.Add(parameter);
+        }
+        names.closed = true;
+        body->second = Convert(defn->type, names);
+      }
+      // The body may hide another; the defining module has checked that
+      // they do not cycle.
+      seen = SeeThrough(types_.Substitute(body->second, [&](unsigned var) {
+        return var < arguments.size() ? arguments[var]
+                                      : types_.Named(error_, {});
+      }));
+    } else if (arguments.data() != type->arguments.data()) {
+      seen = types_.Named(*type->constructor, arguments);
+    }
+    break;
+  }
+  case TypeKind::Tuple: {
+    llvm::ArrayRef<const Type *> elements{SeeThrough(type->arguments)};
+    if (elements.data() != type->arguments.data()) {
+      seen = types_.Tuple(elements);
+    }
+    break;
+  }
+  case TypeKind::HigherOrder: {
+    llvm::ArrayRef<const Type *> arguments{SeeThrough(type->arguments)};
+    const Type *result{type->result ? SeeThrough(type->result) : nullptr};
+    if (arguments.data() != type->arguments.data() ||
+        result != type->result) {
+      seen = types_.HigherOrder(
+          type->predOrFunc, type->purity, arguments, result);
+    }
+    break;
+  }
+  }
+  seenThrough_[type] = seen;
+  return seen;
 }
 
 const Signature *TypeChecker::SignatureOf(const Symbol &symbol) {
@@ -4774,6 +4898,7 @@ void TypeChecker::Run(const SemanticForm &form) {
       ComputeSuperclasses(*symbols);
     }
   }
+  SeeThroughHidden();
 }
 
 std::unique_ptr<TypeChecking> CheckTypes(const SemanticForm &form,

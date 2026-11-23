@@ -167,6 +167,9 @@ private:
       const Visibility &scope) const;
   // The scope of an imported module's interface.
   Visibility InterfaceScope(const ModuleInterface &);
+  // Resolves the names of the equivalences an imported module hides behind
+  // abstract types, in the scope of its implementation section.
+  void ResolveHidden(const ModuleInterface &);
   ModuleSymbols &Symbols(const ModuleInterface &);
 
   // Resolves the names in an item.
@@ -589,6 +592,55 @@ std::optional<unsigned> Resolver::WithTypeArity(
     return WithTypeArity((*defn)->type, scope, depth + 1);
   }
   return std::nullopt;
+}
+
+namespace {
+// The first type of `module`'s implementation section that a type names,
+// unqualified or qualified by the module, if it names one.
+struct ImplementationTypeFinder {
+  const ModuleInterface &module;
+  const parser::SymName *found{nullptr};
+  void Post(const parser::NamedType &type) {
+    const parser::SymName &name{*type.name};
+    if (found || (!name.qualifiers.empty() &&
+                     llvm::join(name.qualifiers, ".") != module.name)) {
+      return;
+    }
+    if (module.implementationTypes.contains(
+            TypeKey(name, type.arguments.size()))) {
+      found = &name;
+    }
+  }
+};
+} // namespace
+
+void Resolver::ResolveHidden(const ModuleInterface &module) {
+  Visibility scope{InterfaceScope(module)};
+  for (const ModuleInterface *imported : module.hiddenImports) {
+    scope.push_back({&Symbols(*imported), false, true});
+  }
+  ModuleSymbols &symbols{Symbols(module)};
+  own_ = &symbols;
+  tokens_ = module.tokens;
+  local_ = false;
+  for (const parser::EquivalenceTypeDefn *defn : module.hidden) {
+    ImplementationTypeFinder finder{module};
+    parser::Walk(defn->type, finder);
+    if (finder.found) {
+      messages_.Say(Source(*finder.found),
+          "not yet implemented: module %s's abstract type %s/%zu is an equivalence of %s, a type of its implementation section, which importing modules cannot see"_err_en_US,
+          module.name, defn->name->name.str(), defn->parameters.size(),
+          finder.found->name.str());
+      continue;
+    }
+    ResolveBelow(*defn, scope, nullptr);
+    for (const Symbol *symbol : symbols.Lookup(defn->name->name)) {
+      if (symbol->kind == SymbolKind::Type &&
+          symbol->arity == defn->parameters.size()) {
+        result_.hidden_[symbol] = defn;
+      }
+    }
+  }
 }
 
 Visibility Resolver::InterfaceScope(const ModuleInterface &module) {
@@ -1175,6 +1227,11 @@ void Resolver::Run(const parser::ParseTree &tree,
       if (const auto *decl{std::get_if<const parser::InstanceDecl *>(&item)}) {
         result_.instances_.push_back({*decl, module->tokens, false, true});
       }
+    }
+  }
+  for (const ModuleInterface *module : loader_.modules()) {
+    if (!module->hidden.empty()) {
+      ResolveHidden(*module);
     }
   }
   // The module's own names.

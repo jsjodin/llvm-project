@@ -44,11 +44,27 @@ struct ModuleInterface {
   // file is a sound stub, which declares what another file defines.
   llvm::StringSet<> defined;
   bool definitionsKnown{true};
+  // The implementation section's definitions of the types that the
+  // interface declares abstractly and that are equivalences. Importing
+  // modules see through them after type checking, so that a value of one
+  // has the representation and the type_info of the type it is in every
+  // module, as mmc's .int files let them (reference manual, "Abstract
+  // types"). The names in them are in the scope of the implementation
+  // section: the interface's, those of `hiddenImports`, the modules the
+  // implementation section imports, loaded only for them, and those of
+  // `implementationTypes`, the types the implementation section defines
+  // that the interface does not declare, by name/arity.
+  std::vector<const parser::EquivalenceTypeDefn *> hidden;
+  std::vector<const ModuleInterface *> hiddenImports;
+  llvm::StringSet<> implementationTypes;
 };
 
 // How ModuleInterface::defined names a predicate or function: its kind,
 // name and arity, a function's without its result, as a Symbol's is.
 std::string DefinitionKey(bool function, llvm::StringRef name, unsigned arity);
+// How ModuleInterface::implementationTypes names a type: name/arity, the
+// name unqualified.
+std::string TypeKey(const parser::SymName &, unsigned arity);
 
 class ModuleLoader {
 public:

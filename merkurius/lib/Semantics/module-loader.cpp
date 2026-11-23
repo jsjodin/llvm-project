@@ -174,7 +174,31 @@ const ModuleInterface *ModuleLoader::Load(
   // The file must be the module's, and its interface section is the items
   // from :- interface to :- implementation.
   bool inInterface{false}, named{false};
+  // The types the interface declares abstractly, and the implementation
+  // section's equivalences and other type definitions, by name/arity.
+  llvm::StringSet<> abstract;
+  std::vector<const parser::EquivalenceTypeDefn *> equivalences;
+  std::vector<std::string> implementationTypes;
   for (const parser::Item &item : tree.items) {
+    if (const auto *decl{std::get_if<const parser::AbstractTypeDecl *>(&item)};
+        decl && inInterface) {
+      abstract.insert(TypeKey(*(*decl)->name, (*decl)->parameters.size()));
+    } else if (const auto *defn{
+                   std::get_if<const parser::EquivalenceTypeDefn *>(&item)};
+        defn && !inInterface && named) {
+      equivalences.push_back(*defn);
+      implementationTypes.push_back(
+          TypeKey(*(*defn)->name, (*defn)->parameters.size()));
+    } else if (const auto *defn{std::get_if<const parser::DuTypeDefn *>(&item)};
+        defn && !inInterface && named) {
+      implementationTypes.push_back(
+          TypeKey(*(*defn)->name, (*defn)->parameters.size()));
+    } else if (const auto *decl{
+                   std::get_if<const parser::AbstractTypeDecl *>(&item)};
+        decl && !inInterface && named) {
+      implementationTypes.push_back(
+          TypeKey(*(*decl)->name, (*decl)->parameters.size()));
+    }
     if (const auto *module{std::get_if<const parser::ModuleDecl *>(&item)}) {
       if (named) {
         break; // a nested submodule, which is not loaded yet
@@ -198,11 +222,36 @@ const ModuleInterface *ModuleLoader::Load(
     messages_.Say(where, "%s does not begin with :- module %s"_err_en_US,
         *found, name.str());
   }
+  for (const parser::EquivalenceTypeDefn *defn : equivalences) {
+    if (abstract.contains(TypeKey(*defn->name, defn->parameters.size()))) {
+      interface.hidden.push_back(defn);
+    }
+  }
+  for (const std::string &key : implementationTypes) {
+    if (!abstract.contains(key)) {
+      interface.implementationTypes.insert(key);
+    }
+  }
   Imports imports;
   Collect(tree, file.tokens, Directory(*source), true, imports);
   interface.imports = std::move(imports.imports);
   interface.uses = std::move(imports.uses);
+  if (!interface.hidden.empty()) {
+    Imports all;
+    Collect(tree, file.tokens, Directory(*source), false, all);
+    for (const auto *list : {&all.imports, &all.uses}) {
+      for (const ModuleInterface *module : *list) {
+        if (!llvm::is_contained(interface.hiddenImports, module)) {
+          interface.hiddenImports.push_back(module);
+        }
+      }
+    }
+  }
   return &interface;
+}
+
+std::string TypeKey(const parser::SymName &name, unsigned arity) {
+  return (name.name + "/" + llvm::Twine(arity)).str();
 }
 
 std::string DefinitionKey(bool function, llvm::StringRef name, unsigned arity) {

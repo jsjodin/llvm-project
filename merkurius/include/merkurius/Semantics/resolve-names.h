@@ -90,6 +90,15 @@ public:
   // The list module's '[|]', for a loop's foreach(X, List), whose List is
   // a list of X's type; null for another iterator.
   const parser::SymName *ListName(const LoopIterator &) const;
+  // The definition of an imported type that its module declares abstractly
+  // and defines as an equivalence (ModuleInterface::hidden), with its names
+  // resolved in that module's implementation section; null for any other
+  // type.
+  const parser::EquivalenceTypeDefn *HiddenEquivalence(
+      const Symbol &symbol) const {
+    return hidden_.lookup(&symbol);
+  }
+  bool HasHiddenEquivalences() const { return !hidden_.empty(); }
 
 private:
   friend class Resolver;
@@ -104,6 +113,7 @@ private:
   std::vector<InstanceItem> instances_;
   llvm::DenseMap<const Unify *, const parser::SymName *> functors_;
   llvm::DenseMap<const LoopIterator *, const parser::SymName *> lists_;
+  llvm::DenseMap<const Symbol *, const parser::EquivalenceTypeDefn *> hidden_;
 };
 
 // A name that is a character constant, such as a or 'é' (reference
