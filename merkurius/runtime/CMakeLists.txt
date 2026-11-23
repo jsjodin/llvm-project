@@ -35,6 +35,11 @@ set_target_properties(merkrt PROPERTIES
 install(TARGETS merkrt
   ARCHIVE DESTINATION lib${LLVM_LIBDIR_SUFFIX}
   COMPONENT merkrt)
+# Programs link the runtime without libstdc++, whose headers alone it uses.
+# LLVM's assertions define _GLIBCXX_ASSERTIONS, under which the headers of
+# libstdc++ 12 and later call std::__glibcxx_assert_fail, which only the
+# shared library defines; GCC 11's assert inline.
+target_compile_options(merkrt PRIVATE -U_GLIBCXX_ASSERTIONS)
 
 # The host's side of target regions (offload.cpp) uses the offload plugin's
 # RPC protocol, LLVM libc's header-only one.
