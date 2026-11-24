@@ -141,8 +141,11 @@ static std::string CType(const semantics::Type &type) {
   return (name + "_t").str(); // intN and uintN
 }
 
-// The start of the C file of a module's foreign code: the C types of the
-// manual's "C data passing conventions".
+// The start of the C file of a module's foreign code: the C types and names
+// of the manual's "C data passing conventions". bool and comparison_result
+// are passed as their constructors' numbers, as all enumerations are. The
+// list macros are not yet implemented: a Merkurius list's layout is not
+// mmc's, and foreign code allocates without collecting (docs/INPROGRESS.md).
 static constexpr llvm::StringLiteral kForeignPrelude{R"(/* Foreign code, written by merkc. */
 #include <stdint.h>
 typedef intptr_t MR_Integer;
@@ -157,6 +160,18 @@ typedef void *MR_ArrayPtr;
 typedef int MR_bool;
 #define MR_TRUE 1
 #define MR_FALSE 0
+typedef MR_Word MR_Bool;
+#define MR_NO 0
+#define MR_YES 1
+typedef MR_Word MR_Comparison_Result;
+#define MR_COMPARE_EQUAL 0
+#define MR_COMPARE_LESS 1
+#define MR_COMPARE_GREATER 2
+#define MR_list_is_empty(list) (_Pragma("GCC error \"not yet implemented: MR_list_is_empty on Merkurius lists\"") 0)
+#define MR_list_head(list) (_Pragma("GCC error \"not yet implemented: MR_list_head on Merkurius lists\"") 0)
+#define MR_list_tail(list) (_Pragma("GCC error \"not yet implemented: MR_list_tail on Merkurius lists\"") 0)
+#define MR_list_empty() (_Pragma("GCC error \"not yet implemented: MR_list_empty on Merkurius lists\"") 0)
+#define MR_list_cons(head, tail) (_Pragma("GCC error \"not yet implemented: MR_list_cons on Merkurius lists\"") 0)
 static inline MR_Float MR_word_to_float(MR_Word word) {
   MR_Float number;
   __builtin_memcpy(&number, &word, sizeof number);
