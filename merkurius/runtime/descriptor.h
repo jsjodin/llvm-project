@@ -88,6 +88,10 @@ enum Kind : uint8_t {
 constexpr uint8_t kFlat{1};
 constexpr uint8_t kOpenSame{2};
 constexpr uint8_t kClosed{4};
+// A type's with a user-defined equality or comparison, whose values only its
+// unify and compare entries may compare (reference manual, "User-defined
+// equality and comparison").
+constexpr uint8_t kUserEquality{8};
 
 // byTag's marks, for a tag whose word is a constant, and for one that
 // constructors share.

@@ -8847,13 +8847,12 @@ reported as not yet implemented where the compiler meets it:
 5. **`bind`'s barrier,** with generations: the remembered set records old
    cells bound to young values, with array `set`'s barrier (Garbage
    collection, step 2).
-6. **User-defined equality.** Code generation refuses those types today,
-   so no value of one reaches the open walkers. Then the walkers must call
-   the type's own unify entry for a `closed(U)` box and for anything they
-   reach through a type variable, as `open(list(T))` with T such a type
-   would; otherwise they compare structurally, with the wrong equality. A
-   descriptor flag for user-defined equality, which `GroundEqual` and
-   `OpenUnify` check, would do.
+6. **User-defined equality.** Such a type's descriptor is marked
+   `kUserEquality`, and `GroundEqual` and `OpenUnify` stop at it with "not
+   supported yet" (`test/CodeGen/open-user-equality.m`), since they would
+   compare structurally, with the wrong equality. To lift it they must call
+   the type's own unify entry, a `tailcc` procedure, which C++ cannot call:
+   a C-callable wrapper per such type would do.
 7. **The runtime's open layout tables** are made on a type's first use on
    each thread (`LayoutOf`, `runtime/open.cpp`). The compiler's own open
    layouts could give the descriptors these tables.

@@ -497,6 +497,11 @@ bool Occurs(
 // code, is unified in U's open layout.
 bool GroundEqual(const Type &type, Word a, Word b) {
   for (;;) {
+    // Only its own unify entry may compare such a type's values, which a
+    // walker cannot call yet.
+    if (type.ctor->flags & kUserEquality) {
+      Unsupported("types with a user-defined equality", type.ctor);
+    }
     if (a == b) {
       return true;
     }
@@ -599,6 +604,10 @@ bool OpenUnify(const Type &type, Word a, Word b, bool occursCheck,
     }
     if (IsVariableReference(b)) {
       return BindChecked(b, type, a, occursCheck, cells);
+    }
+    // As in GroundEqual.
+    if (type.ctor->flags & kUserEquality) {
+      Unsupported("types with a user-defined equality", type.ctor);
     }
     switch (encoding) {
     case OpenEncoding::Same:

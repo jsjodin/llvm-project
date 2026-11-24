@@ -62,13 +62,13 @@ std::optional<std::string> TypeConstructorName(const semantics::Type &type) {
   return name + arity;
 }
 
-void MerkGenerator::EmitDescriptor(llvm::StringRef constructor,
+merk::TypeCtorOp MerkGenerator::EmitDescriptor(llvm::StringRef constructor,
     llvm::StringRef module, llvm::StringRef name, llvm::StringRef kind,
     llvm::StringRef linkage, unsigned arity, mlir::Type term,
     merk::ProcOp unify, merk::ProcOp compare, mlir::ArrayAttr functors) {
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPointToEnd(module_.getBody());
-  merk::TypeCtorOp::create(builder_, builder_.getUnknownLoc(), constructor,
+  return merk::TypeCtorOp::create(builder_, builder_.getUnknownLoc(), constructor,
       module, name, kind, linkage, arity,
       term ? mlir::TypeAttr::get(term) : mlir::TypeAttr{},
       unify ? mlir::FlatSymbolRefAttr::get(unify.getSymNameAttr())
@@ -258,12 +258,17 @@ bool MerkGenerator::EnsureDescriptor(
       represented->type, represented->dummy, at)};
   merk::ProcOp compare{DescriptorEntry(true, *constructor, canonical,
       represented->type, represented->dummy, at)};
-  EmitDescriptor(*constructor, module, name, kind, linkage,
-      type.arguments.size(),
+  merk::TypeCtorOp descriptor{EmitDescriptor(*constructor, module, name,
+      kind, linkage, type.arguments.size(),
       mlir::isa_and_nonnull<merk::TermType>(represented->type)
           ? represented->type
           : mlir::Type{},
-      unify, compare, functors);
+      unify, compare, functors)};
+  // The runtime's own walkers, which compare structurally, must not reach
+  // its values (runtime/descriptor.h, kUserEquality).
+  if (UserEqualityOf(&type)) {
+    descriptor->setAttr("user_equality", builder_.getUnitAttr());
+  }
   return true;
 }
 

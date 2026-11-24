@@ -933,17 +933,26 @@ def Merk_ThrowIfOp : Merk_Op<"throw_if"> {
   let summary = "throw an exception if a check failed";
   let description = [{
     Throws an exception if the flag is true, as the library's checks do,
-    such as that of a division by zero. Until exceptions are implemented,
-    an exception is not caught: the program writes "Uncaught Merkurius
-    exception:" and the exception, as mmc writes it, to the standard error,
-    and exits with status 1.
+    such as that of a division by zero: the value the text describes,
+    which a try catches (the runtime's merk_library_error). Uncaught, the
+    program writes "Uncaught Merkurius exception:" and the exception, as
+    mmc writes it, to the standard error, and exits with status 1.
 
     ```mlir
     merk.throw_if %zero, "domain_error(\"int.\\'//\\': division by zero\")"
     ```
+
+    With a type_info, the first `%T` of the exception's text is the name of
+    its type, as mmc writes a type, which the runtime puts there.
   }];
-  let arguments = (ins I1:$condition, StrAttr:$exception);
-  let assemblyFormat = "$condition `,` $exception attr-dict";
+  let arguments = (ins I1:$condition, StrAttr:$exception,
+      Optional<Merk_TypeInfoType>:$type_info);
+  let assemblyFormat =
+      "$condition `,` $exception (`type` $type_info^)? attr-dict";
+  let builders = [OpBuilder<(ins "mlir::Value":$condition,
+      "llvm::StringRef":$exception), [{
+    build($_builder, $_state, condition, exception, mlir::Value{});
+  }]>];
 }
 
 def Merk_IteOp : Merk_Op<"ite", [RecursiveMemoryEffects]> {

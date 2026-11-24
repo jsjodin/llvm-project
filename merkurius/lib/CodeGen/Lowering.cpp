@@ -2583,6 +2583,7 @@ void Lowerer::LowerClosureWord(merk::ClosureWordOp op) {
 constexpr std::int64_t kFlatDescriptor{1};
 constexpr std::int64_t kOpenSameDescriptor{2};
 constexpr std::int64_t kClosedDescriptor{4};
+constexpr std::int64_t kUserEqualityDescriptor{8};
 
 // The descriptors' kinds, as runtime/write.cpp reads them: a term's is its
 // layout's.
@@ -2797,6 +2798,9 @@ llvm::LogicalResult Lowerer::LowerTypeCtors() {
     bool closed{op.getConstructor() == "open.closed/1"};
     if (closed) {
       flags |= kClosedDescriptor;
+    }
+    if (op->hasAttr("user_equality")) {
+      flags |= kUserEqualityDescriptor;
     }
     llvm::StringSet<> assumed;
     if (!closed && (kindName == "dummy" ||
@@ -4021,8 +4025,19 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
         // kernel that calls one a dynamic stack.
         mlir::Value exception{mlir::LLVM::AddressOfOp::create(
             rewriter_, loc, StringGlobal(throwIf.getException(), loc))};
-        mlir::LLVM::CallOp::create(
-            rewriter_, loc, ThrowFunc(), mlir::ValueRange{exception});
+        if (mlir::Value typeInfo{throwIf.getTypeInfo()}; typeInfo && !device_) {
+          // The text names a type, which the runtime writes there.
+          auto ptr{mlir::LLVM::LLVMPointerType::get(rewriter_.getContext())};
+          mlir::Value info{ToC(typeInfo, loc)};
+          mlir::LLVM::CallOp::create(rewriter_, loc,
+              RuntimeFunc("merk_library_error_typed",
+                  mlir::LLVM::LLVMVoidType::get(rewriter_.getContext()),
+                  {ptr, info.getType()}, /*noreturn=*/true),
+              mlir::ValueRange{exception, info});
+        } else {
+          mlir::LLVM::CallOp::create(
+              rewriter_, loc, ThrowFunc(), mlir::ValueRange{exception});
+        }
         mlir::LLVM::UnreachableOp::create(rewriter_, loc);
         rewriter_.setInsertionPoint(throwIf);
         rewriter_.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(

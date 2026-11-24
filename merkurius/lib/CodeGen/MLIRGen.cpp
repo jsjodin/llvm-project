@@ -277,7 +277,7 @@ std::optional<Represented> MerkGenerator::RepresentTerm(
   }
   // A type too large to print has no name of its own.
   if (!constructors || name.front() == '<' ||
-      (definition && (definition->attributes || definition->supertype))) {
+      (definition && definition->supertype)) {
     terms_[name] = nullptr;
     return std::nullopt;
   }

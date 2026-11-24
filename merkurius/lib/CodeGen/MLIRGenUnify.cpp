@@ -261,6 +261,19 @@ merk::ProcOp MerkGenerator::UnifyProc(merk::TermType term) {
   mlir::Value y{entry->getArgument(variables.size() + 1)};
   NoteRoot(x, type);
   NoteRoot(y, type);
+  // A user-defined equality: its predicate's; or else the comparison's (=).
+  if (const semantics::UserEquality *user{UserEqualityOf(type)}) {
+    mlir::Value order;
+    if (user->equality) {
+      CallUserPredicate(*user->equality, false, type, x, y, loc, order);
+    } else if (user->comparison &&
+        CallUserPredicate(*user->comparison, true, type, x, y, loc, order)) {
+      merk::GuardOp::create(builder_, loc, IsComparison(order, "=", loc));
+    }
+    merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+    typeInfos_ = std::move(saved);
+    return proc;
+  }
   llvm::SmallVector<mlir::Attribute> cases;
   for (const semantics::ConstructorTypes &constructor : constructors) {
     cases.push_back(builder_.getArrayAttr({merk::FunctorAttr::get(&context_,
@@ -310,6 +323,156 @@ merk::ProcOp MerkGenerator::UnifyProc(merk::TermType term) {
   merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
   typeInfos_ = std::move(saved);
   return proc;
+}
+
+const semantics::UserEquality *MerkGenerator::UserEqualityOf(
+    const semantics::Type *type) {
+  if (!type || type->kind != semantics::TypeKind::Named) {
+    return nullptr;
+  }
+  return types_.UserEqualityOf(*type->constructor);
+}
+
+// Binds the type variables of `pattern` to make it `type`, as `bindings`
+// numbers them; whether it can.
+static bool MatchType(const semantics::Type *pattern,
+    const semantics::Type *type,
+    llvm::SmallVectorImpl<const semantics::Type *> &bindings) {
+  if (pattern->kind == semantics::TypeKind::Variable) {
+    if (bindings.size() <= pattern->var) {
+      bindings.resize(pattern->var + 1, nullptr);
+    }
+    const semantics::Type *&bound{bindings[pattern->var]};
+    if (!bound) {
+      bound = type;
+    }
+    return bound == type;
+  }
+  if (type->kind != pattern->kind ||
+      type->constructor != pattern->constructor ||
+      type->arguments.size() != pattern->arguments.size() ||
+      !type->result != !pattern->result) {
+    return false;
+  }
+  for (auto [p, t] : llvm::zip(pattern->arguments, type->arguments)) {
+    if (!MatchType(p, t, bindings)) {
+      return false;
+    }
+  }
+  return !pattern->result || MatchType(pattern->result, type->result, bindings);
+}
+
+bool MerkGenerator::CallUserPredicate(const semantics::Symbol &predicate,
+    bool comparison, const semantics::Type *type, mlir::Value x, mlir::Value y,
+    mlir::Location loc, mlir::Value &result) {
+  parser::CharBlock at{predicate.source};
+  const semantics::Signature *signature{types_.SignatureOf(predicate)};
+  if (!signature || !signature->constraints.empty() ||
+      signature->existentials != 0) {
+    NotYet(at, "user-defined equality or comparison predicates with type "
+               "class constraints or existential types");
+    failed_ = true;
+    return false;
+  }
+  // Its mode for this call: of inputs, after the comparison's output.
+  const Procedure *procedure{nullptr};
+  for (const Procedure *candidate : modes_.ProceduresOf(predicate)) {
+    bool fits{candidate->modes.size() == (comparison ? 3u : 2u)};
+    for (auto [i, mode] : llvm::enumerate(candidate->modes)) {
+      bool output{comparison && i == 0};
+      fits = fits &&
+          (output ? IsOutput(mode)
+                  : !modes_.ops().IsFree(mode.initial) &&
+                      !modes_.ops().IsFree(mode.final));
+    }
+    if (fits) {
+      procedure = candidate;
+      break;
+    }
+  }
+  if (!procedure) {
+    NotYet(at, comparison
+            ? "user-defined comparison predicates without a mode that takes "
+              "the values in and gives the result out"
+            : "user-defined equality predicates without a mode that takes "
+              "both values in");
+    failed_ = true;
+    return false;
+  }
+  // The type_infos of its type variables, which the type's instance binds.
+  llvm::SmallVector<const semantics::Type *> bindings;
+  std::size_t first{comparison ? 1u : 0u};
+  for (std::size_t i{first}; i < signature->arguments.size(); ++i) {
+    if (!MatchType(signature->arguments[i], type, bindings)) {
+      NotYet(at, "this user-defined equality or comparison predicate's types");
+      failed_ = true;
+      return false;
+    }
+  }
+  bindings.resize(signature->typeVars, nullptr);
+  merk::ProcOp proc{ProcFor(*procedure, signature->arguments, at)};
+  if (!proc) {
+    failed_ = true;
+    return false;
+  }
+  llvm::SmallVector<mlir::Value> inputs;
+  for (const semantics::Type *bound : bindings) {
+    mlir::Value info{bound ? TypeInfoOfType(bound, loc, at)
+                           : TypeInfoOfType(types_.types().Variable(0), loc, at,
+                                 /*freeIsVoid=*/true)};
+    if (!info) {
+      failed_ = true;
+      return false;
+    }
+    inputs.push_back(info);
+  }
+  inputs.append({x, y});
+  mlir::FunctionType function{proc.getFunctionType()};
+  if (function.getNumInputs() != inputs.size()) {
+    NotYet(at, "this user-defined equality or comparison predicate's "
+               "type_infos");
+    failed_ = true;
+    return false;
+  }
+  for (auto [input, declared] : llvm::zip(inputs, function.getInputs())) {
+    input = Coerce(input, declared, loc);
+  }
+  mlir::Type order{*ComparisonType()};
+  if (Nondeterministic(*procedure)) {
+    // Its call has no outputs but the comparison's, which is det: its first
+    // solution, as mmc prunes it.
+    auto commit{merk::CommitOp::create(builder_, loc,
+        comparison ? mlir::TypeRange{order} : mlir::TypeRange{})};
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToStart(&commit.getGenerator().emplaceBlock());
+    auto nondet{merk::NondetCallOp::create(
+        builder_, loc, proc.getSymName(), inputs)};
+    mlir::Block &continuation{nondet.getContinuation().emplaceBlock()};
+    for (mlir::Type t : function.getResults()) {
+      continuation.addArgument(t, loc);
+    }
+    builder_.setInsertionPointToStart(&continuation);
+    llvm::SmallVector<mlir::Value> solution;
+    if (comparison) {
+      solution.push_back(Coerce(continuation.getArgument(0), order, loc));
+    }
+    merk::SolutionOp::create(builder_, loc, solution);
+    if (comparison) {
+      result = commit.getResult(0);
+    }
+    return true;
+  }
+  auto call{merk::CallOp::create(
+      builder_, loc, function.getResults(), proc.getSymName(), inputs)};
+  if (comparison) {
+    if (call.getNumResults() != 1) {
+      NotYet(at, "this user-defined comparison predicate's results");
+      failed_ = true;
+      return false;
+    }
+    result = Coerce(call.getResult(0), order, loc);
+  }
+  return true;
 }
 
 llvm::SmallVector<unsigned> MerkGenerator::VariablesOf(
@@ -735,6 +898,27 @@ merk::ProcOp MerkGenerator::CompareProc(merk::TermType term) {
   mlir::Value y{entry->getArgument(variables.size() + 1)};
   NoteRoot(x, type);
   NoteRoot(y, type);
+  // A user-defined comparison: its predicate's. A type with only a
+  // user-defined equality has no order: comparing its values throws
+  // software_error, as in mmc.
+  if (const semantics::UserEquality *user{UserEqualityOf(type)}) {
+    mlir::Value order;
+    if (user->comparison) {
+      CallUserPredicate(*user->comparison, true, type, x, y, loc, order);
+    } else if (mlir::Value info{TypeInfoOfType(type, loc, equalAt_)}) {
+      merk::ThrowIfOp::create(builder_, loc,
+          mlir::arith::ConstantIntOp::create(
+              builder_, loc, builder_.getI1Type(), 1),
+          "Software Error: call to compare/3 for non-canonical type `%T'",
+          info);
+    } else {
+      failed_ = true;
+    }
+    merk::SucceedOp::create(builder_, loc,
+        mlir::ValueRange{order ? order : ComparisonValue("=", loc)});
+    typeInfos_ = std::move(saved);
+    return proc;
+  }
   llvm::SmallVector<mlir::Attribute> cases;
   for (const semantics::ConstructorTypes &constructor : constructors) {
     cases.push_back(builder_.getArrayAttr({merk::FunctorAttr::get(&context_,

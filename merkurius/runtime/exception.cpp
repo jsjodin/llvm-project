@@ -19,6 +19,7 @@
 
 #include "descriptor.h"
 #include "process.h"
+#include "walk.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -188,6 +189,78 @@ extern "C" [[noreturn]] void merk_library_error(const char *text) {
   univ[0] = type;
   univ[1] = reinterpret_cast<Word>(message);
   merk_throw(reinterpret_cast<Word>(univ), type, univ[1]);
+}
+
+// A type's name, as mmc writes a type: its constructor qualified by its
+// module, but for the builtin module's, and its arguments; cut short at the
+// buffer's end. The runtime has no C++ library, so no std::string.
+namespace {
+struct NameBuffer {
+  char text[1024];
+  std::size_t length{0};
+  void Append(const char *s) {
+    for (; *s && length + 1 < sizeof text; ++s) {
+      text[length++] = *s;
+    }
+    text[length] = '\0';
+  }
+};
+} // namespace
+
+static void AppendTypeName(NameBuffer &out, Word typeInfo, int depth) {
+  if (depth > 64) {
+    out.Append("...");
+    return;
+  }
+  Type type{Resolve(typeInfo, nullptr)};
+  const TypeCtor *ctor{type.ctor};
+  std::size_t count{ctor->arity};
+  if ((typeInfo & kTagMask) == 1 &&
+      (ctor->kind == Tuple || ctor->kind == Closure)) {
+    count = reinterpret_cast<const Word *>(typeInfo - 1)[1];
+  }
+  if (ctor->kind == Tuple) {
+    out.Append("{");
+  } else {
+    if (ctor->module && *ctor->module &&
+        std::strcmp(ctor->module, "builtin") != 0) {
+      out.Append(ctor->module);
+      out.Append(".");
+    }
+    out.Append(ctor->name);
+    if (count == 0) {
+      return;
+    }
+    out.Append("(");
+  }
+  for (std::size_t i{0}; i < count; ++i) {
+    if (i != 0) {
+      out.Append(", ");
+    }
+    AppendTypeName(out, type.environment.arguments[i], depth + 1);
+  }
+  out.Append(ctor->kind == Tuple ? "}" : ")");
+}
+
+// merk_library_error, with the name of the type of `typeInfo` in place of
+// the first %T of the text (merk.throw_if with a type_info).
+extern "C" [[noreturn]] void merk_library_error_typed(
+    const char *text, Word typeInfo) {
+  NameBuffer name;
+  AppendTypeName(name, typeInfo, 0);
+  const char *at{std::strstr(text, "%T")};
+  if (!at) {
+    merk_library_error(text);
+  }
+  std::size_t before{static_cast<std::size_t>(at - text)};
+  std::size_t after{std::strlen(at + 2)};
+  // Outside the heap, as merk_library_error's message: not given back.
+  auto *message{
+      static_cast<char *>(std::malloc(before + name.length + after + 1))};
+  std::memcpy(message, text, before);
+  std::memcpy(message + before, name.text, name.length);
+  std::memcpy(message + before + name.length, at + 2, after + 1);
+  merk_library_error(message);
 }
 
 #if defined(__x86_64__)

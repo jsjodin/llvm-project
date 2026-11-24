@@ -288,6 +288,15 @@ private:
   // Comparable, made the first time: it switches on the first, and tests
   // that the second has the same constructor and equal arguments.
   merk::ProcOp UnifyProc(merk::TermType);
+  // A type's user-defined equality and comparison, if it has either
+  // (reference manual, "User-defined equality and comparison").
+  const semantics::UserEquality *UserEqualityOf(const semantics::Type *);
+  // Calls a type's equality or comparison predicate on x and y, at the
+  // type's instance `type`; the comparison's result, or for the equality
+  // a null value; failed_ if it cannot.
+  bool CallUserPredicate(const semantics::Symbol &predicate, bool comparison,
+      const semantics::Type *type, mlir::Value x, mlir::Value y,
+      mlir::Location loc, mlir::Value &result);
   merk::ProcOp UnifyArrayProc();
   // An element, with the type_info of the elements' type, if the module does
   // not see its layout (ElementTypeInfo).
@@ -354,7 +363,7 @@ private:
   // the first time; false with an error if it cannot have one yet.
   bool EnsureDescriptor(const semantics::Type &, parser::CharBlock at);
   bool EnsureVoidDescriptor();
-  void EmitDescriptor(llvm::StringRef constructor, llvm::StringRef module,
+  merk::TypeCtorOp EmitDescriptor(llvm::StringRef constructor, llvm::StringRef module,
       llvm::StringRef name, llvm::StringRef kind, llvm::StringRef linkage,
       unsigned arity, mlir::Type term, merk::ProcOp unify, merk::ProcOp compare, mlir::ArrayAttr functors);
   // A descriptor's table of its constructors, for merk.type_ctor, and a field's
