@@ -581,6 +581,22 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
       (symbol.name == "impure_true" || symbol.name == "semipure_true")) {
     return true;
   }
+  // semidet_succeed and semidet_true succeed, and semidet_fail and
+  // semidet_false fail; only their determinism, semidet, matters to the
+  // determinism check.
+  if (module == "builtin" && symbol.arity == 0 &&
+      symbol.kind == semantics::SymbolKind::Predicate &&
+      llvm::is_contained({"semidet_succeed", "semidet_true", "semidet_fail",
+                             "semidet_false"},
+          symbol.name)) {
+    if (symbol.name == "semidet_fail" || symbol.name == "semidet_false") {
+      mlir::Location loc{Location(goal.tokens)};
+      merk::GuardOp::create(builder_, loc,
+          mlir::arith::ConstantIntOp::create(
+              builder_, loc, builder_.getI1Type(), 0));
+    }
+    return true;
+  }
   if (module == "builtin" ||
       (module == "array" && symbol.name == "array_compare")) {
     return CompareBuiltin(goal, callee, arguments, body);
