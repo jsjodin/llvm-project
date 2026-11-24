@@ -17,7 +17,7 @@
 % RUN: not env CASE=instance %t2 2>&1 | FileCheck %s --check-prefix=NAN
 
 % NAN: Uncaught Merkurius exception:
-% NAN-NEXT: incomparable floats in compare/3
+% NAN-NEXT: Software Error: incomparable floats in compare/3
 
 :- module compare_nan.
 :- interface.

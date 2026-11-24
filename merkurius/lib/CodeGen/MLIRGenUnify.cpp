@@ -792,10 +792,11 @@ mlir::Value MerkGenerator::Compare(mlir::Value x, mlir::Value y,
   }
   if (mlir::isa<mlir::FloatType>(type)) {
     if (generic) {
+      // A software_error, which a try catches; mmc's program aborts.
       merk::ThrowIfOp::create(builder_, loc,
           arith::CmpFOp::create(
               builder_, loc, arith::CmpFPredicate::UNO, x, y),
-          "incomparable floats in compare/3");
+          "Software Error: incomparable floats in compare/3");
     }
     // As mmc's for a float it knows is one, a NaN is equal to everything.
     return ThreeWay(
