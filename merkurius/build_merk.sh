@@ -53,8 +53,10 @@ Other settings:
   EXTRA_CMAKE_ARGS  more CMake options, at configure
 
 The coverage build (docs/INPROGRESS.md, A conformance suite), with this
-build's clang:
+build's clang. Its precompiled headers are off: this clang records the
+commit it was built from, so each commit would make them stale.
   BUILD_DIR=$WORK_DIR/build-cov EXTRA_CMAKE_ARGS="-DMERKURIUS_COVERAGE=ON
+    -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
     -DCMAKE_C_COMPILER=$BUILD_DIR/bin/clang
     -DCMAKE_CXX_COMPILER=$BUILD_DIR/bin/clang++" $(basename "$0") configure
 
