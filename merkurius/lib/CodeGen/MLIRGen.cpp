@@ -6,10 +6,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <set>
 #include "MLIRGenImpl.h"
 #include "merkurius/CodeGen/DeviceLibrary.h"
 #include "merkurius/CodeGen/Specializer.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+#include <set>
 
 namespace merkurius::codegen {
 
@@ -1086,22 +1088,47 @@ mlir::Value MerkGenerator::Constant(const Body &goal, const ProcedureBody &body)
       builder_, Location(goal.tokens), value.getType(), value);
 }
 
+namespace {
+// `text` as the contents of a C string literal.
+std::string EscapeForC(llvm::StringRef text) {
+  std::string escaped;
+  for (char c : text) {
+    if (c == '"' || c == '\\') {
+      escaped += '\\';
+    }
+    escaped += c;
+  }
+  return escaped;
+}
+} // namespace
+
 std::string MerkGenerator::LineDirective(parser::TokenRange range) {
   parser::CharBlock at{Where(range)};
   if (auto provenance{sources_.GetProvenanceRange(at)}) {
     if (auto pos{sources_.GetSourcePosition(provenance->start())}) {
-      std::string path{*pos->path};
-      std::string escaped;
-      for (char c : path) {
-        if (c == '"' || c == '\\') {
-          escaped += '\\';
-        }
-        escaped += c;
-      }
-      return "#line " + std::to_string(pos->line) + " \"" + escaped + "\"\n";
+      return "#line " + std::to_string(pos->line) + " \"" +
+          EscapeForC(*pos->path) + "\"\n";
     }
   }
   return "";
+}
+
+std::string MerkGenerator::IncludeDirective(const parser::ForeignCode &code) {
+  llvm::SmallString<256> path{code.text};
+  if (llvm::sys::path::is_relative(path)) {
+    parser::CharBlock at{Where(code.tokens)};
+    if (auto provenance{sources_.GetProvenanceRange(at)}) {
+      if (auto pos{sources_.GetSourcePosition(provenance->start())}) {
+        llvm::SmallString<256> directory{
+            llvm::sys::path::parent_path(*pos->path)};
+        llvm::sys::path::append(directory, path);
+        path = directory;
+      }
+    }
+    // The foreign code is compiled from a temporary directory.
+    llvm::sys::fs::make_absolute(path);
+  }
+  return "#include \"" + EscapeForC(path) + "\"\n";
 }
 
 void MerkGenerator::GenerateForeign(
@@ -1739,7 +1766,7 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
         continue;
       }
       if (foreign->includeFile) {
-        code += "#include \"" + foreign->text.str() + "\"\n";
+        code += IncludeDirective(*foreign);
       } else {
         code += LineDirective(foreign->tokens) + foreign->text.str() + "\n";
       }

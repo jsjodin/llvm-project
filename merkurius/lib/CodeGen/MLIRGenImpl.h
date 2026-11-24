@@ -445,6 +445,10 @@ private:
   mlir::Value Constant(const Body &, const ProcedureBody &);
   // A #line directive for the C compiler, for a range of the source.
   std::string LineDirective(parser::TokenRange);
+  // The #include of an include_file(Path) of foreign_decl or foreign_code:
+  // a relative path is relative to the directory of the module's source
+  // (reference manual, "Adding foreign declarations").
+  std::string IncludeDirective(const parser::ForeignCode &);
   void Call(const Body &, const Procedure &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &);
   // A call of a predicate or function of int, uint, the sized integer
