@@ -551,6 +551,22 @@ private:
   // expression's procedure, which takes the values it captures and then its
   // inputs and gives a word for each output, and a closure of its entry.
   void LambdaClosure(const Body &, const ProcedureBody &);
+  // The closure of a procedure made of `inner`, a goal of the body run in it,
+  // for a lambda expression or a try goal's goal, whose procedure `key` names
+  // for the body's word copy. The procedure takes what it captures, the
+  // variables bound outside it that `inner` uses but `head` does not have,
+  // then the values of `inputVars`, of `inputTypes`; it gives `outputs`
+  // words, which `results` makes after the goal. `arguments` are the
+  // closure's own. Null if it cannot be made, which this reports.
+  struct ClosureArgument;
+  mlir::Value OutlineClosure(const Body &key, const Body &inner,
+      llvm::ArrayRef<BodyVar> head, llvm::ArrayRef<ClosureArgument> arguments,
+      llvm::ArrayRef<BodyVar> inputVars, llvm::ArrayRef<mlir::Type> inputTypes,
+      unsigned outputs, merk::Determinism determinism, bool committed,
+      std::optional<llvm::SmallVector<BodyVar>> wordOutputs,
+      const ProcedureBody &body,
+      llvm::function_ref<llvm::SmallVector<mlir::Value>(mlir::Location)>
+          results);
   // X = p(Y1, ..., Yn): a closure of a procedure with its first n arguments.
   void NameClosure(const Body &, const ProcedureBody &);
   // X(Y1, ...), or Z = X(Y1, ...).

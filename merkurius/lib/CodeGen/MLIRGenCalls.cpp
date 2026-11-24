@@ -828,7 +828,6 @@ static void CollectVars(const Body &goal, llvm::DenseSet<BodyVar> &vars) {
 
 void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
   parser::CharBlock at{Where(goal.tokens)};
-  mlir::Location loc{Location(goal.tokens)};
   llvm::ArrayRef<semantics::ArgMode> modes{goal.modes->lambda};
   std::optional<merk::Determinism> determinism{
       ClosureDeterminism(goal.modes->determinism)};
@@ -842,11 +841,54 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
     NotYet(at, "this lambda expression's modes");
     return;
   }
+  llvm::SmallVector<BodyVar> outputs, inputs;
+  llvm::SmallVector<ClosureArgument> arguments;
+  llvm::SmallVector<mlir::Type> inputTypes;
+  for (auto [var, mode] : llvm::zip(goal.lambdaHead, modes)) {
+    const semantics::Type *type{body.vars[var].type};
+    std::optional<Represented> represented{Represent(type)};
+    if (!represented) {
+      NotYet(at, "values of type " + semantics::TypeToString(*type));
+      return;
+    }
+    if (IsOutput(mode)) {
+      outputs.push_back(var);
+      arguments.push_back({true, false});
+    } else {
+      bool unpassed{represented->dummy || IsUnused(mode)};
+      arguments.push_back({false, unpassed});
+      if (!unpassed) {
+        inputs.push_back(var);
+        inputTypes.push_back(represented->type);
+      }
+    }
+  }
+  bool committed{goal.modes->determinism == parser::Determinism::CcMulti ||
+      goal.modes->determinism == parser::Determinism::CcNondet};
+  mlir::Value closure{OutlineClosure(goal, *goal.lambda, goal.lambdaHead,
+      arguments, inputs, inputTypes, static_cast<unsigned>(outputs.size()),
+      *determinism, committed, outputs, body,
+      [&](mlir::Location loc) { return WordResults(outputs, body, loc); })};
+  if (closure) {
+    values_[goal.left] = closure;
+  }
+}
+
+mlir::Value MerkGenerator::OutlineClosure(const Body &key, const Body &inner,
+    llvm::ArrayRef<BodyVar> head, llvm::ArrayRef<ClosureArgument> arguments,
+    llvm::ArrayRef<BodyVar> inputVars, llvm::ArrayRef<mlir::Type> inputTypes,
+    unsigned outputs, merk::Determinism determinism, bool committed,
+    std::optional<llvm::SmallVector<BodyVar>> wordOutputs,
+    const ProcedureBody &body,
+    llvm::function_ref<llvm::SmallVector<mlir::Value>(mlir::Location)>
+        results) {
+  parser::CharBlock at{Where(key.tokens)};
+  mlir::Location loc{Location(key.tokens)};
   // What it captures, each in order: the body's type_infos, its
   // typeclass_infos, what goals gave, and the variables bound before it
   // that it uses.
   llvm::DenseSet<BodyVar> used;
-  CollectVars(*goal.lambda, used);
+  CollectVars(inner, used);
   llvm::SmallVector<unsigned> infoKeys;
   for (const auto &[var, value] : typeInfos_) {
     if (value) {
@@ -865,7 +907,7 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
   for (const auto &[var, value] : values_) {
     if (value && !IsDummyWord(var) &&
         (var >= kFirstGivenVar ||
-            (used.contains(var) && !llvm::is_contained(goal.lambdaHead, var)))) {
+            (used.contains(var) && !llvm::is_contained(head, var)))) {
       captured.push_back(var);
     }
   }
@@ -882,30 +924,11 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
   }
   llvm::SmallVector<mlir::Type> inputs{
       llvm::map_range(capturedValues, [](mlir::Value v) { return v.getType(); })};
-  llvm::SmallVector<BodyVar> outputs;
-  llvm::SmallVector<ClosureArgument> arguments;
-  for (auto [var, mode] : llvm::zip(goal.lambdaHead, modes)) {
-    const semantics::Type *type{body.vars[var].type};
-    std::optional<Represented> represented{Represent(type)};
-    if (!represented) {
-      NotYet(at, "values of type " + semantics::TypeToString(*type));
-      return;
-    }
-    if (IsOutput(mode)) {
-      outputs.push_back(var);
-      arguments.push_back({true, false});
-    } else {
-      bool unpassed{represented->dummy || IsUnused(mode)};
-      arguments.push_back({false, unpassed});
-      if (!unpassed) {
-        inputs.push_back(represented->type);
-      }
-    }
-  }
+  inputs.append(inputTypes.begin(), inputTypes.end());
   auto word{merk::WordType::get(&context_)};
   // A word copy's body has the same lambda expressions as the procedure's,
   // which capture values of the same types: one procedure serves both.
-  merk::ProcOp proc{lambdaProcs_.lookup(&goal)};
+  merk::ProcOp proc{lambdaProcs_.lookup(&key)};
   if (!proc ||
       proc.getFunctionType().getInputs() != llvm::ArrayRef<mlir::Type>{inputs}) {
     {
@@ -914,8 +937,8 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
       proc = merk::ProcOp::create(builder_, loc,
           procName_ + "$lambda" + std::to_string(lambdas_++),
           builder_.getFunctionType(
-              inputs, llvm::SmallVector<mlir::Type>(outputs.size(), word)),
-          *determinism);
+              inputs, llvm::SmallVector<mlir::Type>(outputs, word)),
+          determinism);
       proc.setPrivate();
     }
     // Its body, with the captured values and its inputs as the procedure's.
@@ -956,26 +979,21 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
                     merk::TypeInfoType::get(&context_), value, place.second);
         }
       }
-      for (auto [var, argument] : llvm::zip(goal.lambdaHead, arguments)) {
-        if (!argument.output && !argument.dummy) {
-          values_[var] = entry->getArgument(input++);
-        }
+      for (BodyVar var : inputVars) {
+        values_[var] = entry->getArgument(input++);
       }
-      wordOutputs_ = outputs;
+      wordOutputs_ = std::move(wordOutputs);
       procName_ = proc.getSymName().str();
       const Body *outerLambda{committedLambda_};
-      committedLambda_ = goal.modes->determinism == parser::Determinism::CcMulti ||
-              goal.modes->determinism == parser::Determinism::CcNondet
-          ? goal.lambda
-          : nullptr;
-      Goal(*goal.lambda, body);
+      committedLambda_ = committed ? &inner : nullptr;
+      Goal(inner, body);
       committedLambda_ = outerLambda;
       if (!failed_ && !Terminated()) {
-        llvm::SmallVector<mlir::Value> results{WordResults(outputs, body, loc)};
-        if (llvm::is_contained(results, mlir::Value{})) {
+        llvm::SmallVector<mlir::Value> words{results(loc)};
+        if (llvm::is_contained(words, mlir::Value{})) {
           NotYet(at, "this lambda expression's outputs");
         } else {
-          merk::SucceedOp::create(builder_, loc, results);
+          merk::SucceedOp::create(builder_, loc, words);
           EraseUnwordedOutputs(proc.getBody());
         }
       }
@@ -989,14 +1007,14 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
     if (failed_) {
       proc.getBody().dropAllReferences();
       proc.getBody().getBlocks().clear();
-      return;
+      return {};
     }
-    lambdaProcs_[&goal] = proc;
+    lambdaProcs_[&key] = proc;
   }
   merk::ProcOp entry{ClosureEntry(
       proc, static_cast<unsigned>(capturedValues.size()), arguments, at)};
   if (!entry) {
-    return;
+    return {};
   }
   CapturePlaces places;
   llvm::SmallVector<mlir::Attribute> captures;
@@ -1023,7 +1041,7 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
     if (var < kFirstGivenVar) {
       mlir::Attribute capture{CaptureTypeAttr(*body.vars[var].type, places, at)};
       if (!capture) {
-        return;
+        return {};
       }
       captures.push_back(capture);
     } else {
@@ -1031,7 +1049,7 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
       if (!mlir::isa<merk::TypeInfoType, merk::TypeclassInfoType>(given)) {
         NotYet(at, "a closure that captures what a goal gave, which is not a "
                    "type_info or a typeclass_info");
-        return;
+        return {};
       }
       captures.push_back(builder_.getStringAttr(
           mlir::isa<merk::TypeInfoType>(given) ? "type_info"
@@ -1042,7 +1060,7 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
   for (mlir::Value value : capturedValues) {
     words.push_back(Coerce(value, word, loc));
   }
-  values_[goal.left] = merk::ClosureOp::create(builder_, loc,
+  return merk::ClosureOp::create(builder_, loc,
       merk::ClosureType::get(&context_),
       mlir::FlatSymbolRefAttr::get(&context_, entry.getSymName()), words,
       CapturesAttr(captures));
