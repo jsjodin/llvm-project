@@ -30,6 +30,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include <functional>
@@ -296,6 +297,14 @@ private:
       const Type &super, unsigned first);
   // The rules for discriminated union types' constructors, and subtypes'.
   void CheckTypeDefinitions();
+  // A type's user-defined equality and comparison: of the module's own
+  // types, checked, and of an interface's, only found.
+  void UserEqualities();
+  void CheckUserEquality(const Symbol &type, const parser::DuTypeDefn &defn,
+      bool report);
+  const Symbol *UserPredicate(const Symbol &type,
+      const parser::DuTypeDefn &defn, const parser::SymName &name,
+      bool comparison, bool report);
 
   // Type conversions (reference manual, "Type conversions"). The base type
   // of a discriminated union type, with its arguments: the type itself, or
@@ -2276,6 +2285,137 @@ static bool ProvidedByCompiler(const Symbol &symbol) {
   });
 }
 
+void TypeChecker::UserEqualities() {
+  for (const ModuleInterface *interface : resolution_.interfaces()) {
+    const ModuleSymbols *symbols{resolution_.Module(interface->name)};
+    if (!symbols) {
+      continue;
+    }
+    for (const Symbol *symbol : symbols->symbols()) {
+      if (symbol->kind != SymbolKind::Type) {
+        continue;
+      }
+      if (const auto *defn{
+              std::get_if<const parser::DuTypeDefn *>(&symbol->declaration)}) {
+        CheckUserEquality(*symbol, **defn, /*report=*/false);
+      }
+    }
+  }
+}
+
+void TypeChecker::CheckUserEquality(
+    const Symbol &type, const parser::DuTypeDefn &defn, bool report) {
+  const parser::TypeAttributes *attributes{defn.attributes};
+  // A subtype's are its base type's, and it may not name its own.
+  if (!attributes || defn.supertype ||
+      (!attributes->equality && !attributes->comparison)) {
+    return;
+  }
+  if (defn.constructors.size() == 1 &&
+      defn.constructors.front()->arguments.empty() &&
+      defn.constructors.front()->existentialVars.empty()) {
+    // mmc: "the type `unit'/0 contains no information, and as such it is
+    // not allowed to have user-defined equality or comparison."
+    if (report) {
+      messages_->Say(Source(defn.tokens),
+          "the type %s/%u has only one value, so it cannot have a user-defined equality or comparison"_err_en_US,
+          type.name.str(), type.arity);
+    }
+    return;
+  }
+  UserEquality user;
+  if (attributes->equality) {
+    user.equality = UserPredicate(type, defn, *attributes->equality, false, report);
+  }
+  if (attributes->comparison) {
+    user.comparison =
+        UserPredicate(type, defn, *attributes->comparison, true, report);
+  }
+  result_.userEqualities_[&type] = user;
+}
+
+// The predicate a type's definition names for its equality, of the type's
+// arguments, or its comparison, of comparison_result and them, which must
+// be of the type's module, as in mmc, which qualifies the name with it.
+// Its types may be more general, and it must be pure.
+const Symbol *TypeChecker::UserPredicate(const Symbol &type,
+    const parser::DuTypeDefn &defn, const parser::SymName &name,
+    bool comparison, bool report) {
+  const char *what{comparison ? "comparison" : "equality"};
+  unsigned arity{comparison ? 3u : 2u};
+  const ModuleSymbols *symbols{type.module == resolution_.module().name()
+          ? &resolution_.module()
+          : resolution_.Module(type.module)};
+  const Symbol *found{nullptr};
+  bool qualifiedElsewhere{!name.qualifiers.empty() &&
+      llvm::join(name.qualifiers, ".") != type.module.str()};
+  if (symbols && !qualifiedElsewhere) {
+    for (const Symbol *symbol : symbols->Lookup(name.name)) {
+      if (symbol->kind == SymbolKind::Predicate && symbol->arity == arity &&
+          symbol->module == type.module) {
+        found = symbol;
+        break;
+      }
+    }
+  }
+  if (!found) {
+    // mmc: "In clause for unification predicate for type `box': error:
+    // undefined predicate `m.any_equal'/2."
+    if (report) {
+      messages_->Say(Source(defn.tokens),
+          "the %s predicate %s.%s/%u of type %s/%u is not defined in its module"_err_en_US,
+          what, type.module.str(), name.name.str(), arity, type.name.str(),
+          type.arity);
+    }
+    return nullptr;
+  }
+  const Signature *sig{SignatureOf(*found)};
+  if (!sig) {
+    return found; // without a declaration, as its clauses' types say
+  }
+  llvm::SmallVector<const Type *, 4> parameters;
+  for (unsigned i{0}; i < type.arity; ++i) {
+    parameters.push_back(types_.Variable(i));
+  }
+  const Type *value{types_.Named(type, parameters)};
+  llvm::SmallVector<const Type *, 3> expected;
+  if (comparison) {
+    const Type *result{Library("builtin", "comparison_result")};
+    expected.push_back(result ? result : types_.Named(error_, {}));
+  }
+  expected.push_back(value);
+  expected.push_back(value);
+  llvm::SmallVector<const Type *, 4> bindings;
+  bool matches{sig->arguments.size() == expected.size()};
+  for (std::size_t i{0}; matches && i < expected.size(); ++i) {
+    matches = Match(sig->arguments[i], expected[i], bindings);
+  }
+  if (!matches) {
+    // mmc: "In clause for unification predicate for type `box': in call to
+    // predicate `m.int_equals'/2: in argument 1: variable `HeadVar__1' has
+    // type `m.box', expected type was `int'".
+    if (report) {
+      messages_->Say(Source(defn.tokens),
+          comparison
+              ? "the comparison predicate %s/%u of type %s/%u does not take a comparison_result and two values of the type"_err_en_US
+              : "the equality predicate %s/%u of type %s/%u does not take two values of the type"_err_en_US,
+          name.name.str(), arity, type.name.str(), type.arity);
+    }
+    return nullptr;
+  }
+  if (sig->purity != parser::Purity::Pure) {
+    // mmc: "In unification predicate for type `box': purity error:
+    // predicate is impure. It must be pure."
+    if (report) {
+      messages_->Say(Source(defn.tokens),
+          "the %s predicate %s/%u of type %s/%u must be pure"_err_en_US, what,
+          name.name.str(), arity, type.name.str(), type.arity);
+    }
+    return nullptr;
+  }
+  return found;
+}
+
 void TypeChecker::CheckTypeDefinitions() {
   for (const Symbol *symbol : resolution_.module().symbols()) {
     if (symbol->kind != SymbolKind::Type) {
@@ -2316,6 +2456,7 @@ void TypeChecker::CheckTypeDefinitions() {
             symbol->name.str(), symbol->arity);
       }
     }
+    CheckUserEquality(*symbol, **defn, /*report=*/true);
     if (!(*defn)->supertype) {
       continue;
     }
@@ -4926,6 +5067,7 @@ void TypeChecker::Run(const SemanticForm &form) {
   CheckTypeclasses();
   CheckInstances();
   CheckTypeDefinitions();
+  UserEqualities();
   // The module's own declarations, whose errors inference would otherwise
   // report to its scratch list, when it is first to use them.
   for (const Symbol *symbol : resolution_.module().symbols()) {

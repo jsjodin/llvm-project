@@ -126,6 +126,14 @@ inline std::uint64_t OpenTwin(std::uint64_t coerced) {
   return 1 | (coerced << 1);
 }
 
+// The predicates a type's definition names for its equality and its
+// comparison (reference manual, "User-defined equality and comparison");
+// null for one it does not name, or one that was not found.
+struct UserEquality {
+  const Symbol *equality{nullptr};
+  const Symbol *comparison{nullptr};
+};
+
 class TypeChecking {
 public:
   TypeChecking();
@@ -156,6 +164,12 @@ public:
     auto it{supertypes_.find(&symbol)};
     return it == supertypes_.end() ? nullptr : it->second;
   }
+  // The user-defined equality and comparison of a base type, of the module
+  // or of an interface it loaded; null if it has neither.
+  const UserEquality *UserEqualityOf(const Symbol &type) const {
+    auto it{userEqualities_.find(&type)};
+    return it == userEqualities_.end() ? nullptr : &it->second;
+  }
   // Prints a type of the clause, its type variables by their names.
   std::string Print(const ClauseTypes &, const Type &) const;
   std::string Print(const ClauseTypes &, const ClassConstraint &) const;
@@ -174,6 +188,7 @@ private:
   // whose entries do not move: SignatureOf's pointers must stay valid.
   std::unordered_map<const Symbol *, std::optional<Signature>> signatures_;
   llvm::DenseMap<const Symbol *, const Type *> supertypes_;
+  llvm::DenseMap<const Symbol *, UserEquality> userEqualities_;
   std::vector<ClauseTypes> clauses_;
   std::deque<MethodDefinition> methods_;
   std::deque<InstanceHead> instances_;
