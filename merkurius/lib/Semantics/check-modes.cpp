@@ -108,6 +108,12 @@ bool ReservedMode(llvm::StringRef name) {
   return llvm::is_contained({">>", "is"}, name);
 }
 
+// Whether a symbol is a method of a type class, which its declaration
+// owns.
+static bool IsMethod(const Symbol &symbol) {
+  return symbol.owner && symbol.owner->kind == SymbolKind::Typeclass;
+}
+
 std::string Text(const Symbol &symbol) {
   std::string text;
   llvm::raw_string_ostream os{text};
@@ -1425,11 +1431,13 @@ void ModeChecker::BuildProcedures(
       Declared declared{ConvertDeclaration(arguments, result, pred.withInst,
           pred.determinism, constraints, symbol->source)};
       // A `with_inst` inst gives its determinism.
-      if (own_ && symbol->exported && !declared.determinism) {
-        // mmc: "no determinism declaration for exported predicate `q'/1".
+      if (own_ && (symbol->exported || IsMethod(*symbol)) &&
+          !declared.determinism) {
+        // mmc: "no determinism declaration for exported predicate `q'/1",
+        // or "for type class method predicate `p'/2".
         messages_.Say(symbol->source,
-            "the exported %s has no determinism declaration"_err_en_US,
-            Text(*symbol));
+            "the %s %s has no determinism declaration"_err_en_US,
+            IsMethod(*symbol) ? "method" : "exported", Text(*symbol));
       }
       AddDeclared(
           *symbol, std::move(declared), symbol->source, procedures, sources);
@@ -1461,12 +1469,15 @@ void ModeChecker::BuildProcedures(
       }
       Declared declared{ConvertDeclaration(mode.arguments, result,
           mode.withInst, mode.determinism, mode.constraints, where)};
-      if (own_ && item.interface == symbol->exported && symbol->exported &&
-          !declared.determinism) {
-        // mmc: "no determinism declaration for exported predicate `p'/1".
+      if (own_ && item.interface == symbol->exported &&
+          (symbol->exported || IsMethod(*symbol)) && !declared.determinism) {
+        // mmc: "no determinism declaration for exported predicate `p'/1",
+        // or, for a method, "for type class method predicate `p'/2": each
+        // mode of a method declares its determinism (reference manual,
+        // "Typeclass declarations").
         messages_.Say(where,
-            "the exported %s has no determinism declaration in this mode declaration"_err_en_US,
-            Text(*symbol));
+            "the %s %s has no determinism declaration in this mode declaration"_err_en_US,
+            IsMethod(*symbol) ? "method" : "exported", Text(*symbol));
       }
       AddDeclared(*symbol, std::move(declared), where, procedures, sources);
     }
