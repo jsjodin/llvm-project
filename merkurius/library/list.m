@@ -67,6 +67,8 @@
 :- mode delete(in, in, out) is nondet.
 :- mode delete(in, out, out) is nondet.
 :- mode delete(out, in, in) is multi.
+:- pred perm(list(T), list(T)).
+:- mode perm(in, out) is multi.
 :- func delete_all(list(T), T) = list(T).
 :- pred delete_all(list(T), T, list(T)).
 :- mode delete_all(di, in, uo) is det.
@@ -444,6 +446,11 @@ insert(X, L0, L) :-
 delete([X | Xs], X, Xs).
 delete([X | Xs], Y, [X | Zs]) :-
     delete(Xs, Y, Zs).
+
+perm([], []).
+perm([X | Xs], Ys) :-
+    perm(Xs, Ys0),
+    insert(X, Ys0, Ys).
 
 delete_all(L0, X) = L :-
     delete_all(L0, X, L).
