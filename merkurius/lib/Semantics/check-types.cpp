@@ -1140,8 +1140,9 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
                   names.names[var].str(), constructorName);
             } else if (!determined.contains(var)) {
               // mmc: "type variable `T2' occurs in the constraints, but is
-              // not determined by the constructor's argument types".
-              messages_->Say(Source((*constructor)->tokens),
+              // not determined by the constructor's argument types", at the
+              // type.
+              messages_->Say(Source((*defn)->name->tokens),
                   "type variable %s occurs in the constraints of constructor %s, but its argument types do not determine it"_err_en_US,
                   names.names[var].str(), constructorName);
             }
