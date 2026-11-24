@@ -44,6 +44,10 @@ struct ModuleInterface {
   // file is a sound stub, which declares what another file defines.
   llvm::StringSet<> defined;
   bool definitionsKnown{true};
+  // The foreign_decls for C of the implementation section that are not
+  // `local`, whose code the modules that import this one see (reference
+  // manual, "Adding foreign declarations"), in order.
+  std::vector<const parser::ForeignDeclPragma *> sharedForeignDecls;
   // The implementation section's definitions of the types that the
   // interface declares abstractly and that are equivalences. Importing
   // modules see through them after type checking, so that a value of one

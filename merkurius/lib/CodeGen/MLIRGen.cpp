@@ -1103,7 +1103,10 @@ std::string EscapeForC(llvm::StringRef text) {
 } // namespace
 
 std::string MerkGenerator::LineDirective(parser::TokenRange range) {
-  parser::CharBlock at{Where(range)};
+  return LineDirective(Where(range));
+}
+
+std::string MerkGenerator::LineDirective(parser::CharBlock at) {
   if (auto provenance{sources_.GetProvenanceRange(at)}) {
     if (auto pos{sources_.GetSourcePosition(provenance->start())}) {
       return "#line " + std::to_string(pos->line) + " \"" +
@@ -1113,10 +1116,19 @@ std::string MerkGenerator::LineDirective(parser::TokenRange range) {
   return "";
 }
 
-std::string MerkGenerator::IncludeDirective(const parser::ForeignCode &code) {
+// A foreign_decl's or foreign_code's code, at `at` in its source, as C.
+std::string MerkGenerator::ForeignText(
+    const parser::ForeignCode &code, parser::CharBlock at) {
+  if (code.includeFile) {
+    return IncludeDirective(code, at);
+  }
+  return LineDirective(at) + code.text.str() + "\n";
+}
+
+std::string MerkGenerator::IncludeDirective(
+    const parser::ForeignCode &code, parser::CharBlock at) {
   llvm::SmallString<256> path{code.text};
   if (llvm::sys::path::is_relative(path)) {
-    parser::CharBlock at{Where(code.tokens)};
     if (auto provenance{sources_.GetProvenanceRange(at)}) {
       if (auto pos{sources_.GetSourcePosition(provenance->start())}) {
         llvm::SmallString<256> directory{
@@ -1782,8 +1794,46 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
     EnsureRootDescriptors(type);
   }
   if (!foreignCode_.empty()) {
-    // The module's own foreign_decl and foreign_code for C come first.
+    // The foreign_decls for C that the modules it imports share with it
+    // (reference manual, "Adding foreign declarations"), and those of a
+    // module a foreign_import_module names, as mmc's header of the module
+    // has them ("Declaring Mercury exports to other modules"), then its own
+    // foreign_decl and foreign_code for C.
     std::string code{kForeignPrelude};
+    llvm::StringSet<> included;
+    for (const parser::Item &item : tree_.items) {
+      llvm::ArrayRef<const parser::SymName *> modules;
+      if (const auto *import{std::get_if<const parser::ImportDecl *>(&item)};
+          import && (*import)->kind != parser::ImportKind::IncludeModule) {
+        modules = (*import)->modules;
+      } else if (const auto *foreign{
+                     std::get_if<const parser::ForeignImportModulePragma *>(
+                         &item)};
+          foreign && (*foreign)->language == parser::ForeignLanguage::C) {
+        modules = (*foreign)->module;
+      }
+      for (const parser::SymName *name : modules) {
+        std::string full{name->name.str()};
+        if (!name->qualifiers.empty()) {
+          full = llvm::join(name->qualifiers, ".") + "." + full;
+        }
+        for (const semantics::ModuleInterface *interface :
+            resolution_.interfaces()) {
+          if (interface->name != full || !included.insert(full).second) {
+            continue;
+          }
+          const parser::TokenSequence &tokens{*interface->tokens};
+          for (const parser::ForeignDeclPragma *decl :
+              interface->sharedForeignDecls) {
+            const parser::ForeignCode &shared{*decl->code};
+            parser::CharBlock at{
+                tokens.tokens[shared.tokens.first].spelling.begin(),
+                tokens.tokens[shared.tokens.last].spelling.end()};
+            code += ForeignText(shared, at);
+          }
+        }
+      }
+    }
     for (const parser::Item &item : tree_.items) {
       const parser::ForeignCode *foreign{nullptr};
       if (const auto *decl{std::get_if<const parser::ForeignDeclPragma *>(&item)};
@@ -1797,11 +1847,7 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
       if (!foreign) {
         continue;
       }
-      if (foreign->includeFile) {
-        code += IncludeDirective(*foreign);
-      } else {
-        code += LineDirective(foreign->tokens) + foreign->text.str() + "\n";
-      }
+      code += ForeignText(*foreign, Where(foreign->tokens));
     }
     code += foreignCode_;
     module_->setAttr(kForeignCodeAttrName, builder_.getStringAttr(code));

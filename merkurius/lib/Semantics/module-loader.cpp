@@ -180,6 +180,13 @@ const ModuleInterface *ModuleLoader::Load(
   std::vector<const parser::EquivalenceTypeDefn *> equivalences;
   std::vector<std::string> implementationTypes;
   for (const parser::Item &item : tree.items) {
+    if (const auto *foreign{
+            std::get_if<const parser::ForeignDeclPragma *>(&item)};
+        foreign && !inInterface && named &&
+        (*foreign)->language == parser::ForeignLanguage::C &&
+        !(*foreign)->local) {
+      interface.sharedForeignDecls.push_back(*foreign);
+    }
     if (const auto *decl{std::get_if<const parser::AbstractTypeDecl *>(&item)};
         decl && inInterface) {
       abstract.insert(TypeKey(*(*decl)->name, (*decl)->parameters.size()));
