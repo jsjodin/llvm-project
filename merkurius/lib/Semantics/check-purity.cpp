@@ -523,8 +523,12 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
     // Clauses for different modes may mean different things, so they are
     // impure unless promised equivalent (reference manual, "Different
     // clauses for different modes").
+    // So are clauses beside a foreign_proc, which runs instead of them in
+    // its mode (mmc: "purity error: predicate is impure"; see the
+    // register).
     Clauses of{clauses};
-    if (of.modeSpecific && modes.lookup(symbol) > 1 &&
+    bool mixed{clauses.first && foreign.count(symbol)};
+    if ((of.modeSpecific || mixed) && modes.lookup(symbol) > 1 &&
         !equivalent.count(symbol)) {
       of.purity = Purity::Impure;
     }
