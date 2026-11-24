@@ -775,6 +775,14 @@ merk::ProcOp MerkGenerator::CompareProc(merk::TermType term) {
         std::size_t first{hidden.types.size()};
         llvm::SmallVector<bool> compared(hidden.places.size(), false);
         unsigned base{ExistentialBase(*type)};
+        // Each existentially quantified variable's type_infos, taken before
+        // any comparison: a later argument is live across the earlier ones'
+        // comparisons, and a collection there needs its type_info.
+        llvm::SmallVector<std::pair<mlir::Value, mlir::Value>> hiddenInfos;
+        for (std::pair<unsigned, unsigned> place : hidden.places) {
+          hiddenInfos.emplace_back(HiddenTypeInfo(xs.getFields(), place, loc),
+              HiddenTypeInfo(ys.getFields(), place, loc));
+        }
         // The first argument is the most significant, and the last one's
         // comparison, as a list's tail, is in tail position.
         for (auto [i, a, b, argument] : llvm::enumerate(
@@ -789,9 +797,7 @@ merk::ProcOp MerkGenerator::CompareProc(merk::TermType term) {
               continue;
             }
             compared[var - base] = true;
-            std::pair<unsigned, unsigned> place{hidden.places[var - base]};
-            mlir::Value p{HiddenTypeInfo(xs.getFields(), place, loc)};
-            mlir::Value q{HiddenTypeInfo(ys.getFields(), place, loc)};
+            auto [p, q]{hiddenInfos[var - base]};
             mlir::Value types{merk::CompareTypeInfoOp::create(
                 builder_, loc, builder_.getI32Type(), p, q)};
             mlir::Value zero{IntegerConstant(builder_.getI32Type(), 0, loc)};

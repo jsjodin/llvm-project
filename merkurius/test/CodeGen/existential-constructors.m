@@ -5,6 +5,8 @@
 % gives them to the goals after it. A unification fails if the types differ.
 % A comparison compares an argument's existential types, in mmc's order of
 % types, just before its value, so an argument before it decides first.
+% Every typeclass_info's type_info is taken before the first comparison, as a
+% later argument is live across it.
 % io.write finds an argument's type in the cell. The output is mmc's for the
 % same program.
 %
@@ -44,6 +46,8 @@ len([H | T]) = sz(H) + len(T).
 :- type tagged(K) ---> some [V] tagged(K, V).
 % An existentially typed constructor's term inside another's, at its variable.
 :- type nest ---> some [B] nest(tagged(B)).
+% Two constrained variables, whose type_infos are in typeclass_infos.
+:- type duo ---> some [A, B] duo(A, B) => (sh(A), sh(B)).
 
 :- pred show(box::in, io::di, io::uo) is det.
 show(box(X), !IO) :-
@@ -122,7 +126,12 @@ main(!IO) :-
     io.write(N1, !IO), io.nl(!IO),
     cmp(N1, N2, !IO),
     cmp(N2, N3, !IO),
-    cmp(N1, 'new nest'('new tagged'(1, "x")), !IO).
+    cmp(N1, 'new nest'('new tagged'(1, "x")), !IO),
+    D1 = 'new duo'(1, "x"),
+    cmp(D1, 'new duo'(1, 2), !IO),
+    cmp(D1, 'new duo'(2, "a"), !IO),
+    cmp(D1, 'new duo'("a", "x"), !IO),
+    cmp(D1, 'new duo'(1, "x"), !IO).
 
 % OUTPUT: int/42
 % OUTPUT-NEXT: string/2
@@ -167,6 +176,10 @@ main(!IO) :-
 % OUTPUT-NEXT: nest(tagged(1, "x")) '>' nest(tagged(1, 2))
 % OUTPUT-NEXT: nest(tagged(1, 2)) '<' nest(tagged("a", 2))
 % OUTPUT-NEXT: nest(tagged(1, "x")) '=' nest(tagged(1, "x")) equal
+% OUTPUT-NEXT: duo(1, "x") '>' duo(1, 2)
+% OUTPUT-NEXT: duo(1, "x") '<' duo(2, "a")
+% OUTPUT-NEXT: duo(1, "x") '<' duo("a", "x")
+% OUTPUT-NEXT: duo(1, "x") '=' duo(1, "x") equal
 
 % MERK-DAG: merk.type_def "existential_constructors.box" [#merk.constructor<"box"(!merk.typeclass_info, !merk.word) hidden 1>]
 % MERK-DAG: merk.type_def "existential_constructors.any" [#merk.constructor<"none">, #merk.constructor<"any"(!merk.type_info, !merk.word) hidden 1>]
