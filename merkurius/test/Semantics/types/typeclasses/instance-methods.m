@@ -22,11 +22,13 @@ main(0).
 :- instance c(string) where [ f(_) = 0, (g(_) :- true), h(_) = 1 ].
 % CHECK: [[@LINE-1]]:57: error: the typeclass c/1 has no function method h/1
 :- instance c(list(T)) where [ f(_) = 0, func(f/1) is ff, (g(_) :- true) ].
-% CHECK: [[@LINE-1]]:42: error: instance instance_methods.c(list.list(T)) has more than one implementation of the function method f/1
+% CHECK: [[@LINE-1]]:13: error: instance instance_methods.c(list.list(T)) has more than one implementation of the function method f/1
 % CHECK: [[@LINE-2]]:32: because: the first is here
+% CHECK: [[@LINE-3]]:42: because: another is here
 :- instance c({}) where [ func(f/1) is ff, func(f/1) is ff, pred(g/1) is gg ].
-% CHECK: [[@LINE-1]]:44: error: instance instance_methods.c({}) has more than one implementation of the function method f/1
+% CHECK: [[@LINE-1]]:13: error: instance instance_methods.c({}) has more than one implementation of the function method f/1
 % CHECK: [[@LINE-2]]:27: because: the first is here
+% CHECK: [[@LINE-3]]:44: because: another is here
 :- instance c(q(T)) where [ pred(f/1) is gg, pred(g/1) is gg ].
 % CHECK: [[@LINE-1]]:13: error: instance instance_methods.c(instance_methods.q(T)) has no implementation of the function method f/1
 % CHECK: [[@LINE-2]]:29: error: the typeclass c/1 has no predicate method f/1

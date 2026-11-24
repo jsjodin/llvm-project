@@ -2747,11 +2747,15 @@ void TypeChecker::CheckMethods(const parser::InstanceDecl &decl,
     auto [it, inserted]{defined.try_emplace(*found, tokens, byName)};
     // Several clauses are one definition.
     if (!inserted && (byName || it->second.second)) {
-      parser::Message &message{messages_->Say(Source(tokens),
+      // mmc: "In instance declaration for `c(int)': multiple
+      // implementations of type class function method `f'/1.", at the
+      // instance.
+      parser::Message &message{messages_->Say(Source(decl.name->tokens),
           "instance %s has more than one implementation of the %s method %s/%u"_err_en_US,
           head, KindName(kind), name.str(), arity)};
       message.Attach(Source(it->second.first),
           "the first is here"_because_en_US);
+      message.Attach(Source(tokens), "another is here"_because_en_US);
     }
   }
   for (const Symbol *method : methods) {
