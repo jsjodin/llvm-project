@@ -206,7 +206,8 @@ def mmc_error_texts(test, mmc):
             # A note that points at the declaration an error conflicts
             # with is not an error of its own.
             if re.match(r"(Previous .* declaration was here|"
-                        r"Here is the conflicting .*)\.$", joined):
+                        r"Here is the conflicting .*|"
+                        r"The first one was here)\.$", joined):
                 continue
             if re.search(r"\berror\b", joined, re.I) or not re.search(
                     r"\bwarning\b", joined, re.I):

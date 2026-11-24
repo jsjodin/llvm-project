@@ -8759,6 +8759,38 @@ tested shows.
    `CodeGen/strict-infinite-loops.m`, outside the suite, since the oracle
    cannot run a program that never ends.
 
+   *Foreign language interface, C only, tests written (2026-11-24):* the
+   user chose fixes and tests, with "not yet implemented" for what is
+   missing. Bugs fixed:
+   - the driver did not take `-l`, `-fuse-ld=` or archives and shared
+     libraries on the command line;
+   - include_file paths were not relative to the module's source;
+   - a mode with neither clauses nor a foreign_proc, of a predicate whose
+     other mode has one, had no code; it is inferred failure, as in mmc;
+   - clauses and a foreign_proc of a predicate with several modes did not
+     make it impure;
+   - may_call_mm_tabled with will_not_call_mercury was accepted;
+   - none of the chapter's checks of foreign_type, foreign_enum,
+     foreign_export_enum and foreign_export were made, and a multi or
+     nondet foreign_proc was accepted (`Semantics/check-foreign.cpp`);
+   - foreign_enum, foreign_export_enum, foreign_export and a foreign_type
+     on a discriminated union type were ignored, the last crashing at run
+     time; each is now "not yet implemented";
+   - a foreign_decl that is not local was not seen by importing modules;
+   - MR_Bool, MR_YES, MR_NO, MR_Comparison_Result and MR_COMPARE_* were
+     missing. The MR_list_* macros are "not yet implemented" at their use.
+   mmc accepts a nondet foreign_proc that nothing calls and aborts on a
+   call (mmc bugs, "Crashes"); merkc gives the manual's error, outside
+   the suite. Register rows record the rest where merkc follows mmc.
+   Decided: foreign code does not collect. When MR_list_cons and
+   MR_list_empty are built, they allocate from the process's heap without
+   a safepoint, as a foreign_proc that will_not_call_merkurius has no
+   stack map, and the cell lives until the next collection after the
+   foreign_proc returns, when its result roots it. Left: values of foreign
+   types, foreign_export (and then foreign_import_module of a module with
+   exports), foreign_enum, foreign_export_enum, the list macros, and the
+   C# and Java sections, which merkc has no backend for.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
