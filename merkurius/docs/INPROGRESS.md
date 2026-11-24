@@ -8691,6 +8691,20 @@ tested shows.
    needs a procedure that captures the typeclass_info. The library has no
    `map`, so the functional dependencies test uses a type of its own.
 
+   *Existential types, tests written (2026-11-23):* found and fixed:
+   - A generated comparison of a constructor with two or more constrained
+     existential variables crashed in liveness: the later arguments'
+     type_infos, taken from their typeclass_infos, were made after
+     comparisons that the arguments were live across.
+   - An existential variable that only a constraint has, through a
+     functional dependency, had no type in polymorphism analysis, so the
+     procedure was NYI. The type checker now passes on the types goals give
+     their callees' existential variables.
+   - Quantifiers in another order than all before some were a syntax
+     error. mmc accepts any order (register).
+   - A constraint's variable not determined by the constructor's arguments
+     is now reported at the type, as mmc does.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
