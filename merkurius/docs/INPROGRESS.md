@@ -8657,6 +8657,10 @@ tested shows.
    are `differs-` tests of kind `implementation`, for which the oracle now
    records mmc's errors when it rejects the program.
 
+   *Determinism, tests written (2026-11-23):* one bug fixed: two modes
+   that differ only in cc-ness were "the same mode declared twice". Each
+   call now runs the one its context wants.
+
    *Subtypes have no code generation yet* (`nyi-` tests in
    `types/subtypes/`). The user put it after the fixes to existing
    features (2026-11-23). The design worked out:
