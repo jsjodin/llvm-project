@@ -20,13 +20,6 @@ sizes(L) = [size | map_size(L)].
 :- func map_size(list(int)) = list(func(int) = int).
 map_size(_) = [].
 
-% A type with user-defined equality, whose unifications call its
-% predicate.
-:- type set ---> set(list(int)) where equality is equal.
-:- pred equal(set::in, set::in) is semidet.
-% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for values of type not_yet.set
-equal(set(X), set(X)).
-
 :- some [T] pred r(T::out) is det.
 % CHECK: not-yet.m:[[@LINE-1]]:18: error: not yet implemented: code generation for foreign_procs with existential types
 :- pragma foreign_proc("C", r(X::out), [will_not_call_merkurius, promise_pure], "X = 0;").

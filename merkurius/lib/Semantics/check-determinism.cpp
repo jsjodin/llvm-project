@@ -1782,6 +1782,17 @@ public:
     std::optional<parser::Determinism> declared{body_.procedure->determinism};
     bool committed{declared && IsCommittedChoice(*declared)};
     Contexts(body_.body, {committed, {}});
+    for (const Body *goal : noncanonicalFailing_) {
+      if (!body_.goals.count(goal)) {
+        continue;
+      }
+      BodyVar var{goal->kind == BodyKind::Switch ? goal->switchVar : goal->left};
+      // mmc: "Error: unification for non-canonical type `t'/0 is not
+      // guaranteed to succeed."
+      messages_.Say(Where(goal->tokens),
+          "the deconstruction of %s can fail, but its type %s has a user-defined equality"_err_en_US,
+          Name(var), TypeToString(*body_.vars[var].type));
+    }
     Requirements(body_.body);
     for (auto &[goal, determinism] : body_.goals) {
       determinism = DeterminismOf(ComponentsOf(determinism), first_.count(goal));
@@ -2066,6 +2077,17 @@ private:
       if (goal->canFail) {
         r.d.canFail = true;
       }
+      // As a deconstruction of a type with a user-defined equality.
+      if (NonCanonical(body_.vars[goal->switchVar].type)) {
+        if (r.d.canFail) {
+          noncanonicalFailing_.insert(goal);
+        } else {
+          noncanonical_.insert(goal);
+          if (r.d.most != Solutions::Zero) {
+            r.d.most = Solutions::Many;
+          }
+        }
+      }
       bound = std::move(after);
       return r;
     }
@@ -2123,6 +2145,37 @@ private:
     return {det};
   }
 
+  // Whether values of the type may have more than one representation: it
+  // has a user-defined equality or comparison, or is a subtype of one that
+  // has (reference manual, "User-defined equality and comparison").
+  bool NonCanonical(const Type *type) const {
+    if (!type || type->kind != TypeKind::Named) {
+      return false;
+    }
+    const Symbol *symbol{type->constructor};
+    for (int depth{0}; symbol && depth < 64; ++depth) {
+      const auto *du{
+          std::get_if<const parser::DuTypeDefn *>(&symbol->declaration)};
+      if (!du) {
+        return false;
+      }
+      const parser::TypeAttributes *attributes{(*du)->attributes};
+      if (attributes &&
+          (attributes->equality || attributes->comparison ||
+              attributes->abstractNoncanonical)) {
+        return true;
+      }
+      // A subtype's supertype, by the name its definition gives it.
+      const auto *named{(*du)->supertype
+              ? std::get_if<const parser::NamedType *>(&*(*du)->supertype)
+              : nullptr};
+      symbol = named && !(*named)->name->candidates.empty()
+          ? (*named)->name->candidates.front()
+          : nullptr;
+    }
+    return false;
+  }
+
   Inferred Unification(const Body *goal, std::set<BodyVar> &bound) {
     const Components det{false, Solutions::One};
     bound.insert(goal->left);
@@ -2163,6 +2216,18 @@ private:
           (it != known_.end() && it->second == goal->functor)};
       if (body_.rechecked) {
         known_[goal->left] = goal->functor;
+      }
+      // Of a type with a user-defined equality, which has more than one
+      // representation of a value: committed choice, and an error if it
+      // can fail (reference manual, "User-defined equality and
+      // comparison").
+      if (!known && NonCanonical(body_.vars[goal->left].type)) {
+        if (goal->canFail) {
+          noncanonicalFailing_.insert(goal);
+          return {{true, Solutions::One}};
+        }
+        noncanonical_.insert(goal);
+        return {{false, Solutions::Many}};
       }
       return {{!known && goal->canFail, Solutions::One}};
     }
@@ -2490,6 +2555,12 @@ private:
       return;
     }
     case BodyKind::Switch: {
+      if (many && noncanonical_.count(goal)) {
+        AddCause(causes, goal, context,
+            "the switch on " + Name(goal->switchVar) +
+                ", whose type has a user-defined equality, can succeed more "
+                "than once");
+      }
       if (fails && goal->canFail) {
         std::vector<std::string> missing{Missing(goal)};
         AddCause(causes, goal, context,
@@ -2753,6 +2824,8 @@ private:
       own = Of(*goal->modes->callee);
     } else if (goal->kind == BodyKind::HOCall) {
       own = goal->modes->determinism;
+    } else if (noncanonical_.count(goal)) {
+      own = parser::Determinism::CcMulti;
     }
     if (context.first && (own ? IsCommittedChoice(*own) : !loose)) {
       first_.insert(goal);
@@ -2815,6 +2888,17 @@ private:
     }
   }
 
+  // Reports a deconstruction of a type with a user-defined equality, which
+  // is committed choice, in a context that wants all solutions.
+  void CheckNoncanonical(const Body *goal, BodyVar var, const Context &context) {
+    // mmc: "Error: unification for non-canonical type `t'/0 occurs in a
+    // context which requires all solutions."
+    CheckCommitted(goal, context, parser::Determinism::CcMulti,
+        "the deconstruction of " + Name(var) + ", whose type " +
+            TypeToString(*body_.vars[var].type) +
+            " has a user-defined equality,");
+  }
+
   // Of two procedures of the callee that differ only in cc-ness, the one
   // the call's context wants: the committed choice one where only its first
   // solution is wanted, and the other elsewhere (reference manual,
@@ -2862,6 +2946,8 @@ private:
         const Procedure &callee{*goal->modes->callee};
         CheckCommitted(goal, context, *Of(callee),
             "the call to " + ProcedureToString(callee));
+      } else if (noncanonical_.count(goal)) {
+        CheckNoncanonical(goal, goal->left, context);
       }
       return false;
     case BodyKind::Call: {
@@ -2892,6 +2978,9 @@ private:
       return loose;
     }
     case BodyKind::Switch: {
+      if (noncanonical_.count(goal)) {
+        CheckNoncanonical(goal, goal->switchVar, context);
+      }
       bool loose{false};
       for (const SwitchCase &c : goal->cases) {
         loose |= Contexts(c.goal, context);
@@ -3052,6 +3141,11 @@ private:
   // which are committed choice.
   std::set<const Body *> first_;
   std::vector<std::pair<const Body *, Components>> lambdas_;
+  // The deconstructions and switches on a variable of a type with a
+  // user-defined equality or comparison, which are committed choice, and
+  // those of them that can fail.
+  std::set<const Body *> noncanonical_;
+  std::set<const Body *> noncanonicalFailing_;
 };
 
 void BodyBuilder::AddBody(DeterminismChecking &result, InstOps &ops,
