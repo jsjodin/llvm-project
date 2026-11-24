@@ -8677,6 +8677,20 @@ tested shows.
      which makes the runtime print mmc's "Uncaught Mercury exception:"
      header (the user's decision, 2026-11-23: not the default).
 
+   *Type classes, tests written (2026-11-23):* found and fixed:
+   - A method's mode without a determinism was accepted when the class
+     was in the implementation section.
+   - A method defined twice in an instance is now reported at the
+     instance, as mmc does, with both definitions as notes.
+   - The library lacked string.hash, which the manual's hashable example
+     uses. It is mmc's hash of the bytes.
+   - The oracle counted mmc's "Previous instance declaration was here"
+     notes as errors.
+   Not yet implemented: a method made a closure by its name
+   (`higher-order/creating-higher-order-terms/nyi-method-name.m`), which
+   needs a procedure that captures the typeclass_info. The library has no
+   `map`, so the functional dependencies test uses a type of its own.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
