@@ -4260,6 +4260,15 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
   }
   types.constraints =
       result_.arena_.SaveArray(llvm::ArrayRef<GoalConstraint>{proofs});
+  if (!callExistentials_.empty()) {
+    llvm::SmallVector<GoalExistential> existentials;
+    for (const auto &[key, type] : callExistentials_) {
+      auto [goal, callee, var]{key};
+      existentials.push_back(GoalExistential{goal, callee, var, type});
+    }
+    types.existentials = result_.arena_.SaveArray(
+        llvm::ArrayRef<GoalExistential>{existentials});
+  }
   types.typeError = failed_ || ambiguity;
   if (llvm::any_of(chosen.twins, [](std::uint64_t t) { return t != 0; })) {
     types.openTwins = result_.arena_.SaveArray(

@@ -700,6 +700,11 @@ private:
         }
         continue;
       }
+      // A variable in no argument's type, which only a constraint has
+      // through a functional dependency: the type checker's for the goal.
+      if (!binding[var]) {
+        binding[var] = GoalExistentialType(goal, callee, var);
+      }
       const Type *type{binding[var]};
       if (!type || type->kind != TypeKind::Variable ||
           type->var < kExistentialVar) {
@@ -772,6 +777,24 @@ private:
     if (!passed.typeInfos.empty() || !passed.dictionaries.empty()) {
       out_.goals[goal] = std::move(passed);
     }
+  }
+
+  // The type the type checker gave a goal's callee's existential type
+  // variable `var`, if any.
+  const Type *GoalExistentialType(
+      const Body *goal, const Symbol &callee, unsigned var) {
+    auto number{numbers_.find(goal->modes)};
+    if (number == numbers_.end()) {
+      return nullptr;
+    }
+    for (const GoalExistential &existential :
+        number->second.first->existentials) {
+      if (existential.goal == number->second.second &&
+          existential.callee == &callee && existential.var == var) {
+        return Normalize(existential.type);
+      }
+    }
+    return nullptr;
   }
 
   // The constructor of a unification's functor, as the type checker chose

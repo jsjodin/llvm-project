@@ -61,6 +61,17 @@ struct GoalConstraint {
   ConstraintProof proof;
 };
 
+// The type a goal gives one of its callee's existentially quantified type
+// variables: a call's, or a deconstruction's with an existentially typed
+// constructor. One that only a constraint has, through a functional
+// dependency, is in no argument's type.
+struct GoalExistential {
+  unsigned goal;
+  const Symbol *callee;
+  unsigned var;
+  const Type *type;
+};
+
 // An instance's definition of one of its type class's methods: an
 // auxiliary predicate or function, whose clauses are the instance's for the
 // method, or the one that a definition by name stands for. Its signature
@@ -96,6 +107,8 @@ struct ClauseTypes {
   // number clause->goals stands for the declaration's existential
   // constraints, which the clause satisfies.
   llvm::ArrayRef<GoalConstraint> constraints{};
+  // The types the goals give their callees' existential type variables.
+  llvm::ArrayRef<GoalExistential> existentials{};
   // For a clause of an instance's method, which `definition` is.
   const MethodDefinition *method{nullptr};
   // Whether the clause has a type error, or is ambiguous.
