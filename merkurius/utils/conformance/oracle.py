@@ -182,8 +182,16 @@ def mmc_error_texts(test, mmc):
             [mmc, "--make", test.module + ".err"], tmp, timeout=600)
         if status == 0:
             raise TestError("mmc accepts it")
+        # mmc --make cuts what it writes short ("error log truncated");
+        # the module's .err file has all of it, unless the errors were
+        # found while making its interface files, when it is empty.
+        log = out + err
+        path = os.path.join(tmp, test.module + ".err")
+        if os.path.exists(path):
+            with open(path) as f:
+                log = f.read() or log
         messages = []
-        for line in (out + err).split("\n"):
+        for line in log.split("\n"):
             m = re.match(r"(\S+?\.m):(\d+): (.*)", line)
             if not m or m.group(1) != test.module + ".m":
                 continue
