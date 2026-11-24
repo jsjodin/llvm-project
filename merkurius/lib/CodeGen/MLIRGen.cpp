@@ -1334,6 +1334,33 @@ void MerkGenerator::GenerateUnchecked(const Procedure &procedure) {
   StubBody(proc, at);
 }
 
+// A procedure with neither clauses nor a foreign_proc for C, where its
+// predicate or function has them for another mode, has no solutions
+// (determinism analysis, CheckEmptyProcedures).
+void MerkGenerator::GenerateEmpty(const Procedure &procedure) {
+  const semantics::Signature *signature{types_.SignatureOf(*procedure.symbol)};
+  if (!signature) {
+    return;
+  }
+  parser::CharBlock at{
+      procedure.source.empty() ? procedure.symbol->source : procedure.source};
+  llvm::SmallVector<const semantics::Type *> types{
+      signature->arguments.begin(), signature->arguments.end()};
+  failed_ = false;
+  inBody_ = true;
+  llvm::scope_exit leave{[&] { inBody_ = false; }};
+  merk::ProcOp proc{ProcFor(procedure, types, at)};
+  if (!proc || !proc.isExternal()) {
+    return;
+  }
+  if (procedure.symbol->exported) {
+    proc.setPublic();
+  }
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(proc.addEntryBlock());
+  merk::FailOp::create(builder_, Location(at));
+}
+
 // solutions.unsorted_aggregate/4, unsorted_aggregate2/6 and do_while/4,
 // which have no clauses: code generation makes each of their procedures
 // from merk.aggregate (design document, Lowering, "Collecting solutions").
@@ -1700,6 +1727,11 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
         !modes_.ForeignProcOf(procedure) &&
         modes_.UncheckedReason(procedure) != semantics::Unchecked::None) {
       GenerateUnchecked(procedure);
+    }
+  }
+  for (const Procedure &procedure : modes_.procedures()) {
+    if (determinism_.IsEmpty(procedure)) {
+      GenerateEmpty(procedure);
     }
   }
   for (const Procedure &procedure : modes_.procedures()) {

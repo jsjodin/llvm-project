@@ -425,6 +425,7 @@ private:
   // With -fstub-unimplemented, the body of a procedure that code generation
   // cannot make: it reports what is not implemented, and ends the program.
   void StubBody(merk::ProcOp, parser::CharBlock at);
+  void GenerateEmpty(const Procedure &);
   void GenerateUnchecked(const Procedure &);
   void GenerateAggregate(const Procedure &);
   // A procedure's body from its foreign_proc: a call of the C function

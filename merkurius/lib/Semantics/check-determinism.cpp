@@ -3279,6 +3279,50 @@ static void CheckInitialisers(const parser::TokenSequence &tokens,
   }
 }
 
+// A procedure of the module with neither clauses nor a foreign_proc for C,
+// where its predicate or function has them for another mode. The manual
+// says it is an error ("pragma foreign_proc"); mmc gives it no solutions,
+// and reports its determinism declaration when that does not allow it
+// ("Declared `det', inferred `failure'"), as merkc then does (see the
+// register). A predicate with neither for any mode is reported by mode
+// analysis.
+void CheckEmptyProcedures(DeterminismChecking &result,
+    const ModeChecking &modes, const ModuleSymbols &module,
+    parser::Messages &messages) {
+  llvm::DenseSet<const Symbol *> defined;
+  for (const Procedure &procedure : modes.procedures()) {
+    if (result.BodyOf(procedure) || modes.ForeignProcOf(procedure)) {
+      defined.insert(procedure.symbol);
+    }
+  }
+  for (const Procedure &procedure : modes.procedures()) {
+    if (procedure.symbol->module != module.name() ||
+        !defined.contains(procedure.symbol) || result.BodyOf(procedure) ||
+        modes.ForeignProcOf(procedure) || modes.HasError(procedure) ||
+        modes.UncheckedReason(procedure) != Unchecked::None) {
+      continue;
+    }
+    result.empty_.insert(&procedure);
+    if (!procedure.determinism) {
+      result.inferred_[&procedure] = parser::Determinism::Failure;
+      continue;
+    }
+    if (!Within(ComponentsOf(parser::Determinism::Failure),
+            ComponentsOf(*procedure.determinism))) {
+      parser::CharBlock at{procedure.source.empty() ? procedure.symbol->source
+                                                    : procedure.source};
+      messages
+          .Say(at,
+              "the determinism declaration of %s is not satisfied: it is declared %s, but inferred %s"_err_en_US,
+              ProcedureToString(procedure),
+              DeterminismName(*procedure.determinism),
+              DeterminismName(parser::Determinism::Failure))
+          .Attach(at,
+              "because: it has neither clauses nor a foreign_proc for C in this mode"_en_US);
+    }
+  }
+}
+
 std::unique_ptr<DeterminismChecking> CheckDeterminism(
     const parser::TokenSequence &tokens, TypeChecking &types,
     ModeChecking &modes, parser::Messages &messages, bool analyse,
@@ -3365,6 +3409,9 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
   }
   for (ProcedureBody &body : result->bodies_) {
     AnalyseBody(*result, body, types, modes.ops(), tokens, messages);
+  }
+  if (resolution) {
+    CheckEmptyProcedures(*result, modes, resolution->module(), messages);
   }
   return result;
 }

@@ -200,6 +200,13 @@ public:
                                  : std::make_optional(it->second);
   }
 
+  // Whether a procedure of the module has neither clauses nor a foreign_proc
+  // for C, where its predicate or function has them for another mode: it
+  // has no solutions, as in mmc (see the register).
+  bool IsEmpty(const Procedure &procedure) const {
+    return empty_.contains(&procedure);
+  }
+
 private:
   friend class BodyBuilder;
   friend class SwitchDetector;
@@ -208,6 +215,8 @@ private:
       const parser::TokenSequence &, TypeChecking &, ModeChecking &,
       parser::Messages &, bool, const parser::ParseTree *,
       const NameResolution *);
+  friend void CheckEmptyProcedures(DeterminismChecking &, const ModeChecking &,
+      const ModuleSymbols &, parser::Messages &);
   std::deque<Body> nodes_;
   // A call's modes with the other of two procedures that differ only in
   // cc-ness, which its context chose.
@@ -220,6 +229,7 @@ private:
   // The predicates and functions of a no_determinism_warning pragma, whose
   // declarations that could be tighter are not warned of.
   llvm::DenseSet<const Symbol *> quiet_;
+  llvm::DenseSet<const Procedure *> empty_;
 };
 
 // Whether mode analysis reaches the end of a goal, as in mmc.
