@@ -282,6 +282,19 @@ bool CheckForeignProcAttributes(const Term &t,
       seen = attribute;
     }
   }
+  // may_call_mm_tabled says that the code calls Merkurius (reference
+  // manual, "Foreign code attributes"). The manual rules out
+  // will_not_call_mm_tabled with will_not_call_merkurius too, but mmc
+  // accepts it, as merkc does (see the register).
+  if (llvm::is_contained(attributes, ForeignProcAttribute::MayCallMmTabled) &&
+      llvm::is_contained(
+          attributes, ForeignProcAttribute::WillNotCallMerkurius)) {
+    state.messages.Say(GetSource(t, state.tokens),
+        "the attributes '%s' and '%s' conflict"_err_en_US,
+        SnakeName(EnumToString(ForeignProcAttribute::WillNotCallMerkurius)),
+        SnakeName(EnumToString(ForeignProcAttribute::MayCallMmTabled)));
+    return false;
+  }
   return true;
 }
 
