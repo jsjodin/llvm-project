@@ -69,6 +69,8 @@
 :- mode suffix(in, out) is multi.
 :- pred remove_prefix(string::in, string::in, string::out) is semidet.
 :- pred remove_suffix(string::in, string::in, string::out) is semidet.
+:- pred hash(string::in, int::out) is det.
+:- func hash(string) = int.
 :- func to_upper(string::in) = (string::uo) is det.
 :- pred to_upper(string, string).
 :- mode to_upper(in, uo) is det.
@@ -175,6 +177,27 @@ extern MR_String merk_format_float_conversion(MR_ConstString flags,
 extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
     MR_Integer precision, MR_ConstString text);
 #include <string.h>
+").
+
+hash(S) = H :-
+    hash(S, H).
+
+    % mmc's hash of a string's bytes: each step xors in the hash shifted
+    % left by five and then the byte, and the length is xored in at the
+    % end.
+:- pragma foreign_proc("C",
+    hash(S::in, H::out),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    MR_Unsigned h = 0;
+    MR_Unsigned length = 0;
+    const unsigned char *bytes = (const unsigned char *) S;
+    while (bytes[length] != 0) {
+        h ^= h << 5;
+        h ^= bytes[length];
+        ++length;
+    }
+    H = (MR_Integer) (h ^ length);
 ").
 
 %---------------------------------------------------------------------------%
