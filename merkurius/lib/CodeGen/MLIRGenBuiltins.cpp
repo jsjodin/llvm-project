@@ -574,6 +574,13 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
       return true;
     }
   }
+  // impure_true and semipure_true succeed and do nothing; only their purity
+  // matters, to the purity check.
+  if (module == "builtin" && symbol.arity == 0 &&
+      symbol.kind == semantics::SymbolKind::Predicate &&
+      (symbol.name == "impure_true" || symbol.name == "semipure_true")) {
+    return true;
+  }
   if (module == "builtin" ||
       (module == "array" && symbol.name == "array_compare")) {
     return CompareBuiltin(goal, callee, arguments, body);
