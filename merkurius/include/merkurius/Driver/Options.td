@@ -241,6 +241,10 @@ def offload_arch_EQ : CommaJoined<["--"], "offload-arch=">,
            "too, such as gfx1030, and link for offloading to them">;
 def L : JoinedOrSeparate<["-"], "L">, MetaVarName<"<dir>">,
   HelpText<"Search <dir> for libraries when linking">;
+def l : JoinedOrSeparate<["-"], "l">, MetaVarName<"<library>">,
+  HelpText<"Link with the library <library>">;
+def fuse_ld_EQ : Joined<["-"], "fuse-ld=">, MetaVarName<"<linker>">,
+  HelpText<"Link with the linker <linker>, as Clang's -fuse-ld= does">;
 def save_temps_EQ : Joined<["-", "--"], "save-temps=">,
   MetaVarName<"<where>">, Values<"cwd,obj">,
   HelpText<"Keep the intermediate files, and the link's, in the current "

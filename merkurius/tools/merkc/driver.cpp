@@ -63,8 +63,12 @@ static bool isMerkuriusSource(llvm::StringRef input) {
   return input == "-" || llvm::sys::path::extension(input) == ".m";
 }
 
-static bool isObjectFile(llvm::StringRef input) {
-  return llvm::sys::path::extension(input) == ".o";
+// An input that the link takes as it is: an object file, or a library, an
+// archive or a shared object, as `libm.so.6` with its version after it.
+static bool isLinkerInput(llvm::StringRef input) {
+  llvm::StringRef name{llvm::sys::path::filename(input)};
+  return name.ends_with(".o") || name.ends_with(".a") ||
+      name.ends_with(".so") || name.contains(".so.");
 }
 
 // The options the driver passes on to each -fc1 job: for the host, or with
@@ -538,7 +542,7 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
   bool ok{true};
   std::vector<std::string> objects;
   for (const std::string &input : inputs) {
-    if (link && isObjectFile(input)) {
+    if (link && isLinkerInput(input)) {
       objects.push_back(input);
       continue;
     }
@@ -642,6 +646,13 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       job.push_back("-L" + dir);
     }
     job.push_back("-L" + libraryDir);
+    // The user's libraries, after the objects that use them.
+    for (const std::string &library : args.getAllArgValues(OPT_l)) {
+      job.push_back("-l" + library);
+    }
+    if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fuse_ld_EQ)) {
+      job.push_back(arg->getAsString(args));
+    }
     // The stack maps hold code addresses in a read-only section, which a
     // position-independent executable could only relocate at startup.
     job.push_back("-no-pie");

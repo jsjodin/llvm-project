@@ -26,6 +26,13 @@ RUN: merkc -### a.o b.o 2>&1 | FileCheck %s --check-prefix=OBJECTS
 OBJECTS-NOT: -fc1
 OBJECTS: "-o" "a.out" "a.o" "b.o" "-L{{[^"]*}}lib" "-no-pie" "-lmerkstd" "-lmerkrt" "-lm"
 
+Libraries, as archives, shared objects or -l, are linked after the objects,
+with -L's directories and -fuse-ld= passed on (reference manual, "Linking with
+C object files").
+RUN: merkc -### a.o libx.a liby.so libz.so.1 -L/opt/lib -lfoo -l bar -fuse-ld=lld 2>&1 | FileCheck %s --check-prefix=LIBRARIES
+LIBRARIES-NOT: -fc1
+LIBRARIES: "-o" "a.out" "a.o" "libx.a" "liby.so" "libz.so.1" "-L/opt/lib" "-L{{[^"]*}}lib" "-lfoo" "-lbar" "-fuse-ld=lld" "-no-pie" "-lmerkstd" "-lmerkrt" "-lm"
+
 The program runs, and main succeeding is exit status 0.
 RUN: rm -rf %t && mkdir %t && cd %t
 RUN: merkc %S/Inputs/empty-main.m -o empty-main
