@@ -201,7 +201,11 @@ const ModuleInterface *ModuleLoader::Load(
     }
     if (const auto *module{std::get_if<const parser::ModuleDecl *>(&item)}) {
       if (named) {
-        break; // a nested submodule, which is not loaded yet
+        // Temporary (nested submodules, docs/INPROGRESS.md): their items
+        // would otherwise be read as the parent's.
+        messages_.Say(Source((*module)->name->tokens, file.tokens),
+            "%s"_todo_en_US, "nested submodules");
+        break;
       }
       named = true;
       if (FullName(*(*module)->name) != name) {

@@ -1180,10 +1180,39 @@ void Resolver::Run(const parser::ParseTree &tree,
   ModuleSymbols &own{*result_.module_};
   own_ = &own;
   Visibility interface{{&own, false, true}}, implementation{{&own, false, false}};
-  bool inInterface{false};
+  bool inInterface{false}, named{false};
   for (const parser::Item &item : tree.items) {
-    if (const auto *section{std::get_if<const parser::SectionDecl *>(&item)}) {
+    if (const auto *module{std::get_if<const parser::ModuleDecl *>(&item)}) {
+      if (named) {
+        // Temporary (nested submodules, docs/INPROGRESS.md): their items
+        // would otherwise be read as the parent's.
+        messages_.Say(NameSource(tokens, *(*module)->name),
+            "%s"_todo_en_US, "nested submodules");
+        break;
+      }
+      named = true;
+    } else if (const auto *end{
+                   std::get_if<const parser::EndModuleDecl *>(&item)}) {
+      // mmc: "Error: this `:- end_module' declaration for `other' is not
+      // for the module at whose end it appears, which is `m'."
+      if (FullName(*(*end)->name) != name) {
+        messages_.Say(NameSource(tokens, *(*end)->name),
+            "this end_module declaration names %s, but it ends module %s"_err_en_US,
+            FullName(*(*end)->name), name);
+      }
+    } else if (const auto *section{
+                   std::get_if<const parser::SectionDecl *>(&item)}) {
       inInterface = (*section)->section == parser::Section::Interface;
+    } else if (inInterface &&
+        (std::holds_alternative<const parser::FactOrRule *>(item) ||
+            std::holds_alternative<const parser::DcgRule *>(item))) {
+      // mmc: "Error: clause for predicate `p'/1 in module interface."
+      parser::TokenRange range{common::visit(
+          [](const auto *x) { return x->tokens; }, item)};
+      messages_.Say(
+          parser::CharBlock{tokens.tokens[range.first].spelling.begin(),
+              tokens.tokens[range.last].spelling.end()},
+          "a clause may not be in the interface section"_err_en_US);
     } else if (const auto *decl{
                    std::get_if<const parser::ImportDecl *>(&item)}) {
       if ((*decl)->kind == parser::ImportKind::IncludeModule) {
