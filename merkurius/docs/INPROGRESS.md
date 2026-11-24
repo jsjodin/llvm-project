@@ -8791,6 +8791,18 @@ tested shows.
    exports), foreign_enum, foreign_export_enum, the list macros, and the
    C# and Java sections, which merkc has no backend for.
 
+   *Impurity, tests written (2026-11-24):* one bug fixed. merkc made
+   every goal waiting before an impure goal a mode error, where mmc lets
+   a head variable's unification wait past it, so that an impure
+   procedure can have outputs; merkc rejected `p([X]) :- impure next(X)`
+   and the manual's own `map` over an impure function. mmc rejects the
+   manual's `foo` example, whose head's `X1 + X2` is a call (register).
+   Everything else agreed with mmc: annotations, declared and inferred
+   purity and their warnings, promises, methods, higher-order types,
+   lambda expressions and calls, and strict execution of impure goals at
+   -O0 and -O2. Left: the rule for a non-local of inst `any` in a negated
+   context, which needs solver types' `any` insts (the next chapter).
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
