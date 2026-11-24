@@ -69,6 +69,21 @@ you use"). This section is the map; each part has its own section.
   the manual disagree, each case and the choice made are recorded (Front
   end, "Where mmc and the manual disagree"); mmc's undocumented forms that
   programs rely on are accepted.
+- **Operational semantics.** merkc gives the strict sequential semantics
+  (reference manual, "Semantics"), and only it. Mode analysis reorders a
+  conjunction minimally: it runs the first conjunct that is mode-correct,
+  then the first of the rest that is now mode-correct, and so on. Function
+  calls are strict, depth-first and left to right, and so are
+  disjunctions. The default is fully strict: no call is removed because it
+  cannot succeed or nothing uses its outputs, and no loop is removed because
+  it would not end. Procedures carry no `mustprogress`, so LLVM may not
+  remove one either (`CodeGen/strict-infinite-loops.m`). mmc's default is
+  the strict commutative semantics, which may reorder conjunctions and
+  disjunctions; on every test of `Conformance/semantics/` it gave the
+  strict sequential answers. So there is nothing for options like mmc's
+  `--no-reorder-conj` to turn off. OpenMP directives on loops are
+  promises that keep this sequential meaning. Processes are concurrent,
+  outside it, as each one's own goals keep it (Language extensions).
 - **Left out for now:** tabling, trailing and solver types. Partially
   instantiated data comes back only as open types (below). The debugger,
   the deep profiler, the Java and C# back ends and binary compatibility

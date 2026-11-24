@@ -8749,6 +8749,16 @@ tested shows.
    exception.try; each try makes a closure and calls it, as mmc's does,
    where a goal with no outputs and no captures could be called directly.
 
+   *Semantics, tests written (2026-11-24):* no bugs found. merkc gives
+   the strict sequential semantics, and mmc's default, the strict
+   commutative one, gave the same answers on every test: minimal
+   reordering of conjunctions, function calls strict and left to right,
+   disjunctions depth-first, and calls kept that cannot succeed or whose
+   outputs nothing uses (design document, The language, "Operational
+   semantics"). An infinite loop whose output is unused is
+   `CodeGen/strict-infinite-loops.m`, outside the suite, since the oracle
+   cannot run a program that never ends.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
