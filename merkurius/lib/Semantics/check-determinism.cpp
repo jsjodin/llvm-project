@@ -2815,7 +2815,44 @@ private:
     }
   }
 
+  // Of two procedures of the callee that differ only in cc-ness, the one
+  // the call's context wants: the committed choice one where only its first
+  // solution is wanted, and the other elsewhere (reference manual,
+  // "Committed choice nondeterminism"). The call is changed to run it.
+  void ChooseByContext(const Body *goal, bool first) {
+    const Procedure &callee{*goal->modes->callee};
+    std::optional<parser::Determinism> own{Of(callee)};
+    if (!own || IsCommittedChoice(*own) == first ||
+        !checking_.modes_) {
+      return;
+    }
+    for (const Procedure *other :
+        checking_.modes_->ProceduresOf(*callee.symbol)) {
+      std::optional<parser::Determinism> theirs{
+          other == &callee ? std::nullopt : other->determinism};
+      if (!theirs || IsCommittedChoice(*theirs) != first ||
+          ComponentsOf(*theirs).canFail != ComponentsOf(*own).canFail ||
+          ComponentsOf(*theirs).most != ComponentsOf(*own).most ||
+          !llvm::equal(other->modes, callee.modes)) {
+        continue;
+      }
+      GoalModes &modes{
+          const_cast<DeterminismChecking &>(checking_).rechosen_.emplace_back(
+              *goal->modes)};
+      modes.callee = other;
+      // The node is this analysis's own, in DeterminismChecking::nodes_.
+      const_cast<Body *>(goal)->modes = &modes;
+      return;
+    }
+  }
+
   bool ContextsIn(const Body *goal, const Context &context) {
+    if ((goal->kind == BodyKind::Call ||
+            (goal->kind == BodyKind::Unify &&
+                goal->unify == UnifyKind::Call && !goal->lambda)) &&
+        goal->modes && goal->modes->callee) {
+      ChooseByContext(goal, context.first);
+    }
     switch (goal->kind) {
     case BodyKind::Unify:
       if (goal->lambda) {
@@ -3051,6 +3088,7 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
     ModeChecking &modes, parser::Messages &messages, bool analyse,
     const parser::ParseTree *tree, const NameResolution *resolution) {
   auto result{std::make_unique<DeterminismChecking>()};
+  result->modes_ = &modes;
   if (tree && resolution) {
     for (const parser::Item &item : tree->items) {
       const auto *pragma{std::get_if<const parser::PredPragma *>(&item)};

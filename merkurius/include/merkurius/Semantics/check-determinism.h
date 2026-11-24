@@ -206,6 +206,10 @@ private:
       parser::Messages &, bool, const parser::ParseTree *,
       const NameResolution *);
   std::deque<Body> nodes_;
+  // A call's modes with the other of two procedures that differ only in
+  // cc-ness, which its context chose.
+  std::deque<GoalModes> rechosen_;
+  const ModeChecking *modes_{nullptr};
   std::deque<ProcedureBody> bodies_;
   llvm::DenseMap<const Procedure *, const ProcedureBody *> byProcedure_;
   // The determinisms inferred for the procedures declared without one.

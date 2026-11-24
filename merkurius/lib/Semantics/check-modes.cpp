@@ -1288,11 +1288,28 @@ std::vector<ArgMode> ModeChecker::ErasedModes(llvm::ArrayRef<ArgMode> modes) {
   return result;
 }
 
+// Two modes may differ only in cc-ness, one multi and the other cc_multi,
+// or one nondet and the other cc_nondet; determinism analysis picks one for
+// each call by its context (reference manual, "Committed choice
+// nondeterminism").
+static bool CcTwins(std::optional<parser::Determinism> a,
+    std::optional<parser::Determinism> b) {
+  using D = parser::Determinism;
+  if (!a || !b) {
+    return false;
+  }
+  auto pair{[&](D x, D y) {
+    return (*a == x && *b == y) || (*a == y && *b == x);
+  }};
+  return pair(D::Multi, D::CcMulti) || pair(D::Nondet, D::CcNondet);
+}
+
 void ModeChecker::AddDeclared(const Symbol &symbol, Declared declared,
     parser::CharBlock where, std::vector<Procedure> &procedures,
     std::vector<parser::CharBlock> &sources) {
   for (std::size_t i{0}; i < procedures.size(); ++i) {
-    if (ErasedModes(procedures[i].modes) == ErasedModes(declared.modes)) {
+    if (ErasedModes(procedures[i].modes) == ErasedModes(declared.modes) &&
+        !CcTwins(procedures[i].determinism, declared.determinism)) {
       // mmc: "In mode declarations for predicate `p'/1: error:
       // duplicate mode declaration. Here is the conflicting mode
       // declaration."
