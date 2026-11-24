@@ -164,21 +164,18 @@ private:
     all |= all_[GoalNumber(goal)];
     direct |= direct_[GoalNumber(goal)];
   }
-  void CollectCatch(const Catch &, Set &all, Set &direct);
   // Pass 2: free_ holds each goal's free variables, those that occur in it
   // outside its lambda expressions' bodies or that the lambda expressions
   // capture. `outside` holds the variables that occur outside the goal and
   // outside lambda expressions.
   void Capture(const Goal &, const Set &outside);
   void CaptureInto(const Goal &, const Set &outside, Set &free);
-  void CaptureCatch(const Catch &, const Set &outside, Set &free);
   // Pass 3: rebuilds the goal with its variables renamed, and records its
   // nonlocal variables. `outside` holds the variables, renamed, that occur
   // outside it.
   Goal Rebuild(const Goal &, const Set &outside);
   // Rebuilds a goal to which the variables that occur only in it are local.
   Goal RebuildLocal(const Goal &, const Set &outside);
-  Catch RebuildCatch(const Catch &, const Set &outside);
 
   // The outside of each conjunct of `goals`, from `table`.
   std::vector<Set> ConjunctOutsides(llvm::ArrayRef<Goal> goals,
@@ -281,12 +278,6 @@ private:
   unsigned locals_{0};
 };
 
-void Quantifier::CollectCatch(const Catch &c, Set &all, Set &direct) {
-  AddBoth(all, direct, c.exception);
-  CollectInto(c.pattern, all, direct);
-  CollectInto(c.goal, all, direct);
-}
-
 void Quantifier::Collect(const Goal &goal) {
   Set all, direct;
   std::visit(
@@ -361,20 +352,6 @@ void Quantifier::Collect(const Goal &goal) {
               }
             }
           },
-          [&](const Try *t) {
-            AddBoth(all, direct, t->io);
-            CollectInto(t->goal, all, direct);
-            CollectInto(t->then, all, direct);
-            if (t->otherwise) {
-              CollectInto(*t->otherwise, all, direct);
-            }
-            for (const Catch &c : t->catches) {
-              CollectCatch(c, all, direct);
-            }
-            if (t->catchAny) {
-              CollectCatch(*t->catchAny, all, direct);
-            }
-          },
           [&](const Atomic *atomic) {
             AddBoth(all, direct, {atomic->outerInitial, atomic->outerFinal});
             for (const AtomicAlternative &alternative : atomic->alternatives) {
@@ -418,16 +395,6 @@ std::vector<Set> Quantifier::ConjunctOutsides(llvm::ArrayRef<Goal> goals,
 void Quantifier::CaptureInto(const Goal &goal, const Set &outside, Set &free) {
   Capture(goal, outside);
   free |= free_[GoalNumber(goal)];
-}
-
-void Quantifier::CaptureCatch(const Catch &c, const Set &outside, Set &free) {
-  Add(free, c.exception);
-  Set pattern{Union(outside, direct_[GoalNumber(c.goal)])};
-  Add(pattern, c.exception);
-  Set body{Union(outside, direct_[GoalNumber(c.pattern)])};
-  Add(body, c.exception);
-  CaptureInto(c.pattern, pattern, free);
-  CaptureInto(c.goal, body, free);
 }
 
 void Quantifier::Capture(const Goal &goal, const Set &outside) {
@@ -501,24 +468,6 @@ void Quantifier::Capture(const Goal &goal, const Set &outside) {
               CaptureInto(scope->goal, TraceOutside(*scope, outside), free);
             }
           },
-          [&](const Try *t) {
-            Add(free, t->io);
-            Set out{outside};
-            Add(out, t->io);
-            CaptureInto(
-                t->goal, Union(out, direct_[GoalNumber(t->then)]), free);
-            CaptureInto(
-                t->then, Union(out, direct_[GoalNumber(t->goal)]), free);
-            if (t->otherwise) {
-              CaptureInto(*t->otherwise, out, free);
-            }
-            for (const Catch &c : t->catches) {
-              CaptureCatch(c, out, free);
-            }
-            if (t->catchAny) {
-              CaptureCatch(*t->catchAny, out, free);
-            }
-          },
           [&](const Atomic *atomic) {
             Add(free, {atomic->outerInitial, atomic->outerFinal});
             Set out{outside};
@@ -570,23 +519,6 @@ void Quantifier::Claim(
 Goal Quantifier::RebuildLocal(const Goal &goal, const Set &outside) {
   Local scope{Begin(all_[GoalNumber(goal)], outside)};
   Goal result{Rebuild(goal, outside)};
-  End(std::move(scope));
-  return result;
-}
-
-Catch Quantifier::RebuildCatch(const Catch &c, const Set &outside) {
-  unsigned p{GoalNumber(c.pattern)}, b{GoalNumber(c.goal)};
-  Set occurring{all_[p]};
-  occurring |= all_[b];
-  Add(occurring, c.exception);
-  Local scope{Begin(occurring, outside)};
-  VarId exception{MapVar(c.exception)};
-  Set patternOut{Union(outside, Map(free_[b]))};
-  Add(patternOut, exception);
-  Set bodyOut{Union(outside, Map(free_[p]))};
-  Add(bodyOut, exception);
-  Catch result{c.tokens, exception, Rebuild(c.pattern, patternOut),
-      Rebuild(c.goal, bodyOut)};
   End(std::move(scope));
   return result;
 }
@@ -712,32 +644,6 @@ Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
             End(std::move(some));
             return Make<Scope>(scope->tokens, scope->number, scope->kind,
                 scope->origin, vars, inner);
-          },
-          [&](const Try *t) -> Goal {
-            llvm::ArrayRef<VarId> io{SaveMapped(t->io)};
-            Set out{outside};
-            Add(out, io);
-            unsigned g{GoalNumber(t->goal)}, th{GoalNumber(t->then)};
-            Set pair{all_[g]};
-            pair |= all_[th];
-            Local both{Begin(pair, out)};
-            Goal tried{Rebuild(t->goal, Union(out, Map(free_[th])))};
-            Goal then{Rebuild(t->then, Union(out, Map(free_[g])))};
-            End(std::move(both));
-            std::optional<Goal> otherwise;
-            if (t->otherwise) {
-              otherwise = RebuildLocal(*t->otherwise, out);
-            }
-            llvm::SmallVector<Catch, 2> catches;
-            for (const Catch &c : t->catches) {
-              catches.push_back(RebuildCatch(c, out));
-            }
-            std::optional<Catch> catchAny;
-            if (t->catchAny) {
-              catchAny = RebuildCatch(*t->catchAny, out);
-            }
-            return Make<Try>(t->tokens, t->number, io, tried, then, otherwise,
-                Save(llvm::ArrayRef<Catch>{catches}), catchAny);
           },
           [&](const Atomic *atomic) -> Goal {
             VarId initial{MapVar(atomic->outerInitial)};

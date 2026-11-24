@@ -59,12 +59,11 @@ struct Unify;
 struct Call;
 struct HOCall;
 struct Scope;
-struct Try;
 struct Atomic;
 struct Loop;
 using Goal = std::variant<const Conj *, const Disj *, const IfThenElse *,
     const Not *, const Unify *, const Call *, const HOCall *, const Scope *,
-    const Try *, const Atomic *, const Loop *>;
+    const Atomic *, const Loop *>;
 
 // G1, G2, ... or G1 & G2 & ...; true is the empty conjunction.
 struct Conj {
@@ -187,8 +186,11 @@ struct HOCall {
 // holds the scope's parameters; vars are the variables it names, which for
 // a trace goal are the first and last versions of the state variable of
 // each io(!S) and state(M, !S) parameter.
+// Try is a try goal's expansion, and TryGoal the goal in it (desugar.cpp,
+// DesugarTry).
 ENUM_CLASS(ScopeKind, Some, PromisePurity, PromiseSolutions,
-    RequireDeterminism, RequireSwitch, DisableWarnings, Trace, Purity, Omp)
+    RequireDeterminism, RequireSwitch, DisableWarnings, Trace, Purity, Omp,
+    Try, TryGoal)
 
 // The goal or DCG goal that a node came from.
 using ParseGoal = std::variant<parser::Goal, parser::DcgGoal>;
@@ -200,31 +202,6 @@ struct Scope {
   ParseGoal origin;
   llvm::ArrayRef<VarId> vars;
   Goal goal;
-};
-
-// catch Pattern -> Goal, or catch_any Var -> Goal, whose pattern is
-// empty: the exception is unified with `exception`, by `pattern`, which
-// chooses this branch if it succeeds.
-struct Catch {
-  TokenRange tokens;
-  VarId exception;
-  Goal pattern;
-  Goal goal;
-};
-
-// try [io(!S), ...] Goal then Then else Else catch ... (reference manual,
-// "Exception handling"). `io` holds the versions of each io(!S)'s state
-// variable before and after Goal, in pairs. Goal's updates of the other
-// state variables are seen in Then only, as in an if-then-else.
-struct Try {
-  TokenRange tokens;
-  unsigned number;
-  llvm::ArrayRef<VarId> io;
-  Goal goal;
-  Goal then;
-  std::optional<Goal> otherwise;
-  llvm::ArrayRef<Catch> catches;
-  std::optional<Catch> catchAny;
 };
 
 // One alternative of an atomic goal, with the first and last versions of
@@ -328,6 +305,22 @@ struct MethodClause {
 struct SemanticForm {
   llvm::ArrayRef<const ClauseForm *> clauses;
   llvm::ArrayRef<MethodClause> methods{};
+  // The names that desugaring made in other modules, for the expansions of
+  // try goals: name resolution looks each up in its module, which the
+  // module need not import, as mmc's expansion needs no import of
+  // exception.
+  llvm::ArrayRef<const parser::SymName *> implicitNames{};
+  // The modules those names are in.
+  llvm::SmallVector<llvm::StringRef, 1> ImplicitModules() const {
+    llvm::SmallVector<llvm::StringRef, 1> modules;
+    for (const parser::SymName *name : implicitNames) {
+      if (!name->qualifiers.empty() &&
+          !llvm::is_contained(modules, name->qualifiers.front())) {
+        modules.push_back(name->qualifiers.front());
+      }
+    }
+    return modules;
+  }
 };
 
 // Prints the semantic form, one goal per line, indented by depth. Program

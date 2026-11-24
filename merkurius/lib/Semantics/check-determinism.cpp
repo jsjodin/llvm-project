@@ -384,9 +384,17 @@ private:
               if (scope->kind == ScopeKind::Omp) {
                 out.directive = std::get<const parser::OmpGoal *>(
                     std::get<parser::Goal>(scope->origin))->directive;
+              }
+              if (scope->kind == ScopeKind::Omp ||
+                  scope->kind == ScopeKind::TryGoal) {
                 for (VarId var :
                     clause_->clause->clause->nonlocals[scope->number]) {
                   out.nonlocals.push_back(map_[var]);
+                }
+              }
+              if (scope->kind == ScopeKind::Try) {
+                for (VarId var : scope->vars) {
+                  out.tryVars.push_back(map_[var]);
                 }
               }
               if (scope->kind == ScopeKind::Trace) {

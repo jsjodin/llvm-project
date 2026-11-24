@@ -191,19 +191,6 @@ Purity PurityChecker::Check(const Goal &goal) {
           // annotation for impure_apply.
           [&](const HOCall *x) { return x->purity; },
           [&](const Scope *x) { return CheckScope(*x); },
-          [&](const Try *x) {
-            Purity purity{Least(Check(x->goal), Check(x->then))};
-            if (x->otherwise) {
-              purity = Least(purity, Check(*x->otherwise));
-            }
-            for (const Catch &c : x->catches) {
-              purity = Least(purity, Least(Check(c.pattern), Check(c.goal)));
-            }
-            if (x->catchAny) {
-              purity = Least(purity, Check(x->catchAny->goal));
-            }
-            return purity;
-          },
           [&](const Atomic *x) {
             Purity purity{Purity::Pure};
             for (const AtomicAlternative &alternative : x->alternatives) {

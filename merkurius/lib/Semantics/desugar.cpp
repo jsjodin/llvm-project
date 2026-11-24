@@ -216,10 +216,13 @@ class ClauseDesugarer {
 public:
   // processImported is whether the module imports process, whose names a
   // receive goal's expansion uses.
+  // The names of other modules that it makes, which are resolved whether
+  // or not the module imports theirs, go into `implicit`.
   ClauseDesugarer(const parser::TokenSequence &tokens, SemanticArena &arena,
-      parser::Messages &messages, bool processImported)
+      parser::Messages &messages, bool processImported,
+      std::vector<const parser::SymName *> *implicit = nullptr)
       : tokens_{tokens}, arena_{arena}, messages_{messages},
-        processImported_{processImported} {}
+        processImported_{processImported}, implicit_{implicit} {}
 
   std::optional<const ClauseForm *> Desugar(const parser::FactOrRule &);
   std::optional<const ClauseForm *> Desugar(const parser::DcgRule &);
@@ -358,10 +361,15 @@ private:
   void FillLasts(Goals &goals);
   const Lambda *DesugarLambda(const parser::Lambda &);
   // A catch's pattern is unified with the exception, a variable of its own.
-  void DesugarCatch(const parser::CatchClause &, const StateMap &failed,
-      llvm::SmallVectorImpl<std::pair<VarId, Goal>> &patterns,
-      llvm::SmallVectorImpl<Goals> &arms,
-      llvm::SmallVectorImpl<StateMap> &ends);
+  // A catch branch of a try whose exception is `univ`, from the state
+  // `failed`: its goal into `arm`, ending in `end`, and the test that
+  // chooses it into `test`.
+  void DesugarCatch(const parser::CatchClause &, VarId univ,
+      const StateMap &failed, bool any, Goals &arm, StateMap &end,
+      Goal &test);
+  // A name of the exception module, which a try goal's expansion uses
+  // whether or not the module imports it (SemanticForm::implicitNames).
+  const parser::SymName *ExceptionName(TokenRange, llvm::StringRef name);
   void DesugarTry(const parser::TryGoal &, Goals &out);
   void DesugarLoop(const parser::LoopGoal &, Goals &out);
   // A receive goal, as a receive over a selector of its arms and a switch
@@ -463,6 +471,7 @@ private:
   LoopScopes scopes_;
   ReceiveOccurrences receives_;
   bool processImported_;
+  std::vector<const parser::SymName *> *implicit_;
   // The lambda expression of the selector's case being desugared, and the
   // case.
   const parser::Lambda *selector_{nullptr};
@@ -1494,49 +1503,101 @@ void ClauseDesugarer::FillLasts(Goals &goals) {
   }
 }
 
-void ClauseDesugarer::DesugarCatch(const parser::CatchClause &c,
-    const StateMap &failed,
-    llvm::SmallVectorImpl<std::pair<VarId, Goal>> &patterns,
-    llvm::SmallVectorImpl<Goals> &arms, llvm::SmallVectorImpl<StateMap> &ends) {
+// A catch branch: the exception's value, if it has the type of the
+// pattern's variable, is that variable, which the pattern is then unified
+// with; a catch_any's variable is the value, of whatever type it has.
+void ClauseDesugarer::DesugarCatch(const parser::CatchClause &c, VarId univ,
+    const StateMap &failed, bool any, Goals &arm, StateMap &end,
+    Goal &test) {
   state_ = failed;
   Goals pattern;
   std::optional<VarId> var{SimpleVar(c.pattern)};
-  VarId exception{var ? *var : Fresh(c.tokens)};
+  VarId value{var ? *var : Fresh(c.tokens)};
+  if (any) {
+    // CatchAnyVar = exception.exc_univ_value(Univ), some [T] T.
+    VarId arguments[]{univ};
+    pattern.push_back(Make<Unify>(c.tokens, Number(), value, false, VarId{0},
+        Functor{FunctorKind::Name, ExceptionName(c.tokens, "exc_univ_value"),
+            nullptr, nullptr},
+        Save(llvm::ArrayRef<VarId>{arguments})));
+  } else {
+    VarId arguments[]{univ, value};
+    pattern.push_back(Make<Call>(c.tokens, Number(),
+        ExceptionName(c.tokens, "exc_univ_to_type"),
+        Save(llvm::ArrayRef<VarId>{arguments}), false));
+  }
   if (!var) {
-    UnifyWith(exception, c.pattern, c.tokens, pattern);
+    UnifyWith(value, c.pattern, c.tokens, pattern);
     FinishAtomic();
   }
-  patterns.emplace_back(exception, Conjoin(c.tokens, pattern));
-  arms.emplace_back();
-  DesugarInto(c.goal, arms.back());
-  ends.push_back(state_);
+  test = Conjoin(c.tokens, pattern);
+  DesugarInto(c.goal, arm);
+  end = state_;
 }
 
-// The goal's updates of state variables are seen in the then part only, as
-// in an if-then-else: as in mmc, a catch branch sees the versions before
-// the goal. An io(!S) parameter's state is the exception: it is threaded
-// through the goal, which cannot undo it, so every branch continues from
-// the version after the goal.
+// A try goal (reference manual, "Exception handling") becomes what mmc's
+// dump shows before its mode analysis: a Try scope over
+//
+//   exception.magic_exception_result(Result),
+//   ( Result = succeeded(V), V = {},
+//     ( if TryGoal then Then else Else )     % TryGoal, Then without else
+//   ; Result = exception(Univ),
+//     ( if exc_univ_to_type(Univ, X1), X1 = Pattern1 then Catch1
+//       else if ...
+//       else Any = exc_univ_value(Univ), CatchAny   % or rethrow(Result)
+//     )
+//   )
+//
+// so that every pass checks it as the goals it is: the stand-in is
+// cc_multi, which makes the try cc_multi, and the goal's bindings reach
+// the goals after the try, as in mmc. The goal is a TryGoal scope, which
+// keeps its conjuncts apart from the then part's. Code generation makes the
+// goal a closure, the stand-in a call of exception.try or try_io with it,
+// and switches on the result. The Try scope's variables are the result
+// and the versions of each io(!S)'s state before and after the goal.
+//
+// The goal's updates of other state variables are seen in the then part
+// only, as in an if-then-else. The else part and the catch branches start
+// from the versions before the goal, io(!S)'s too, as in mmc's form: they
+// are parallel to the goal, which code generation reconciles, since it
+// continues a catch from the io state after the goal.
 void ClauseDesugarer::DesugarTry(const parser::TryGoal &t, Goals &out) {
   llvm::SmallVector<std::pair<llvm::StringRef, VarId>, 2> io;
   for (const parser::DataTerm &term : t.io) {
     const auto &var{*std::get<const parser::StateVar *>(term)};
     io.emplace_back(var.name, StateRef(var, false));
   }
+  if (t.io.size() > 1) {
+    // mmc: "Error: duplicate io try parameter."
+    Error(t.tokens, "duplicate io try parameter"_err_en_US);
+  }
+  if (!t.io.empty() && t.otherwise) {
+    // mmc: "Error: a `try' goal with an `io' parameter cannot have an
+    // `else' part."
+    Error(t.tokens,
+        "a try goal with an io parameter cannot have an else part"_err_en_US);
+  }
   StateMap start{state_};
-  Goal goal{DesugarGoal(t.goal)};
+  TokenRange goalAt{GoalTokens(t.goal)};
+  Goal inner{DesugarGoal(t.goal)};
+  // Its variables are the io states it may use (check-modes.cpp, TryGoal).
+  llvm::SmallVector<VarId, 1> goalIo;
+  for (const auto &[name, before] : io) {
+    goalIo.push_back(before);
+  }
+  Goal goal{Make<Scope>(goalAt, Number(), ScopeKind::TryGoal,
+      ParseGoal{t.goal}, arena_.SaveArray(llvm::ArrayRef<VarId>{goalIo}),
+      inner)};
   StateMap afterGoal{state_};
-  llvm::SmallVector<VarId, 4> ioVersions;
+  llvm::SmallVector<VarId, 5> scopeVars;
+  // Named as mmc names it, for messages about the switch on it.
+  VarId result{ProgramVar(*ExpansionVar(t.tokens, "TryResult"))};
+  scopeVars.push_back(result);
   for (auto &[name, before] : io) {
     // Not in scope, which StateRef reported, the state stays as it was.
     std::optional<VarId> after{afterGoal.lookup(name)};
-    ioVersions.push_back(before);
-    ioVersions.push_back(after ? *after : before);
-  }
-  // The state that the else part and the catch branches start from.
-  StateMap failed{start};
-  for (auto &[name, before] : io) {
-    failed[name] = afterGoal.lookup(name);
+    scopeVars.push_back(before);
+    scopeVars.push_back(after ? *after : before);
   }
   llvm::SmallVector<Goals, 4> arms;
   llvm::SmallVector<StateMap, 4> ends;
@@ -1544,38 +1605,98 @@ void ClauseDesugarer::DesugarTry(const parser::TryGoal &t, Goals &out) {
   ends.push_back(Branch(t.then, afterGoal, arms.back()));
   if (t.otherwise) {
     arms.emplace_back();
-    ends.push_back(Branch(*t.otherwise, failed, arms.back()));
+    ends.push_back(Branch(*t.otherwise, start, arms.back()));
   }
-  // A catch's pattern is unified with the exception, a variable of its own.
-  llvm::SmallVector<std::pair<VarId, Goal>, 4> patterns;
+  VarId univ{Fresh(t.tokens)};
+  llvm::SmallVector<Goal, 4> tests;
   for (const parser::CatchClause *c : t.catches) {
-    DesugarCatch(*c, failed, patterns, arms, ends);
+    arms.emplace_back();
+    ends.emplace_back();
+    tests.emplace_back();
+    DesugarCatch(*c, univ, start, false, arms.back(), ends.back(),
+        tests.back());
   }
   if (t.catchAny) {
-    DesugarCatch(*t.catchAny, failed, patterns, arms, ends);
+    arms.emplace_back();
+    ends.emplace_back();
+    tests.emplace_back();
+    DesugarCatch(*t.catchAny, univ, start, true, arms.back(), ends.back(),
+        tests.back());
   }
   Merge(start, ends, arms, t.tokens);
   std::size_t arm{0};
   Goal then{Conjoin(GoalTokens(t.then), arms[arm++])};
-  std::optional<Goal> otherwise;
+  // The succeeded branch.
+  VarId tuple{Fresh(t.tokens)};
+  Goals succeeded;
+  {
+    VarId arguments[]{tuple};
+    succeeded.push_back(Make<Unify>(t.tokens, Number(), result, false,
+        VarId{0},
+        Functor{FunctorKind::Name, ExceptionName(t.tokens, "succeeded"),
+            nullptr, nullptr},
+        Save(llvm::ArrayRef<VarId>{arguments})));
+    succeeded.push_back(Make<Unify>(t.tokens, Number(), tuple, false, VarId{0},
+        Functor{FunctorKind::Tuple, nullptr, nullptr, nullptr},
+        llvm::ArrayRef<VarId>{}));
+  }
   if (t.otherwise) {
-    otherwise = Conjoin(GoalTokens(*t.otherwise), arms[arm++]);
+    Goal otherwise{Conjoin(GoalTokens(*t.otherwise), arms[arm++])};
+    succeeded.push_back(
+        Make<IfThenElse>(t.tokens, Number(), goal, then, otherwise));
+  } else {
+    succeeded.push_back(goal);
+    succeeded.push_back(then);
   }
-  llvm::SmallVector<Catch, 4> catches;
-  std::optional<Catch> catchAny;
-  std::size_t j{0};
-  for (const parser::CatchClause *c : t.catches) {
-    catches.push_back(Catch{c->tokens, patterns[j].first, patterns[j].second,
-        Conjoin(GoalTokens(c->goal), arms[arm++])});
-    ++j;
-  }
+  // The exception branch: the catches in turn, then catch_any or rethrow.
+  std::size_t catches{t.catches.size()};
+  Goal chain;
   if (t.catchAny) {
-    catchAny = Catch{t.catchAny->tokens, patterns[j].first,
-        patterns[j].second, Conjoin(GoalTokens(t.catchAny->goal), arms[arm])};
+    Goals last{tests[catches]};
+    last.push_back(Conjoin(GoalTokens(t.catchAny->goal), arms[arm + catches]));
+    chain = Conjoin(t.catchAny->tokens, last);
+  } else {
+    VarId arguments[]{result};
+    chain = Make<Call>(t.tokens, Number(), ExceptionName(t.tokens, "rethrow"),
+        Save(llvm::ArrayRef<VarId>{arguments}), false);
   }
-  out.push_back(Make<Try>(t.tokens, Number(),
-      Save(llvm::ArrayRef<VarId>{ioVersions}), goal, then, otherwise,
-      Save(llvm::ArrayRef<Catch>{catches}), catchAny));
+  for (std::size_t i{catches}; i-- > 0;) {
+    const parser::CatchClause &c{*t.catches[i]};
+    chain = Make<IfThenElse>(c.tokens, Number(), tests[i],
+        Conjoin(GoalTokens(c.goal), arms[arm + i]), chain);
+  }
+  Goals exception;
+  {
+    VarId arguments[]{univ};
+    exception.push_back(Make<Unify>(t.tokens, Number(), result, false,
+        VarId{0},
+        Functor{FunctorKind::Name, ExceptionName(t.tokens, "exception"),
+            nullptr, nullptr},
+        Save(llvm::ArrayRef<VarId>{arguments})));
+  }
+  exception.push_back(chain);
+  Goal branches[]{Conjoin(t.tokens, succeeded), Conjoin(t.tokens, exception)};
+  VarId magicArguments[]{result};
+  Goal body[]{Make<Call>(t.tokens, Number(),
+                  ExceptionName(t.tokens, "magic_exception_result"),
+                  Save(llvm::ArrayRef<VarId>{magicArguments}), false),
+      Make<Disj>(t.tokens, Number(), Save(llvm::ArrayRef<Goal>{branches}))};
+  Goal conj{Make<Conj>(
+      t.tokens, Number(), false, Save(llvm::ArrayRef<Goal>{body}))};
+  out.push_back(Make<Scope>(t.tokens, Number(), ScopeKind::Try,
+      ParseGoal{parser::Goal{&t}}, Save(llvm::ArrayRef<VarId>{scopeVars}),
+      conj));
+}
+
+const parser::SymName *ClauseDesugarer::ExceptionName(
+    TokenRange range, llvm::StringRef name) {
+  static const llvm::StringRef exception[]{"exception"};
+  const parser::SymName *symName{Make<parser::SymName>(
+      range, llvm::ArrayRef<llvm::StringRef>{exception}, name)};
+  if (implicit_) {
+    implicit_->push_back(symName);
+  }
+  return symName;
 }
 
 const parser::StateVar *AtomicParamState(const parser::AtomicParam &param) {
@@ -2354,6 +2475,7 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
     parser::Messages &messages) {
   llvm::SmallVector<const ClauseForm *, 16> clauses;
   llvm::SmallVector<MethodClause, 16> methods;
+  std::vector<const parser::SymName *> implicit;
   bool processImported{false};
   for (const parser::Item &item : tree.items) {
     if (const auto *decl{std::get_if<const parser::ImportDecl *>(&item)}) {
@@ -2365,7 +2487,8 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
   for (const parser::Item &item : tree.items) {
     if (const auto *decl{std::get_if<const parser::InstanceDecl *>(&item)}) {
       for (const parser::InstanceMethod &method : (*decl)->methods) {
-        ClauseDesugarer desugarer{tokens, arena, messages, processImported};
+        ClauseDesugarer desugarer{
+            tokens, arena, messages, processImported, &implicit};
         std::optional<const ClauseForm *> clause;
         const parser::MethodByName *byName{nullptr};
         common::visit(
@@ -2390,12 +2513,14 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
       }
     }
     if (const auto *rule{std::get_if<const parser::FactOrRule *>(&item)}) {
-      ClauseDesugarer desugarer{tokens, arena, messages, processImported};
+      ClauseDesugarer desugarer{
+            tokens, arena, messages, processImported, &implicit};
       if (auto clause{desugarer.Desugar(**rule)}) {
         clauses.push_back(&Quantify(**clause, tokens, arena, messages));
       }
     } else if (const auto *rule{std::get_if<const parser::DcgRule *>(&item)}) {
-      ClauseDesugarer desugarer{tokens, arena, messages, processImported};
+      ClauseDesugarer desugarer{
+            tokens, arena, messages, processImported, &implicit};
       if (auto clause{desugarer.Desugar(**rule)}) {
         clauses.push_back(&Quantify(**clause, tokens, arena, messages));
       }
@@ -2411,7 +2536,8 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
   FieldAccessClauses(tree, tokens, arena, messages, processImported, clauses);
   return *arena.Make<SemanticForm>(
       arena.SaveArray(llvm::ArrayRef<const ClauseForm *>{clauses}),
-      arena.SaveArray(llvm::ArrayRef<MethodClause>{methods}));
+      arena.SaveArray(llvm::ArrayRef<MethodClause>{methods}),
+      arena.SaveArray(llvm::ArrayRef<const parser::SymName *>{implicit}));
 }
 
 } // namespace merkurius::semantics

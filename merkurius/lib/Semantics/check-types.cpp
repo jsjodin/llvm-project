@@ -424,6 +424,10 @@ private:
   void CheckCall(const Call &);
   void CheckHOCall(const HOCall &);
   void TraceIo(const Scope &);
+  // A try goal's io(!S) states are io.state (desugar.cpp, DesugarTry). The
+  // signature of exception.try or try_io, which code generation calls in
+  // place of magic_exception_result, is made here.
+  void TryIo(const Scope &);
   const Type *HOCallType(const HOCall &);
   void CheckLoop(const Loop &);
   ClauseTypes Finish(const ClauseForm &, const Symbol *definition,
@@ -3669,21 +3673,6 @@ void TypeChecker::CountPending(const Goal &goal) {
             }
             CountPending(scope->goal);
           },
-          [&](const Try *t) {
-            PinNonlocals(t->number);
-            CountPending(t->goal);
-            CountPending(t->then);
-            if (t->otherwise) {
-              CountPending(*t->otherwise);
-            }
-            for (const Catch &c : t->catches) {
-              CountPending(c.pattern);
-              CountPending(c.goal);
-            }
-            if (t->catchAny) {
-              CountPending(t->catchAny->goal);
-            }
-          },
           [&](const Atomic *atomic) {
             PinNonlocals(atomic->number);
             for (const AtomicAlternative &alternative : atomic->alternatives) {
@@ -3850,6 +3839,31 @@ const Type *TypeChecker::HOCallType(const HOCall &call) {
 // The versions of a trace goal's io(!S) state variable are io states
 // (reference manual, "Trace goals"); a state(M, !S) one's are of the
 // mutable's type, but mutables are still to come.
+void TypeChecker::TryIo(const Scope &scope) {
+  if (const ModuleSymbols * symbols{resolution_.Module("exception")}) {
+    for (const Symbol *symbol :
+        symbols->Lookup(scope.vars.size() > 1 ? "try_io" : "try")) {
+      if (symbol->kind == SymbolKind::Predicate) {
+        SignatureOf(*symbol);
+      }
+    }
+  }
+  const Type *io{Library("io", "state")};
+  if (!io) {
+    return;
+  }
+  // After the result, the versions before and after the goal of each.
+  for (VarId var : scope.vars.drop_front()) {
+    Constrain(
+        [&](Assignment &a) { return UnifyTypes(a, VarType(var), io); },
+        [&](const Assignment &a) {
+          messages_->Say(Source(scope.tokens),
+              "type error: %s has type %s, but io(...) needs io.state"_err_en_US,
+              Describe(var), TypeText(a, VarType(var)));
+        });
+  }
+}
+
 void TypeChecker::TraceIo(const Scope &scope) {
   const Type *io{Library("io", "state")};
   if (!io) {
@@ -4037,42 +4051,10 @@ void TypeChecker::CheckGoal(const Goal &goal) {
             if (scope->kind == ScopeKind::Trace) {
               TraceIo(*scope);
             }
+            if (scope->kind == ScopeKind::Try) {
+              TryIo(*scope);
+            }
             CheckGoal(scope->goal);
-          },
-          [&](const Try *t) {
-            if (const Type * io{Library("io", "state")}) {
-              for (VarId var : t->io) {
-                Constrain(
-                    [&](Assignment &a) { return UnifyTypes(a, VarType(var), io); },
-                    [&](const Assignment &a) {
-                      messages_->Say(Source(t->tokens),
-                          "type error: %s has type %s, but io(...) needs io.state"_err_en_US,
-                          Describe(var), TypeText(a, VarType(var)));
-                    });
-              }
-            }
-            CheckGoal(t->goal);
-            CheckGoal(t->then);
-            if (t->otherwise) {
-              CheckGoal(*t->otherwise);
-            }
-            for (const Catch &c : t->catches) {
-              CheckGoal(c.pattern);
-              CheckGoal(c.goal);
-            }
-            if (t->catchAny) {
-              if (const Type * univ{Library("univ", "univ")}) {
-                VarId var{t->catchAny->exception};
-                Constrain(
-                    [&](Assignment &a) { return UnifyTypes(a, VarType(var), univ); },
-                    [&](const Assignment &a) {
-                      messages_->Say(Source(t->catchAny->tokens),
-                          "type error: %s has type %s, but catch_any needs univ.univ"_err_en_US,
-                          Describe(var), TypeText(a, VarType(var)));
-                    });
-              }
-              CheckGoal(t->catchAny->goal);
-            }
           },
           [&](const Atomic *atomic) {
             // The states' types are stm_builtin's, which is not stubbed.
@@ -4511,20 +4493,6 @@ void TypeChecker::ForEachReference(
           },
           [&](const HOCall *) {},
           [&](const Scope *scope) { ForEachReference(scope->goal, f); },
-          [&](const Try *t) {
-            ForEachReference(t->goal, f);
-            ForEachReference(t->then, f);
-            if (t->otherwise) {
-              ForEachReference(*t->otherwise, f);
-            }
-            for (const Catch &c : t->catches) {
-              ForEachReference(c.pattern, f);
-              ForEachReference(c.goal, f);
-            }
-            if (t->catchAny) {
-              ForEachReference(t->catchAny->goal, f);
-            }
-          },
           [&](const Atomic *atomic) {
             for (const AtomicAlternative &alternative : atomic->alternatives) {
               ForEachReference(alternative.goal, f);

@@ -341,8 +341,16 @@ void Resolve(CompilerInstance &ci, parser::SourceFile &file,
   llvm::StringRef directory{llvm::sys::path::parent_path(file.path())};
   r.loader->LoadImports(
       *r.tree, r.tokens, directory.empty() ? "." : directory);
-  // The modules that loops' translations call, which need not be imported.
-  for (llvm::StringRef module : semantics::LoopModules(*r.form)) {
+  // The modules that loops' translations and try goals' expansions call,
+  // which need not be imported.
+  llvm::SmallVector<llvm::StringRef, 2> implicit{
+      semantics::LoopModules(*r.form)};
+  for (llvm::StringRef module : r.form->ImplicitModules()) {
+    if (!llvm::is_contained(implicit, module)) {
+      implicit.push_back(module);
+    }
+  }
+  for (llvm::StringRef module : implicit) {
     r.loader->Load(module, r.tokens.tokens.front().spelling,
         directory.empty() ? "." : directory);
   }

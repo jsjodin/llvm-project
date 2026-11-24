@@ -559,6 +559,12 @@ private:
   // words, which `results` makes after the goal. `arguments` are the
   // closure's own. Null if it cannot be made, which this reports.
   struct ClosureArgument;
+  // A try goal's expansion (desugar.cpp, DesugarTry): its goal outlined as a
+  // closure, which exception.try or try_io calls in place of
+  // magic_exception_result; the closure gives the variables the goal binds
+  // that the goals after it use, as a tuple. A switch on the result runs the
+  // then part with those, the else part, or the catches.
+  void Try(const Body &, const ProcedureBody &);
   mlir::Value OutlineClosure(const Body &key, const Body &inner,
       llvm::ArrayRef<BodyVar> head, llvm::ArrayRef<ClosureArgument> arguments,
       llvm::ArrayRef<BodyVar> inputVars, llvm::ArrayRef<mlir::Type> inputTypes,

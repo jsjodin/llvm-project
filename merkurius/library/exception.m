@@ -60,9 +60,27 @@
     --->    near_stack_limits.
 :- impure pred throw_if_near_stack_limits is det.
 
+    % Not in the library manual: mmc's, for the expansion of try goals
+    % (compiler's desugar.cpp, DesugarTry). The stand-in for the call of try
+    % or try_io, which code generation replaces; a catch's test, and a
+    % catch_any's value.
+:- pred magic_exception_result(exception_result({})::out(cannot_fail))
+    is cc_multi.
+:- pred exc_univ_to_type(univ::in, T::out) is semidet.
+:- some [T] func exc_univ_value(univ) = T.
+
 :- implementation.
 
 :- import_module solutions.
+
+:- pragma no_determinism_warning(magic_exception_result/1).
+
+magic_exception_result(succeeded({})).
+
+exc_univ_to_type(Univ, T) :-
+    univ_to_type(Univ, T).
+
+exc_univ_value(Univ) = univ_value(Univ).
 
 throw(Exception) = _ :-
     throw(Exception).

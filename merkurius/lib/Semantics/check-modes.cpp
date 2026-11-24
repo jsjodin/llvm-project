@@ -74,13 +74,6 @@ bool IsImpure(const Goal &goal) {
               return IsImpure(x->goal);
             }
           },
-          [](const Try *x) {
-            return IsImpure(x->goal) || IsImpure(x->then) ||
-                (x->otherwise && IsImpure(*x->otherwise)) ||
-                llvm::any_of(x->catches,
-                    [](const Catch &c) { return IsImpure(c.goal); }) ||
-                (x->catchAny && IsImpure(x->catchAny->goal));
-          },
           [](const Atomic *x) {
             return llvm::any_of(x->alternatives,
                 [](const AtomicAlternative &a) { return IsImpure(a.goal); });
@@ -1695,6 +1688,11 @@ private:
       const Goal &, const IfThenElse &, InstMap &, const Live &);
   Result Negation(const Goal &, const Not &, InstMap &, const Live &);
   Result Trace(const Goal &, const Scope &, InstMap &, const Live &);
+  // A try goal's goal (desugar.cpp, DesugarTry), whose scope's variables
+  // are the io(!S) states it may use; other io states are shared in it, so
+  // that it cannot do I/O ("If no io parameter exists, GOAL may not perform
+  // I/O"), as mmc's lambda expression of it captures them.
+  Result TryGoal(const Goal &, const Scope &, InstMap &, const Live &);
   // The error for a negated context that a nonlocal with an any part
   // appears in, outside a purity promise.
   std::optional<Result> AnyInNegatedContext(const Goal &,
@@ -2562,6 +2560,8 @@ ProcedureChecker::Result ProcedureChecker::CheckGoal(
             switch (scope->kind) {
             case ScopeKind::Trace:
               return Trace(goal, *scope, map, live);
+            case ScopeKind::TryGoal:
+              return TryGoal(goal, *scope, map, live);
             case ScopeKind::PromisePurity: {
               ++promised_;
               Result r{Check(scope->goal, map, live)};
@@ -2573,7 +2573,6 @@ ProcedureChecker::Result ProcedureChecker::CheckGoal(
               return Check(scope->goal, map, live);
             }
           },
-          [&](const Try *) { return Unsupported(Unchecked::Try); },
           [&](const Atomic *) { return Unsupported(Unchecked::Atomic); },
           [&](const Loop *loop) {
             declarations_.LoopNotYet(*loop, Source(loop->tokens));
@@ -2581,6 +2580,27 @@ ProcedureChecker::Result ProcedureChecker::CheckGoal(
           },
       },
       goal);
+}
+
+ProcedureChecker::Result ProcedureChecker::TryGoal(const Goal &,
+    const Scope &scope, InstMap &map, const Live &live) {
+  InstMap inner{map};
+  std::vector<VarId> shared;
+  for (VarId var{0}; var < map.size(); ++var) {
+    const Type *type{TypeOf(var)};
+    if (type && type->kind == TypeKind::Named && type->constructor &&
+        type->constructor->module == "io" && type->constructor->name == "state" &&
+        !llvm::is_contained(scope.vars, var) && !ops_.IsFree(map[var])) {
+      inner[var] = insts_.Share(map[var]);
+      shared.push_back(var);
+    }
+  }
+  Result r{Check(scope.goal, inner, live)};
+  for (VarId var : shared) {
+    inner[var] = map[var];
+  }
+  map = std::move(inner);
+  return r;
 }
 
 // Each branch of a disjunction starts from the insts before it, and their

@@ -533,33 +533,54 @@ TEST(DesugarTest, ConditionalExpressions) {
 }
 
 TEST(DesugarTest, Try) {
-  // The goal's updates are seen in the then part only; a catch sees the
-  // version before the goal, as in mmc.
+  // mmc's expansion: magic_exception_result stands for the call of
+  // exception.try, which code generation makes; the goal's updates are seen
+  // in the then part only, and a catch sees the version before the goal. A
+  // catch that does not match rethrows.
   EXPECT_EQ(Form("p(!S) :- ( try [] q(!S) then r(!S) catch 42 -> true ).\n"),
       "Predicate p(S!0, S!3)\n"
-      "| Try #6\n"
-      "| | Call #0 q(S!0, S!1)\n"
-      "| | then\n"
-      "| | | Conj #5\n"
-      "| | | | Call #1 r(S!1, S!2)\n"
-      "| | | | Unify #3 S!3 = S!2\n"
-      "| | catch $3\n"
-      "| | | match\n"
-      "| | | | Unify #2 $3 = 42\n"
-      "| | | Unify #4 S!3 = S!0\n");
-  // An io(!IO) parameter's state continues from the version after the
-  // goal in every branch.
+      "| Scope #19 Try [TryResult]\n"
+      "| | Conj #18\n"
+      "| | | Call #16 exception.magic_exception_result(TryResult)\n"
+      "| | | Disj #17\n"
+      "| | | | Conj #14\n"
+      "| | | | | Unify #9 TryResult = exception.succeeded($7)\n"
+      "| | | | | Unify #10 $7 = {}\n"
+      "| | | | | Scope #1 TryGoal\n"
+      "| | | | | | Call #0 q(S!0, S!1)\n"
+      "| | | | | Conj #8\n"
+      "| | | | | | Call #2 r(S!1, S!2)\n"
+      "| | | | | | Unify #6 S!3 = S!2\n"
+      "| | | | Conj #15\n"
+      "| | | | | Unify #13 TryResult = exception.exception($4)\n"
+      "| | | | | IfThenElse #12\n"
+      "| | | | | | Conj #5\n"
+      "| | | | | | | Call #3 exception.exc_univ_to_type($4, $5)\n"
+      "| | | | | | | Unify #4 $5 = 42\n"
+      "| | | | | | Unify #7 S!3 = S!0\n"
+      "| | | | | | Call #11 exception.rethrow(TryResult)\n");
+  // An io(!IO) parameter's version before and after the goal are the
+  // scope's, after the result; a catch_any's value is exc_univ_value's.
   EXPECT_EQ(Form("p(!IO) :- ( try [io(!IO)] q(!IO) then true "
                  "catch_any E -> r(E, !IO) ).\n"),
       "Predicate p(IO!0, IO!3)\n"
-      "| Try #6 io [IO!0, IO!1]\n"
-      "| | Call #0 q(IO!0, IO!1)\n"
-      "| | then\n"
-      "| | | Unify #3 IO!3 = IO!1\n"
-      "| | catch_any E\n"
-      "| | | Conj #5\n"
-      "| | | | Call #2 r(E, IO!1, IO!2)\n"
-      "| | | | Unify #4 IO!3 = IO!2\n");
+      "| Scope #16 Try [TryResult, IO!0, IO!1]\n"
+      "| | Conj #15\n"
+      "| | | Call #13 exception.magic_exception_result(TryResult)\n"
+      "| | | Disj #14\n"
+      "| | | | Conj #11\n"
+      "| | | | | Unify #6 TryResult = exception.succeeded($7)\n"
+      "| | | | | Unify #7 $7 = {}\n"
+      "| | | | | Scope #1 TryGoal [IO!0]\n"
+      "| | | | | | Call #0 q(IO!0, IO!1)\n"
+      "| | | | | Unify #4 IO!3 = IO!1\n"
+      "| | | | Conj #12\n"
+      "| | | | | Unify #10 TryResult = exception.exception($3)\n"
+      "| | | | | Conj #9\n"
+      "| | | | | | Unify #2 E = exception.exc_univ_value($3)\n"
+      "| | | | | | Conj #8\n"
+      "| | | | | | | Call #3 r(E, IO!0, IO!2)\n"
+      "| | | | | | | Unify #5 IO!3 = IO!2\n");
 }
 
 TEST(DesugarTest, Atomic) {

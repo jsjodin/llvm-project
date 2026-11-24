@@ -1066,6 +1066,342 @@ mlir::Value MerkGenerator::OutlineClosure(const Body &key, const Body &inner,
       CapturesAttr(captures));
 }
 
+namespace {
+// The goals of a conjunction, with those of the conjunctions in it.
+void Conjuncts(const Body &goal, llvm::SmallVectorImpl<const Body *> &out) {
+  if (goal.kind != BodyKind::Conj) {
+    out.push_back(&goal);
+    return;
+  }
+  for (const Body *conjunct : goal.goals) {
+    Conjuncts(*conjunct, out);
+  }
+}
+
+// The goal of a try goal, if `goal` is its scope or a conjunction of only it.
+const Body *TryGoalOf(const Body &goal) {
+  llvm::SmallVector<const Body *> goals;
+  Conjuncts(goal, goals);
+  return goals.size() == 1 && goals.front()->kind == BodyKind::Scope &&
+          goals.front()->scope == semantics::ScopeKind::TryGoal
+      ? goals.front()
+      : nullptr;
+}
+
+// The procedure of exception.try or try_io for a goal of this determinism:
+// their modes are in that order (library/exception.m).
+const Procedure *TryProcedure(llvm::ArrayRef<const Procedure *> procedures,
+    bool io, parser::Determinism determinism) {
+  using parser::Determinism;
+  std::size_t index;
+  switch (determinism) {
+  case Determinism::Det:
+  case Determinism::Erroneous:
+    index = 0;
+    break;
+  case Determinism::Semidet:
+  case Determinism::Failure:
+    index = io ? 2 : 1;
+    break;
+  case Determinism::CcMulti:
+    index = io ? 1 : 2;
+    break;
+  case Determinism::CcNondet:
+    index = io ? 2 : 3;
+    break;
+  default:
+    return nullptr;
+  }
+  return index < procedures.size() ? procedures[index] : nullptr;
+}
+
+// The determinism of the closure that try or try_io calls for a goal.
+parser::Determinism TryClosureDeterminism(parser::Determinism determinism) {
+  switch (determinism) {
+  case parser::Determinism::Erroneous:
+    return parser::Determinism::Det;
+  case parser::Determinism::Failure:
+    return parser::Determinism::Semidet;
+  default:
+    return determinism;
+  }
+}
+} // namespace
+
+void MerkGenerator::Try(const Body &goal, const ProcedureBody &body) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  BodyVar resultVar{goal.tryVars.front()};
+  bool io{goal.tryVars.size() > 1};
+  if (goal.tryVars.size() > 3) {
+    NotYet(at, "try goals with more than one io parameter");
+    return;
+  }
+  // The expansion: magic_exception_result(Result), then a switch on Result
+  // with the cases exception and succeeded.
+  llvm::SmallVector<const Body *> top;
+  Conjuncts(*goal.goals.front(), top);
+  const Body *switchGoal{nullptr};
+  for (const Body *g : top) {
+    if (g->kind == BodyKind::Switch && g->switchVar == resultVar) {
+      switchGoal = g;
+    }
+  }
+  const semantics::SwitchCase *exceptionCase{nullptr}, *succeededCase{nullptr};
+  if (switchGoal) {
+    for (const semantics::SwitchCase &c : switchGoal->cases) {
+      if (c.functor.name == "exception") {
+        exceptionCase = &c;
+      } else if (c.functor.name == "succeeded") {
+        succeededCase = &c;
+      }
+    }
+  }
+  if (!exceptionCase || !succeededCase) {
+    NotYet(at, "this try goal's form");
+    return;
+  }
+  // In the succeeded case, after the tests of Result: the goal, then the
+  // then part; or an if-then-else of the goal, the then and else parts.
+  llvm::SmallVector<const Body *> succeeded;
+  Conjuncts(*succeededCase->goal, succeeded);
+  const Body *tryGoal{nullptr};
+  const Body *elseGoal{nullptr};
+  llvm::SmallVector<const Body *> thenGoals;
+  for (auto [i, g] : llvm::enumerate(succeeded)) {
+    if (const Body *own{TryGoalOf(*g)}) {
+      tryGoal = own;
+      thenGoals.append(succeeded.begin() + i + 1, succeeded.end());
+      break;
+    }
+    if (g->kind == BodyKind::IfThenElse) {
+      if (const Body *own{TryGoalOf(*g->goals[0])}) {
+        tryGoal = own;
+        thenGoals.push_back(g->goals[1]);
+        elseGoal = g->goals[2];
+        thenGoals.append(succeeded.begin() + i + 1, succeeded.end());
+        break;
+      }
+    }
+  }
+  if (!tryGoal) {
+    NotYet(at, "this try goal's form");
+    return;
+  }
+  auto determinismIt{body.goals.find(tryGoal)};
+  if (determinismIt == body.goals.end()) {
+    NotYet(at, "this try goal's determinism");
+    return;
+  }
+  parser::Determinism goalDeterminism{
+      TryClosureDeterminism(determinismIt->second)};
+  std::optional<merk::Determinism> closureDeterminism{
+      ClosureDeterminism(goalDeterminism)};
+  // What the goal binds that the goals after it use, but its io states.
+  llvm::SmallVector<BodyVar> outputs;
+  llvm::SmallVector<const semantics::Type *> outputTypes;
+  for (BodyVar var : tryGoal->nonlocals) {
+    std::optional<Represented> represented{Represent(body.vars[var].type)};
+    if (values_.lookup(var) || llvm::is_contained(goal.tryVars, var) ||
+        (represented && represented->dummy)) {
+      continue;
+    }
+    if (!represented) {
+      NotYet(at, "values of type " +
+              semantics::TypeToString(*body.vars[var].type));
+      return;
+    }
+    outputs.push_back(var);
+    outputTypes.push_back(body.vars[var].type);
+  }
+  const semantics::Type *tuple{types_.types().Tuple(outputTypes)};
+  std::optional<Represented> tupleRepresented{Represent(tuple)};
+  const semantics::Symbol *resultType{
+      body.vars[resultVar].type->kind == semantics::TypeKind::Named
+          ? body.vars[resultVar].type->constructor
+          : nullptr};
+  const semantics::ModuleSymbols *exception{resolution_.Module("exception")};
+  const semantics::Symbol *callee{nullptr};
+  if (exception) {
+    for (const semantics::Symbol *symbol :
+        exception->Lookup(io ? "try_io" : "try")) {
+      if (symbol->kind == semantics::SymbolKind::Predicate) {
+        callee = symbol;
+      }
+    }
+  }
+  const Procedure *procedure{callee
+          ? TryProcedure(modes_.ProceduresOf(*callee), io, goalDeterminism)
+          : nullptr};
+  if (!closureDeterminism || !tupleRepresented || !resultType || !procedure) {
+    NotYet(at, "this try goal");
+    return;
+  }
+  // The closure: it gives the tuple, and the io state after the goal.
+  llvm::SmallVector<ClosureArgument> arguments{{true, false}};
+  if (io) {
+    arguments.append({{false, true}, {true, false}});
+  }
+  auto word{merk::WordType::get(&context_)};
+  bool committed{goalDeterminism == parser::Determinism::CcMulti ||
+      goalDeterminism == parser::Determinism::CcNondet};
+  mlir::Value closure{OutlineClosure(*tryGoal, *tryGoal, {}, arguments, {},
+      {}, io ? 2u : 1u, *closureDeterminism, committed, std::nullopt, body,
+      [&](mlir::Location at) {
+        llvm::SmallVector<mlir::Value> words;
+        llvm::SmallVector<mlir::Value> elements;
+        for (BodyVar var : outputs) {
+          elements.push_back(ValueOf(var));
+        }
+        if (llvm::is_contained(elements, mlir::Value{})) {
+          words.push_back(mlir::Value{});
+          return words;
+        }
+        if (tupleRepresented->dummy) {
+          words.push_back(merk::ToWordOp::create(builder_, at, word,
+              IntegerConstant(builder_.getI64Type(), 0, at)));
+        } else {
+          words.push_back(Coerce(
+              merk::ConstructOp::create(builder_, at, tupleRepresented->type,
+                  merk::FunctorAttr::get(&context_, "{}",
+                      static_cast<unsigned>(elements.size())),
+                  elements),
+              word, at));
+        }
+        if (io) {
+          llvm::SmallVector<mlir::Value> state{
+              WordResults({goal.tryVars[2]}, body, at)};
+          words.append(state.begin(), state.end());
+        }
+        return words;
+      })};
+  if (!closure) {
+    failed_ = true;
+    return;
+  }
+  // try(Closure, Result) or try_io(Closure, Result, IO0, IO), whose io
+  // states have no bits.
+  merk::ProcOp proc{
+      ProcFor(*procedure, types_.SignatureOf(*callee)->arguments, at)};
+  mlir::Value info{TypeInfoOfType(tuple, loc, at)};
+  if (!proc || !info) {
+    failed_ = true;
+    return;
+  }
+  mlir::FunctionType function{proc.getFunctionType()};
+  llvm::SmallVector<mlir::Value> inputs{info, closure};
+  if (function.getNumInputs() != inputs.size() ||
+      function.getNumResults() != 1) {
+    NotYet(at, "this try goal's call of exception." +
+            std::string{io ? "try_io" : "try"});
+    return;
+  }
+  for (auto [input, declared] : llvm::zip(inputs, function.getInputs())) {
+    input = Coerce(input, declared, loc);
+  }
+  auto call{merk::CallOp::create(
+      builder_, loc, function.getResults(), proc.getSymName(), inputs)};
+  const semantics::Type *realType{types_.types().Named(*resultType, {tuple})};
+  std::optional<Represented> realRepresented{Represent(realType)};
+  std::optional<Represented> magicRepresented{
+      Represent(body.vars[resultVar].type)};
+  if (!realRepresented || !magicRepresented) {
+    NotYet(at, "this try goal's result");
+    return;
+  }
+  // The results' type_infos, whose type constructors' descriptors the
+  // collector needs to describe them as roots.
+  if (!TypeInfoOfType(realType, loc, at) ||
+      !TypeInfoOfType(body.vars[resultVar].type, loc, at)) {
+    failed_ = true;
+    return;
+  }
+  mlir::Value result{Coerce(call.getResult(0), realRepresented->type, loc)};
+  // The switch on the result: exception, succeeded, and failed when the
+  // goal can fail.
+  llvm::SmallVector<mlir::Attribute> cases{
+      builder_.getArrayAttr({merk::FunctorAttr::get(&context_, "exception", 1)}),
+      builder_.getArrayAttr(
+          {merk::FunctorAttr::get(&context_, "succeeded", 1)})};
+  bool canFail{goalDeterminism == parser::Determinism::Semidet ||
+      goalDeterminism == parser::Determinism::CcNondet};
+  if (canFail) {
+    if (!elseGoal) {
+      NotYet(at, "this try goal's form");
+      return;
+    }
+    cases.push_back(
+        builder_.getArrayAttr({merk::FunctorAttr::get(&context_, "failed", 0)}));
+  }
+  bool nondeterministic{Nondeterministic(*exceptionCase->goal, body) ||
+      (elseGoal && Nondeterministic(*elseGoal, body))};
+  for (const Body *g : thenGoals) {
+    nondeterministic = nondeterministic || Nondeterministic(*g, body);
+  }
+  Values before{values_};
+  merk::EachOp each;
+  if (nondeterministic) {
+    each = BeginEach(loc);
+  }
+  auto op{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{}, result,
+      builder_.getArrayAttr(cases), false)};
+  llvm::SmallVector<Branch> branches;
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    auto regions{op.getCaseRegions()};
+    // exception(Univ): the catches, which take Result apart, and which may
+    // rethrow it.
+    values_ = before;
+    builder_.setInsertionPointToStart(&regions[0].emplaceBlock());
+    values_[resultVar] = Coerce(result, magicRepresented->type, loc);
+    Goal(*exceptionCase->goal, body);
+    branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
+    // succeeded(Tuple): the goal's bindings, then the then part.
+    values_ = before;
+    builder_.setInsertionPointToStart(&regions[1].emplaceBlock());
+    // A goal that never succeeds: the case is never taken, and need not bind
+    // what the catches bind.
+    if (determinismIt->second == parser::Determinism::Erroneous ||
+        determinismIt->second == parser::Determinism::Failure) {
+      merk::FailOp::create(builder_, loc);
+    } else if (!outputs.empty()) {
+      auto value{merk::DeconstructOp::create(builder_, loc,
+          mlir::TypeRange{tupleRepresented->type}, result,
+          merk::FunctorAttr::get(&context_, "succeeded", 1))};
+      llvm::SmallVector<mlir::Type> fields;
+      for (const semantics::Type *type : outputTypes) {
+        fields.push_back(Represent(type)->type);
+      }
+      auto elements{merk::DeconstructOp::create(builder_, loc, fields,
+          value.getFields()[0],
+          merk::FunctorAttr::get(
+              &context_, "{}", static_cast<unsigned>(outputs.size())))};
+      for (auto [var, element] : llvm::zip(outputs, elements.getFields())) {
+        values_[var] = element;
+      }
+    }
+    for (const Body *g : thenGoals) {
+      if (failed_ || Terminated()) {
+        break;
+      }
+      Goal(*g, body);
+    }
+    branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
+    // failed: the else part.
+    if (canFail) {
+      values_ = before;
+      builder_.setInsertionPointToStart(&regions[2].emplaceBlock());
+      Goal(*elseGoal, body);
+      branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
+    }
+  }
+  if (failed_) {
+    values_ = before;
+    return;
+  }
+  Join(op, branches, before, loc, each);
+}
+
 void MerkGenerator::NameClosure(const Body &goal, const ProcedureBody &body) {
   const Procedure &callee{*goal.modes->callee};
   parser::CharBlock at{Where(goal.tokens)};

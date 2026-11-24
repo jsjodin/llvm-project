@@ -106,26 +106,37 @@ lambdas(R) :-
 % CHECK-NEXT: | | HOCall #9 Q(R1) ~ [Q, R1]
 % CHECK-NEXT: | | Unify #10 R = '+'(R0, R1) ~ [R, R0, R1]
 
-% The I/O state after a try goal is shared with every branch.
+% A try goal's expansion: its result is local to it; the goal's I/O state
+% after it continues in the then part, and the catch starts from the one
+% before it.
 io_try(!IO) :-
     ( try [io(!IO)] io.write_string("a", !IO)
     then io.write_string("b", !IO)
     catch_any E -> io.write(E, !IO)
     ).
 % CHECK:      Predicate io_try(IO!0, IO!4)
-% CHECK-NEXT: | Try #11 io [IO!0, IO!1] ~ [IO!0, IO!4]
-% CHECK-NEXT: | | Conj #2 ~ [IO!0, IO!1]
-% CHECK-NEXT: | | | Unify #0 $1 = "a" ~ [$1]
-% CHECK-NEXT: | | | Call #1 io.write_string($1, IO!0, IO!1) ~ [IO!0, $1, IO!1]
-% CHECK-NEXT: | | then
-% CHECK-NEXT: | | | Conj #9 ~ [IO!1, IO!4]
-% CHECK-NEXT: | | | | Unify #3 $3 = "b" ~ [$3]
-% CHECK-NEXT: | | | | Call #4 io.write_string($3, IO!1, IO!2) ~ [IO!1, $3, IO!2]
-% CHECK-NEXT: | | | | Unify #7 IO!4 = IO!2 ~ [IO!2, IO!4]
-% CHECK-NEXT: | | catch_any E
-% CHECK-NEXT: | | | Conj #10 ~ [IO!1, E, IO!4]
-% CHECK-NEXT: | | | | Call #6 io.write(E, IO!1, IO!3) ~ [IO!1, E, IO!3]
-% CHECK-NEXT: | | | | Unify #8 IO!4 = IO!3 ~ [IO!3, IO!4]
+% CHECK-NEXT: | Scope #21 Try [TryResult, IO!0, IO!1] ~ [IO!0, IO!4]
+% CHECK-NEXT: | | Conj #20 ~ [IO!0, IO!4]
+% CHECK-NEXT: | | | Call #18 exception.magic_exception_result(TryResult) ~ [TryResult]
+% CHECK-NEXT: | | | Disj #19 ~ [IO!0, TryResult, IO!4]
+% CHECK-NEXT: | | | | Conj #16 ~ [IO!0, TryResult, IO!4]
+% CHECK-NEXT: | | | | | Unify #11 TryResult = exception.succeeded($10) ~ [TryResult, $10]
+% CHECK-NEXT: | | | | | Unify #12 $10 = {} ~ [$10]
+% CHECK-NEXT: | | | | | Scope #3 TryGoal [IO!0] ~ [IO!0, IO!1]
+% CHECK-NEXT: | | | | | | Conj #2 ~ [IO!0, IO!1]
+% CHECK-NEXT: | | | | | | | Unify #0 $1 = "a" ~ [$1]
+% CHECK-NEXT: | | | | | | | Call #1 io.write_string($1, IO!0, IO!1) ~ [IO!0, $1, IO!1]
+% CHECK-NEXT: | | | | | Conj #10 ~ [IO!1, IO!4]
+% CHECK-NEXT: | | | | | | Unify #4 $4 = "b" ~ [$4]
+% CHECK-NEXT: | | | | | | Call #5 io.write_string($4, IO!1, IO!2) ~ [IO!1, $4, IO!2]
+% CHECK-NEXT: | | | | | | Unify #8 IO!4 = IO!2 ~ [IO!2, IO!4]
+% CHECK-NEXT: | | | | Conj #17 ~ [IO!0, TryResult, IO!4]
+% CHECK-NEXT: | | | | | Unify #15 TryResult = exception.exception($6) ~ [TryResult, $6]
+% CHECK-NEXT: | | | | | Conj #14 ~ [IO!0, $6, IO!4]
+% CHECK-NEXT: | | | | | | Unify #6 E = exception.exc_univ_value($6) ~ [$6, E]
+% CHECK-NEXT: | | | | | | Conj #13 ~ [IO!0, E, IO!4]
+% CHECK-NEXT: | | | | | | | Call #7 io.write(E, IO!0, IO!3) ~ [IO!0, E, IO!3]
+% CHECK-NEXT: | | | | | | | Unify #9 IO!4 = IO!3 ~ [IO!3, IO!4]
 
 % Each atomic alternative's inner state is its own.
 transaction(V, !IO) :-

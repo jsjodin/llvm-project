@@ -49,7 +49,8 @@ digits(Ds) -->
 % CHECK-NEXT:   L: list.list(int)
 % CHECK:        Ds: list.list(int)
 % CHECK:        N: int
-% CHECK:        E: univ.univ
+% CHECK:        TryResult: exception.exception_result({})
+% CHECK-NEXT:   E: (some [T] T)
 % CHECK:        Apply: pred(int, int)
 % CHECK:        Two: int
 % CHECK-NEXT:   Three: int

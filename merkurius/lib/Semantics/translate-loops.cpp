@@ -98,21 +98,6 @@ void ForEachGoal(const Goal &goal, llvm::function_ref<void(const Goal &)> f) {
           [&](const Call *) {},
           [&](const HOCall *) {},
           [&](const Scope *x) { ForEachGoal(x->goal, f); },
-          [&](const Try *x) {
-            ForEachGoal(x->goal, f);
-            ForEachGoal(x->then, f);
-            if (x->otherwise) {
-              ForEachGoal(*x->otherwise, f);
-            }
-            for (const Catch &c : x->catches) {
-              ForEachGoal(c.pattern, f);
-              ForEachGoal(c.goal, f);
-            }
-            if (x->catchAny) {
-              ForEachGoal(x->catchAny->pattern, f);
-              ForEachGoal(x->catchAny->goal, f);
-            }
-          },
           [&](const Atomic *x) {
             for (const AtomicAlternative &a : x->alternatives) {
               ForEachGoal(a.goal, f);
@@ -165,15 +150,6 @@ void Occurring(const Goal &goal, llvm::BitVector &set) {
               AddVars(set, x->arguments);
             },
             [&](const Scope *x) { AddVars(set, x->vars); },
-            [&](const Try *x) {
-              AddVars(set, x->io);
-              for (const Catch &c : x->catches) {
-                AddVar(set, c.exception);
-              }
-              if (x->catchAny) {
-                AddVar(set, x->catchAny->exception);
-              }
-            },
             [&](const Atomic *x) {
               AddVar(set, x->outerInitial);
               AddVar(set, x->outerFinal);
@@ -348,8 +324,6 @@ private:
   Goal Rebuild(const Goal &);
   // Adds the goals rebuilt to `out`; whether any changed.
   bool RebuildAll(llvm::ArrayRef<Goal>, std::vector<Goal> &out);
-  // The catch rebuilt; `changed` is set if it changed.
-  Catch RebuildCatch(const Catch &, bool &changed);
   // The goals that replace a loop: the computation of its trip count, if
   // it has a for, and the call of its loop predicate.
   Goal TranslateLoop(const Loop &);
@@ -793,12 +767,6 @@ bool LoopTranslator::RebuildAll(
   return changed;
 }
 
-Catch LoopTranslator::RebuildCatch(const Catch &c, bool &changed) {
-  Catch result{c.tokens, c.exception, Rebuild(c.pattern), Rebuild(c.goal)};
-  changed |= result.pattern != c.pattern || result.goal != c.goal;
-  return result;
-}
-
 Goal LoopTranslator::Rebuild(const Goal &goal) {
   return common::visit(
       common::visitors{
@@ -860,28 +828,6 @@ Goal LoopTranslator::Rebuild(const Goal &goal) {
             }
             return Make<Scope>(
                 x->tokens, x->number, x->kind, x->origin, x->vars, inner);
-          },
-          [&](const Try *x) -> Goal {
-            Goal tried{Rebuild(x->goal)}, then{Rebuild(x->then)};
-            bool changed{tried != x->goal || then != x->then};
-            std::optional<Goal> otherwise;
-            if (x->otherwise) {
-              otherwise = Rebuild(*x->otherwise);
-              changed |= *otherwise != *x->otherwise;
-            }
-            std::vector<Catch> catches;
-            for (const Catch &c : x->catches) {
-              catches.push_back(RebuildCatch(c, changed));
-            }
-            std::optional<Catch> catchAny;
-            if (x->catchAny) {
-              catchAny = RebuildCatch(*x->catchAny, changed);
-            }
-            if (!changed) {
-              return x;
-            }
-            return Make<Try>(x->tokens, x->number, x->io, tried, then,
-                otherwise, Save(llvm::ArrayRef<Catch>{catches}), catchAny);
           },
           [&](const Atomic *x) -> Goal {
             bool changed{false};

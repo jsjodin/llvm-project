@@ -206,6 +206,9 @@ private:
   }
 
   NameResolution &result_;
+  // The names that desugaring made in other modules, which are resolved
+  // whether or not the module imports theirs (SemanticForm::implicitNames).
+  llvm::DenseSet<const parser::SymName *> implicit_;
   ModuleLoader &loader_;
   parser::Messages &messages_;
   const parser::TokenSequence *tokens_{nullptr}; // of the names resolved
@@ -730,6 +733,11 @@ llvm::SmallVector<const Symbol *, 4> Resolver::Lookup(
     LookupIn(Visible{result_.primitive_.get(), false, false}, name, use, arity,
         anyArity, found);
   }
+  if (found.empty() && implicit_.contains(&name)) {
+    if (const ModuleSymbols *module{result_.Module(qualifier)}) {
+      LookupIn(Visible{module, true, true}, name, use, arity, anyArity, found);
+    }
+  }
   // A field access function that the field's module declares is used
   // instead of the generated one (reference manual, "User-supplied field
   // access function declarations"); its clauses are the generated ones
@@ -1105,20 +1113,6 @@ void Resolver::ResolveGoal(const Goal &goal, const Visibility &scope) {
           },
           [&](const HOCall *) {},
           [&](const Scope *s) { ResolveGoal(s->goal, scope); },
-          [&](const Try *t) {
-            ResolveGoal(t->goal, scope);
-            ResolveGoal(t->then, scope);
-            if (t->otherwise) {
-              ResolveGoal(*t->otherwise, scope);
-            }
-            for (const Catch &c : t->catches) {
-              ResolveGoal(c.pattern, scope);
-              ResolveGoal(c.goal, scope);
-            }
-            if (t->catchAny) {
-              ResolveGoal(t->catchAny->goal, scope);
-            }
-          },
           [&](const Atomic *atomic) {
             for (const AtomicAlternative &alternative : atomic->alternatives) {
               ResolveGoal(alternative.goal, scope);
@@ -1163,6 +1157,7 @@ void AddVisible(Visibility &scope, const Visible &visible) {
 
 void Resolver::Run(const parser::ParseTree &tree,
     const parser::TokenSequence &tokens, const SemanticForm &form) {
+  implicit_.insert(form.implicitNames.begin(), form.implicitNames.end());
   result_.primitive_ = std::make_unique<ModuleSymbols>("");
   for (const char *name : primitiveTypes) {
     result_.primitive_->Add(SymbolKind::Type, name, 0, std::monostate{},

@@ -106,19 +106,6 @@ void ReceiveChecker::Walk(const Goal &goal) {
           [&](const Call *) {},
           [&](const HOCall *) {},
           [&](const Scope *x) { Walk(x->goal); },
-          [&](const Try *x) {
-            Walk(x->goal);
-            Walk(x->then);
-            if (x->otherwise) {
-              Walk(*x->otherwise);
-            }
-            for (const Catch &c : x->catches) {
-              Walk(c.goal);
-            }
-            if (x->catchAny) {
-              Walk(x->catchAny->goal);
-            }
-          },
           [&](const Atomic *x) {
             for (const AtomicAlternative &a : x->alternatives) {
               Walk(a.goal);

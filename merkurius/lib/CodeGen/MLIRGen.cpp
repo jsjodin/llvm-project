@@ -896,6 +896,10 @@ void MerkGenerator::GoalBody(const Body &goal, const ProcedureBody &body) {
       Trace(goal, body);
       return;
     }
+    if (goal.scope == semantics::ScopeKind::Try) {
+      Try(goal, body);
+      return;
+    }
     Goal(*goal.goals.front(), body);
     return;
   case BodyKind::Call:
@@ -1252,8 +1256,6 @@ static llvm::StringRef UncheckedWhat(semantics::Unchecked reason) {
     return "closures of functions or fields";
   case semantics::Unchecked::TraceState:
     return "trace goals with state parameters";
-  case semantics::Unchecked::Try:
-    return "try goals";
   case semantics::Unchecked::Atomic:
     return "atomic goals";
   case semantics::Unchecked::Loop:

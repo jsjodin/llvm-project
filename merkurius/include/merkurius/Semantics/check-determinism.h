@@ -115,9 +115,12 @@ struct Body {
   std::vector<const Body *> goals;
   ScopeKind scope{ScopeKind::Some};
   // For an Omp scope, the directive on its goal, and the goal's nonlocal
-  // variables.
+  // variables, which a TryGoal scope has too.
   const parser::OmpDirective *directive{nullptr};
   std::vector<BodyVar> nonlocals;
+  // For a Try scope, its result and the versions of each io(!S)'s state
+  // before and after its goal (desugar.cpp, DesugarTry).
+  std::vector<BodyVar> tryVars;
   // For a fail that replaces a unification that cannot succeed, the
   // unification's variables, which mmc's quantification still finds in it
   // until it quantifies the body again (ProcedureBody::requantified,

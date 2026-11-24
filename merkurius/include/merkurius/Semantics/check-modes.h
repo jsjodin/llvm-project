@@ -131,7 +131,7 @@ struct ClauseModes {
 // Why a procedure's clauses were not checked: they use what mode analysis
 // does not check yet, or their predicate has errors of other kinds.
 ENUM_CLASS(Unchecked, None, TypeErrors, ParallelConjunction, FieldClosure,
-    TraceState, Try, Atomic, Loop, InstParameters, InferredModes)
+    TraceState, Atomic, Loop, InstParameters, InferredModes)
 
 // An instance method's clauses, as checked in one of the method's modes.
 struct MethodModes {

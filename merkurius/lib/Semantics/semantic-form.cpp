@@ -161,19 +161,6 @@ private:
       os_ << '\n';
     }
   }
-  // A try's catch or catch_any, at the depth of the try.
-  void CatchBranch(const Catch &c, llvm::StringRef kind, int depth) {
-    Label(kind, depth + 1, false);
-    os_ << ' ';
-    Var(c.exception);
-    os_ << '\n';
-    const auto *pattern{std::get_if<const Conj *>(&c.pattern)};
-    if (!pattern || !(*pattern)->goals.empty()) {
-      Label("match", depth + 2);
-      Goal(c.pattern, depth + 3);
-    }
-    Goal(c.goal, depth + 2);
-  }
   void Goal(const semantics::Goal &goal, int depth) {
     std::visit(
         common::visitors{
@@ -242,28 +229,6 @@ private:
               Var(call->closure);
               Arguments(arguments);
               EndLine();
-            },
-            [&](const Try *t) {
-              Start("Try", t->number, depth);
-              if (!t->io.empty()) {
-                os_ << " io [";
-                Vars(t->io);
-                os_ << ']';
-              }
-              EndLine();
-              Goal(t->goal, depth + 1);
-              Label("then", depth + 1);
-              Goal(t->then, depth + 2);
-              if (t->otherwise) {
-                Label("else", depth + 1);
-                Goal(*t->otherwise, depth + 2);
-              }
-              for (const Catch &c : t->catches) {
-                CatchBranch(c, "catch", depth);
-              }
-              if (t->catchAny) {
-                CatchBranch(*t->catchAny, "catch_any", depth);
-              }
             },
             [&](const Atomic *atomic) {
               Start("Atomic", atomic->number, depth);
