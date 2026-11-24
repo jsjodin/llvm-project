@@ -8661,6 +8661,9 @@ tested shows.
    that differ only in cc-ness were "the same mode declared twice". Each
    call now runs the one its context wants.
 
+   *Higher-order, tests written (2026-11-23):* no compiler bugs. The
+   library lacked list.perm, which the manual's solutions example uses.
+
    *Subtypes have no code generation yet* (`nyi-` tests in
    `types/subtypes/`). The user put it after the fixes to existing
    features (2026-11-23). The design worked out:
