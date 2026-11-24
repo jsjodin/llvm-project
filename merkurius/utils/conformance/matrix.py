@@ -147,10 +147,15 @@ def main():
             counts[name][kind] += 1
             counts[name]["known"] += bool(known)
             parts = path.replace(os.sep, "/").split("/")
-            if conformance and (parts[-2] != slug(name) or
-                                parts[-3] != slug(chapter[name])):
-                problems.append("%s: belongs in Conformance/%s/%s/" % (
-                    path, slug(chapter[name]), slug(name)))
+            # A test of a section is in its chapter's directory, in the
+            # section's; one of a chapter without sections, in the
+            # chapter's.
+            want = [slug(chapter[name])]
+            if name != chapter[name]:
+                want.append(slug(name))
+            if conformance and parts[-1 - len(want):-1] != want:
+                problems.append("%s: belongs in Conformance/%s/" % (
+                    path, "/".join(want)))
         for name in design:
             designs[name][kind] += 1
             designs[name]["known"] += bool(known)
