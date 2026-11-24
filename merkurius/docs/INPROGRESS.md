@@ -8730,6 +8730,25 @@ tested shows.
    run tests are `nyi-`, as subtypes have no code generation yet (below).
    A parameter in a solver type waits for the solver types chapter.
 
+   *Exception handling, tests written (2026-11-24):* try goals were not
+   checked by mode analysis, so procedures with one were NYI. Now built,
+   as mmc expands them (design document, Code generation, "Try goals"):
+   desugaring to `magic_exception_result` and a switch on its result,
+   checked by every pass as ordinary goals, and code generation of a
+   closure called by exception.try or try_io. Found on the way:
+   - a goal without an `io` parameter could do I/O; mode analysis now
+     shares the io states in it, as mmc's lambda expression captures them;
+   - a duplicate `io` parameter was NYI rather than mmc's error;
+   - comparing a NaN at a type variable now throws a software_error that
+     a try catches (register, "Comparing a NaN").
+   mmc lets the goals after a try see what every branch binds, accepts an
+   else part for a goal that cannot fail and a unique nonlocal that is
+   not an io state (register). It aborts on a try goal in a lambda
+   expression, and on one such else part (mmc bugs, "Crashes").
+   Left: a try goal on a GPU is reported, as the device library has no
+   exception.try; each try makes a closure and calls it, as mmc's does,
+   where a goal with no outputs and no captures could be called directly.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.

@@ -342,7 +342,8 @@ def generate(test, args):
     generated = run_lines(test, status) + output_lines("OUTPUT", out)
     generated.append("% MMC-STATUS: " + (
         "rejected" if mmc_status is None else "%d" % mmc_status))
-    generated += ["% MMC: " + l for l in mmc_out.rstrip("\n").split("\n")]
+    generated += [("% MMC: " + l).rstrip() for l in
+                  mmc_out.rstrip("\n").split("\n")]
     return generated, notes
 
 
