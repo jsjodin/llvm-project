@@ -1775,6 +1775,49 @@ private:
       headTerms_.insert(*unify);
     }
   }
+  // Whether a goal unifies a head variable, or the clause's argument that
+  // stands for one, with a variable or a term, which may wait past an
+  // impure goal, as in mmc: an impure procedure's outputs could not be
+  // bound otherwise. A function application is a call there, which may
+  // not.
+  bool HeadVarUnification(const Goal &goal) const {
+    const auto *unify{std::get_if<const Unify *>(&goal)};
+    if (!unify) {
+      return false;
+    }
+    const Symbol *symbol{clause_->symbols[(*unify)->number]};
+    bool call{symbol && !(*unify)->isVar &&
+        (symbol->kind == SymbolKind::Function ||
+            symbol->kind == SymbolKind::Field ||
+            symbol->kind == SymbolKind::FieldUpdate) &&
+        symbol->arity == (*unify)->arguments.size()};
+    if (call) {
+      return false;
+    }
+    if (heads_.count(*unify) || headTerms_.count(*unify)) {
+      return true;
+    }
+    return IsHeadVar((*unify)->left) ||
+        ((*unify)->isVar && IsHeadVar((*unify)->var));
+  }
+  // A head variable, or, in a clause of a predicate with several, the
+  // variable that stands for a term of its head, which a head unification
+  // gives the head variable (WithHeadUnifications). mmc unifies the head
+  // variable with the term itself, but with an argument that is a variable
+  // of the clause, whose own unifications are then not of a head variable.
+  bool IsHeadVar(VarId var) const {
+    if (llvm::is_contained(form_->head, var)) {
+      return true;
+    }
+    if (form_->vars[var].kind != VarKind::Fresh) {
+      return false;
+    }
+    const auto *body{std::get_if<const Conj *>(&form_->body)};
+    return body && llvm::any_of((*body)->goals, [&](const Goal &goal) {
+      const auto *unify{std::get_if<const Unify *>(&goal)};
+      return unify && heads_.count(*unify) && (*unify)->var == var;
+    });
+  }
   bool MoreSpecific(
       const Procedure &p, const Procedure &q, llvm::ArrayRef<VarId> arguments);
   Result Conjunction(const Goal &conj, llvm::ArrayRef<Goal>, InstMap &,
@@ -3078,10 +3121,13 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
   std::optional<Goal> barrierGoal;
   while (true) {
     Goal goal;
-    bool barrier{!state.waiting.empty() &&
-        ((state.next < goals.size() && IsImpure(goals[state.next])) ||
-            llvm::any_of(state.waiting,
-                [](const Waiting &w) { return IsImpure(w.goal); }))};
+    // Head variables' unifications may wait past an impure goal.
+    bool beforeImpure{state.next < goals.size() && IsImpure(goals[state.next])};
+    bool blocking{llvm::any_of(state.waiting,
+        [&](const Waiting &w) { return !HeadVarUnification(w.goal); })};
+    bool impureWaits{llvm::any_of(
+        state.waiting, [](const Waiting &w) { return IsImpure(w.goal); })};
+    bool barrier{(beforeImpure && blocking) || impureWaits};
     if (!state.agenda.empty()) {
       goal = state.agenda.front();
       state.agenda.pop_front();
