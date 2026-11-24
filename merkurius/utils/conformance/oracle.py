@@ -13,7 +13,9 @@ and whose class is the start of its file name:
             run it, so that it becomes a run- test when the feature lands;
   differs-  prints what merkc's program prints, where it differs from mmc's
             for the reason its `% DIFFERS:` line gives; mmc's output is kept
-            in `% MMC:` lines, so that a change in either shows.
+            in `% MMC:` lines, so that a change in either shows. Where mmc
+            rejects the program, as for a limitation of its implementation,
+            `% MMC-STATUS: rejected` and its errors' first lines are kept.
 
 A run- or reject- test that merkc gets wrong, a known bug rather than a
 feature not done, says why in a `% KNOWN-BUG:` line: its expectations are
@@ -167,6 +169,12 @@ def mmc_run(test, mmc):
 
 def mmc_errors(test, mmc):
     """The lines of the test that mmc reports errors at, if it rejects it."""
+    return {line for line, _ in mmc_error_texts(test, mmc)}
+
+
+def mmc_error_texts(test, mmc):
+    """The line and text of each error mmc reports in the test, if it
+    rejects it, in order."""
     with tempfile.TemporaryDirectory() as tmp:
         test.copy_to(tmp)
         # --make builds the interfaces of the modules it imports first.
@@ -182,15 +190,15 @@ def mmc_errors(test, mmc):
             if not m.group(3).startswith(" ") or not messages:
                 messages.append((int(m.group(2)), []))
             messages[-1][1].append(m.group(3))
-        lines = set()
+        errors = []
         for number, text in messages:
             joined = " ".join(text)
             # mmc writes "Error:" and "Warning:"; a message that is
             # neither, as "In clause for ...", leads to an error.
             if re.search(r"\berror\b", joined, re.I) or not re.search(
                     r"\bwarning\b", joined, re.I):
-                lines.add(number)
-        return lines
+                errors.append((number, " ".join(t.strip() for t in text)))
+        return errors
 
 
 def merkc_arguments(test, lit):
@@ -303,17 +311,24 @@ def generate(test, args):
             " -o %t 2>&1 | FileCheck %s --check-prefix=NYI",
             "% NYI: {{.*}}: error: " + escape(m.group(1))], notes
     # differs
-    mmc_status, mmc_out = mmc_run(test, args.mmc)
+    try:
+        mmc_status, mmc_out = mmc_run(test, args.mmc)
+    except TestError:
+        mmc_status, mmc_out = None, "\n".join(
+            "%d: %s" % (line, text) for line, text in
+            mmc_error_texts(test, args.mmc)) + "\n"
     with tempfile.TemporaryDirectory() as tmp:
         status, out, exe = merkc_build(test, args.merkc, 0, tmp)
         if status != 0:
             raise TestError("merkc cannot compile it:\n" + out)
         status, out, _ = run([exe], tmp, merge=True)
-    if (status != 0) == (mmc_status != 0) and out == mmc_out:
+    if mmc_status is not None and (status != 0) == (mmc_status != 0) and \
+            out == mmc_out:
         raise TestError("merkc's program agrees with mmc's; make it a run- "
                         "test")
     generated = run_lines(test, status) + output_lines("OUTPUT", out)
-    generated.append("% MMC-STATUS: %d" % mmc_status)
+    generated.append("% MMC-STATUS: " + (
+        "rejected" if mmc_status is None else "%d" % mmc_status))
     generated += ["% MMC: " + l for l in mmc_out.rstrip("\n").split("\n")]
     return generated, notes
 

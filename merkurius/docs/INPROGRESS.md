@@ -8645,6 +8645,18 @@ tested shows.
    declarations, modules, loops and mode inference's limit. Mode errors
    inside clauses are built as text, so this count does not see them.
 
+   *From here on, coverage runs once,* after every chapter has its tests,
+   and its gaps are filled in one batch (the user, 2026-11-23): build
+   times would otherwise dominate. build-cov has precompiled headers off,
+   as build-merk's clang records its commit and made them stale after
+   every commit.
+
+   *Unique modes, tests written (2026-11-23):* no bugs found. Deconstructing
+   a `ui` or `mui` argument is the limitation the manual describes: mmc
+   rejects it, as its fields become ground, and merkc accepts it. Those
+   are `differs-` tests of kind `implementation`, for which the oracle now
+   records mmc's errors when it rejects the program.
+
    *Subtypes have no code generation yet* (`nyi-` tests in
    `types/subtypes/`). The user put it after the fixes to existing
    features (2026-11-23). The design worked out:
