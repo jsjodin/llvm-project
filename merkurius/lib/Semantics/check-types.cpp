@@ -302,9 +302,10 @@ private:
   void UserEqualities();
   void CheckUserEquality(const Symbol &type, const parser::DuTypeDefn &defn,
       bool report);
-  const Symbol *UserPredicate(const Symbol &type,
-      const parser::DuTypeDefn &defn, const parser::SymName &name,
-      bool comparison, bool report);
+  void CheckSolverEquality(
+      const Symbol &type, const parser::SolverTypeDefn &defn, bool report);
+  const Symbol *UserPredicate(const Symbol &type, parser::TokenRange defn,
+      const parser::SymName &name, bool comparison, bool report);
 
   // Type conversions (reference manual, "Type conversions"). The base type
   // of a discriminated union type, with its arguments: the type itself, or
@@ -2302,9 +2303,32 @@ void TypeChecker::UserEqualities() {
       if (const auto *defn{
               std::get_if<const parser::DuTypeDefn *>(&symbol->declaration)}) {
         CheckUserEquality(*symbol, **defn, /*report=*/false);
+      } else if (const auto *solver{std::get_if<const parser::SolverTypeDefn *>(
+                     &symbol->declaration)}) {
+        CheckSolverEquality(*symbol, **solver, /*report=*/false);
       }
     }
   }
+}
+
+// A solver type's equality and comparison (reference manual, "Solver type
+// definitions"). Without them, mmc's unification and comparison throw a
+// software_error; with them, as a discriminated union type's.
+void TypeChecker::CheckSolverEquality(
+    const Symbol &type, const parser::SolverTypeDefn &defn, bool report) {
+  if (!defn.equality && !defn.comparison) {
+    return;
+  }
+  UserEquality user;
+  if (defn.equality) {
+    user.equality =
+        UserPredicate(type, defn.tokens, *defn.equality, false, report);
+  }
+  if (defn.comparison) {
+    user.comparison =
+        UserPredicate(type, defn.tokens, *defn.comparison, true, report);
+  }
+  result_.userEqualities_[&type] = user;
 }
 
 void TypeChecker::CheckUserEquality(
@@ -2329,11 +2353,12 @@ void TypeChecker::CheckUserEquality(
   }
   UserEquality user;
   if (attributes->equality) {
-    user.equality = UserPredicate(type, defn, *attributes->equality, false, report);
+    user.equality =
+        UserPredicate(type, defn.tokens, *attributes->equality, false, report);
   }
   if (attributes->comparison) {
     user.comparison =
-        UserPredicate(type, defn, *attributes->comparison, true, report);
+        UserPredicate(type, defn.tokens, *attributes->comparison, true, report);
   }
   result_.userEqualities_[&type] = user;
 }
@@ -2343,8 +2368,8 @@ void TypeChecker::CheckUserEquality(
 // be of the type's module, as in mmc, which qualifies the name with it.
 // Its types may be more general, and it must be pure.
 const Symbol *TypeChecker::UserPredicate(const Symbol &type,
-    const parser::DuTypeDefn &defn, const parser::SymName &name,
-    bool comparison, bool report) {
+    parser::TokenRange defn, const parser::SymName &name, bool comparison,
+    bool report) {
   const char *what{comparison ? "comparison" : "equality"};
   unsigned arity{comparison ? 3u : 2u};
   const ModuleSymbols *symbols{type.module == resolution_.module().name()
@@ -2366,7 +2391,7 @@ const Symbol *TypeChecker::UserPredicate(const Symbol &type,
     // mmc: "In clause for unification predicate for type `box': error:
     // undefined predicate `m.any_equal'/2."
     if (report) {
-      messages_->Say(Source(defn.tokens),
+      messages_->Say(Source(defn),
           "the %s predicate %s.%s/%u of type %s/%u is not defined in its module"_err_en_US,
           what, type.module.str(), name.name.str(), arity, type.name.str(),
           type.arity);
@@ -2399,7 +2424,7 @@ const Symbol *TypeChecker::UserPredicate(const Symbol &type,
     // predicate `m.int_equals'/2: in argument 1: variable `HeadVar__1' has
     // type `m.box', expected type was `int'".
     if (report) {
-      messages_->Say(Source(defn.tokens),
+      messages_->Say(Source(defn),
           comparison
               ? "the comparison predicate %s/%u of type %s/%u does not take a comparison_result and two values of the type"_err_en_US
               : "the equality predicate %s/%u of type %s/%u does not take two values of the type"_err_en_US,
@@ -2411,7 +2436,7 @@ const Symbol *TypeChecker::UserPredicate(const Symbol &type,
     // mmc: "In unification predicate for type `box': purity error:
     // predicate is impure. It must be pure."
     if (report) {
-      messages_->Say(Source(defn.tokens),
+      messages_->Say(Source(defn),
           "the %s predicate %s/%u of type %s/%u must be pure"_err_en_US, what,
           name.name.str(), arity, type.name.str(), type.arity);
     }
@@ -2434,14 +2459,18 @@ void TypeChecker::CheckTypeDefinitions() {
     }
     const auto *abstract{
         std::get_if<const parser::AbstractTypeDecl *>(&symbol->declaration)};
-    if (abstract && !(*abstract)->solver && !ProvidedByCompiler(*symbol)) {
+    if (abstract && !ProvidedByCompiler(*symbol)) {
       // A definition, or a foreign type, would have replaced the abstract
       // declaration (ModuleSymbols::Add). mmc: "abstract declaration for
-      // type `secret'/0 has no corresponding definition". It accepts an
-      // abstract solver type with none.
+      // type `secret'/0 has no corresponding definition", of a solver type
+      // too.
       messages_->Say(symbol->source,
           "the abstract type %s/%u has no definition"_err_en_US,
           symbol->name.str(), symbol->arity);
+    }
+    if (const auto *solver{std::get_if<const parser::SolverTypeDefn *>(
+            &symbol->declaration)}) {
+      CheckSolverEquality(*symbol, **solver, /*report=*/true);
     }
     const auto *defn{
         std::get_if<const parser::DuTypeDefn *>(&symbol->declaration)};

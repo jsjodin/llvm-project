@@ -144,10 +144,14 @@ private:
   // ones, which it reports, as mmc does: a predicate or function declared
   // twice, a method among them, and a type, inst or mode defined twice. A
   // type's abstract declaration, or a foreign type, goes with its
-  // definition.
+  // definition, if they agree on whether it is a solver type.
   bool Duplicate(const ModuleSymbols &, SymbolKind, llvm::StringRef name,
       unsigned arity, Declaration, parser::CharBlock source,
       const Symbol *owner = nullptr);
+  // Whether a type's abstract declaration and its definition disagree on
+  // whether it is a solver type, which it reports at the declaration.
+  bool IncompatibleSolver(const Symbol &, const Declaration &,
+      parser::CharBlock source, const std::string &type);
   std::optional<unsigned> WithTypeArity(
       const parser::Type &, const Visibility &, int depth);
   struct Pending {
@@ -286,7 +290,25 @@ ImplementationOnlyPragma(const parser::Item &item) {
 
 bool IsTypeDefinition(const Declaration &declaration) {
   return std::holds_alternative<const parser::DuTypeDefn *>(declaration) ||
-      std::holds_alternative<const parser::EquivalenceTypeDefn *>(declaration);
+      std::holds_alternative<const parser::EquivalenceTypeDefn *>(
+          declaration) ||
+      std::holds_alternative<const parser::SolverTypeDefn *>(declaration);
+}
+
+// The kind of a type's definition, as mmc names it when it is incompatible
+// with a declaration.
+const char *DefinitionKind(const Declaration &declaration) {
+  if (std::holds_alternative<const parser::DuTypeDefn *>(declaration)) {
+    return "a discriminated union type";
+  }
+  if (std::holds_alternative<const parser::EquivalenceTypeDefn *>(
+          declaration)) {
+    return "an equivalence type";
+  }
+  if (std::holds_alternative<const parser::SolverTypeDefn *>(declaration)) {
+    return "a solver type";
+  }
+  return "a foreign type";
 }
 } // namespace
 
@@ -385,6 +407,17 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
             DeclareType(symbols, *pragma->name, pragma->parameters.size(),
                 pragma, exported, tokens);
           },
+          [&](const parser::SolverTypeDefn *defn) {
+            if (exported && &symbols == own_) {
+              // mmc: "a solver type such as `t'/0 may be defined (as
+              // opposed to declared) only in the implementation section."
+              messages_.Say(NameSource(tokens, *defn->name),
+                  "the solver type %s/%zu may be defined only in the implementation section; the interface may declare it abstractly"_err_en_US,
+                  defn->name->name.str(), defn->parameters.size());
+            }
+            DeclareType(symbols, *defn->name, defn->parameters.size(), defn,
+                exported, tokens);
+          },
           [&](const parser::PredDecl *decl) {
             DeclarePredicate(symbols, *decl, nullptr, exported, tokens);
           },
@@ -470,8 +503,27 @@ bool Resolver::Duplicate(const ModuleSymbols &symbols, SymbolKind kind,
           .Attach(first, "it is first declared here"_because_en_US);
       return true;
     case SymbolKind::Type:
+      if (IncompatibleSolver(*symbol, declaration, source, os.str())) {
+        return false;
+      }
       if (IsTypeDefinition(declaration) &&
           IsTypeDefinition(symbol->declaration)) {
+        bool solver{std::holds_alternative<const parser::SolverTypeDefn *>(
+            declaration)};
+        if (solver !=
+            std::holds_alternative<const parser::SolverTypeDefn *>(
+                symbol->declaration)) {
+          // mmc: "this definition of `t'/0 is incompatible with the solver
+          // type definition", at the other.
+          parser::CharBlock other{solver ? symbol->source : source};
+          parser::CharBlock defn{solver ? source : symbol->source};
+          messages_
+              .Say(other,
+                  "%s is defined both as a solver type and as another type"_err_en_US,
+                  os.str())
+              .Attach(defn, "the solver type is defined here"_because_en_US);
+          return true;
+        }
         bool equivalence{std::holds_alternative<
             const parser::EquivalenceTypeDefn *>(declaration)};
         if (equivalence !=
@@ -517,6 +569,41 @@ bool Resolver::Duplicate(const ModuleSymbols &symbols, SymbolKind kind,
     }
   }
   return false;
+}
+
+bool Resolver::IncompatibleSolver(const Symbol &symbol,
+    const Declaration &declaration, parser::CharBlock source,
+    const std::string &type) {
+  const auto *const *abstract{
+      std::get_if<const parser::AbstractTypeDecl *>(&symbol.declaration)};
+  const Declaration *defn{&declaration};
+  parser::CharBlock declSource{symbol.source}, defnSource{source};
+  if (!abstract) {
+    abstract = std::get_if<const parser::AbstractTypeDecl *>(&declaration);
+    defn = &symbol.declaration;
+    std::swap(declSource, defnSource);
+  }
+  if (!abstract ||
+      !(IsTypeDefinition(*defn) ||
+          std::holds_alternative<const parser::ForeignTypePragma *>(*defn))) {
+    return false;
+  }
+  bool solver{std::holds_alternative<const parser::SolverTypeDefn *>(*defn)};
+  if ((*abstract)->solver == solver) {
+    return false;
+  }
+  // mmc: "this solver type declaration of `t'/0 is incompatible with the
+  // discriminated union type definition in the implementation section",
+  // "this declaration of `t'/0 is incompatible with the solver type
+  // definition".
+  messages_
+      .Say(declSource,
+          solver
+              ? "the declaration of %s is not of a solver type, but its definition is"_err_en_US
+              : "the declaration of %s is of a solver type, but its definition is of %s"_err_en_US,
+          type, DefinitionKind(*defn))
+      .Attach(defnSource, "the definition is here"_because_en_US);
+  return true;
 }
 
 ModuleSymbols &Resolver::Symbols(const ModuleInterface &module) {
@@ -850,6 +937,19 @@ void Resolver::Undefined(const parser::SymName &name, NameUse use,
         "arguments, but %s/%u is not a process kind that receives one "
         "message type"_err_en_US,
         full, arity - 4);
+    return;
+  }
+  // The functions between a solver type and its representation (reference
+  // manual, "Solver type definitions"), which the compiler is to define.
+  static constexpr llvm::StringLiteral representations[]{
+      "representation of ground ", "representation of any ",
+      "representation to ground ", "representation to any "};
+  if (use == NameUse::DataTerm && arity == 1 &&
+      llvm::any_of(representations, [&](llvm::StringRef prefix) {
+        return name.name.starts_with(prefix);
+      })) {
+    messages_.Say(Source(name), "%s (%s/%u)"_todo_en_US,
+        "the representation functions of solver types", FullName(name), arity);
     return;
   }
   // spawn_Kind_on (design document, "Remote spawn") needs remote spawn.

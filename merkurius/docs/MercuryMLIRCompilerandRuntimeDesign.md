@@ -84,7 +84,8 @@ you use"). This section is the map; each part has its own section.
   `--no-reorder-conj` to turn off. OpenMP directives on loops are
   promises that keep this sequential meaning. Processes are concurrent,
   outside it, as each one's own goals keep it (Language extensions).
-- **Left out for now:** tabling, trailing and solver types. Partially
+- **Left out for now:** tabling, trailing and solver types, though the
+  front end checks solver types and the `any` inst. Partially
   instantiated data comes back only as open types (below). The debugger,
   the deep profiler, the Java and C# back ends and binary compatibility
   with Melbourne Mercury are tools, not the language, and are left out too
@@ -583,7 +584,12 @@ constexpr auto ifThenElse =
     - two foreign names for the same language;
     - the conflicting pairs `trailed` and `untrailed`, `constant` and `attach_to_io_state`, `constant` and `trailed`, `thread_local` and `trailed`, and `thread_local` and `constant` (the last one is from the manual).
   - **Promises.** `promise Goal` is a `PromiseDecl`. `all [Vars] promise_exclusive Disjunction` is a `PromiseDisjunctionDecl`, and so are the same forms with `promise_exhaustive` and `promise_exclusive_exhaustive`. The quantifier must be `all`, and the goal must be a disjunction.
-  - **Solver types.** `solver type t` is an `AbstractTypeDecl` with `solver` set. `solver type t where ...` is a `SolverTypeDefn`, whose attributes must come in the manual's order. As in mmc, only `representation` is required, although the manual also requires `constraint_store`. A constraint store is one `mutable` or a list of them. Constructors and `==` are errors.
+  - **Solver types.** `solver type t` is an `AbstractTypeDecl` with `solver` set. `solver type t where ...` is a `SolverTypeDefn`, whose attributes must come in the manual's order. As in mmc, only `representation` is required, although the manual also requires `constraint_store`. A constraint store is one `mutable` or a list of them. Constructors and `==` are errors. Name resolution declares the type, and reports, as mmc does:
+    - a definition in the interface, which may only declare it abstractly;
+    - an abstract declaration and a definition that disagree on whether it is a solver type, a `foreign_type` included, at the declaration;
+    - a second definition, solver or not.
+
+    Type checking reports an abstract solver type with no definition, as for any type, and checks the equality and comparison predicates as a discriminated union type's. Not yet implemented: the four representation functions, whose names are reported as such; the constraint store's mutables, as mutables are; and the code generation of solver values (2026-11-24, before which a definition was ignored).
 - **Trace conditions** are typed. At compile time a condition is `flag("Name")`, `tracelevel(shallow)` or `tracelevel(deep)`, or `grade(Test)`; at run time it is `env("Name")`. Either kind may be combined with `and`, `or` and `not`. The grade tests are the manual's, plus `rbmm`, which mmc also accepts. As in mmc, `compile_time`, `run_time` and `io` may each be given only once.
 - **Names** are `SymName` nodes: a name and its module qualifiers, from `'.'(Qualifier, Name)` or from `__` within a name (reference manual, "The module system"), so `a.b__c` is `a.b.c`. A name that begins or ends with `__` is not split.
 - **Errors.** A term that matches nothing is reported with the forms expected in its context and the start of its source, as in "expected a module name, but found '"string"'". An item with an error is left out of the tree, and conversion continues with the next item. Forms the converter does not handle yet, namely three pragmas, are reported as not yet implemented.

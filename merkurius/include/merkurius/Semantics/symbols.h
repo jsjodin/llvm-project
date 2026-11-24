@@ -35,16 +35,17 @@ namespace merkurius::semantics {
 ENUM_CLASS(SymbolKind, Type, Constructor, Field, FieldUpdate, Predicate,
     Function, Inst, Mode, Typeclass)
 
-// What declares a symbol: for a type, its definition or abstract
-// declaration; for a constructor or field, the constructor; for a
-// predicate or function, its declaration, or its first clause when it has
-// none; nothing for a primitive type.
+// What declares a symbol: for a type, its definition, a solver type's
+// included, or abstract declaration; for a constructor or field, the
+// constructor; for a predicate or function, its declaration, or its first
+// clause when it has none; nothing for a primitive type.
 using Declaration = std::variant<std::monostate, const parser::DuTypeDefn *,
     const parser::EquivalenceTypeDefn *, const parser::AbstractTypeDecl *,
-    const parser::ForeignTypePragma *, const parser::Constructor *,
-    const parser::PredDecl *, const parser::FactOrRule *,
-    const parser::DcgRule *, const parser::InstDefn *,
-    const parser::ModeDefn *, const parser::TypeclassDecl *>;
+    const parser::ForeignTypePragma *, const parser::SolverTypeDefn *,
+    const parser::Constructor *, const parser::PredDecl *,
+    const parser::FactOrRule *, const parser::DcgRule *,
+    const parser::InstDefn *, const parser::ModeDefn *,
+    const parser::TypeclassDecl *>;
 
 struct Symbol {
   SymbolKind kind;

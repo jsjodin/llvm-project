@@ -2531,6 +2531,17 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
                                          .spelling.begin(),
                        tokens.tokens[(*decl)->tokens.last].spelling.end()},
           "desugaring %s"_todo_en_US, "mutable declarations");
+    } else if (const auto *defn{
+                   std::get_if<const parser::SolverTypeDefn *>(&item)}) {
+      // A solver type's constraint store is mutables of their own
+      // (reference manual, "Solver type definitions").
+      for (const parser::MutableDecl *decl : (*defn)->constraintStore) {
+        messages.Say(
+            parser::CharBlock{
+                tokens.tokens[decl->tokens.first].spelling.begin(),
+                tokens.tokens[decl->tokens.last].spelling.end()},
+            "desugaring %s"_todo_en_US, "mutable declarations");
+      }
     }
   }
   FieldAccessClauses(tree, tokens, arena, messages, processImported, clauses);
