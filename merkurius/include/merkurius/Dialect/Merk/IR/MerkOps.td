@@ -1374,14 +1374,17 @@ def Merk_EntryOp : Merk_Op<"entry", [
   let summary = "the program's main procedure";
   let description = [{
     Names the procedure the program starts with, the main module's
-    `main(di, uo)`, which the runtime calls.
+    `main(di, uo)`, which the runtime calls. With `mercury_messages`
+    (-fmercury-messages), the runtime prints the messages that mmc's
+    programs have too as those do.
 
     ```mlir
     merk.entry @hello.main_2_0
+    merk.entry @hello.main_2_0 mercury_messages
     ```
   }];
-  let arguments = (ins FlatSymbolRefAttr:$proc);
-  let assemblyFormat = "$proc attr-dict";
+  let arguments = (ins FlatSymbolRefAttr:$proc, UnitAttr:$mercury_messages);
+  let assemblyFormat = "$proc (`mercury_messages` $mercury_messages^)? attr-dict";
 }
 
 def Merk_ConstructorOp : Merk_Op<"constructor", [

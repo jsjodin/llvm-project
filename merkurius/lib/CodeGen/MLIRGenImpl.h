@@ -180,6 +180,7 @@ public:
         messages_{messages}, stubUnimplemented_{options.stubUnimplemented},
         mmcUniqueness_{options.mmcUniqueness}, traceFlags_{options.traceFlags},
         openTypes_{options.openTypes},
+        mercuryMessages_{options.mercuryMessages},
         deviceLibraryDirectory_{options.deviceLibraryDirectory},
         deviceModuleDirectories_{options.deviceModuleDirectories},
         copyDeviceProcedures_{options.copyDeviceProcedures} {
@@ -1122,6 +1123,7 @@ private:
   // such as nondet ones; it goes when code generation makes them all.
   bool stubUnimplemented_{false};
   bool mmcUniqueness_{false};
+  bool mercuryMessages_{false};
   // --trace-flag=.
   std::vector<std::string> traceFlags_;
   bool openTypes_{false};

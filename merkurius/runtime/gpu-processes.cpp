@@ -1194,7 +1194,8 @@ namespace merkurius::runtime {
 void PlaceProcessFailed(
     int, std::uint64_t table, std::uint64_t slot, char *text) {
   std::fflush(stdout);
-  std::fprintf(stderr, "Uncaught Merkurius exception:\n%s\n", text);
+  std::fprintf(stderr, "%s\n%s\n",
+      merkurius::runtime::UncaughtExceptionHeader(), text);
   pthread_mutex_lock(&lock);
   for (Place *place{places}; place; place = place->next) {
     if (reinterpret_cast<std::uint64_t>(place->table) == table &&

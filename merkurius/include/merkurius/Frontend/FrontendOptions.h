@@ -123,6 +123,7 @@ struct FrontendOptions {
   bool inferModes{false}; // -finfer-modes
   unsigned modeInferenceIterationLimit{30}; // -fmode-inference-iteration-limit=
   bool mmcUniqueness{false}; // -fmmc-uniqueness
+  bool mercuryMessages{false}; // -fmercury-messages
   // -fstub-unimplemented. Temporary (chunk 1 step 6, docs/INPROGRESS.md):
   // until code generation makes every procedure of the library.
   bool stubUnimplemented{false};

@@ -47,6 +47,10 @@ def fprocess_declarations : Flag<["-"], "fprocess-declarations">,
 def fno_infer_types : Flag<["-"], "fno-infer-types">,
   HelpText<"Report each predicate or function without a type declaration, "
            "as mmc does without --infer-types; its type is still inferred">;
+def fmercury_messages : Flag<["-"], "fmercury-messages">,
+  HelpText<"Print the runtime's messages that have a counterpart in mmc's "
+           "programs as those do, such as \"Uncaught Mercury exception:\", "
+           "rather than naming Merkurius">;
 def fopen_types : Flag<["-"], "fopen-types">,
   HelpText<"Allow open(T) types, whose values may hold unbound variables, "
            "an extension of the language">;

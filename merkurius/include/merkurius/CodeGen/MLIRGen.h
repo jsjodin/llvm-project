@@ -85,6 +85,9 @@ struct GenerationOptions {
   // releases the trail marks its goal's choice points left, wherever they
   // were made.
   bool openTypes{false};
+  // -fmercury-messages: the program's runtime prints the messages that mmc's
+  // programs have too as those do, as "Uncaught Mercury exception:".
+  bool mercuryMessages{false};
 };
 
 // The merk module for `module`'s procedures, with the target recorded on

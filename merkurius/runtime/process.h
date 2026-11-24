@@ -255,6 +255,11 @@ std::int64_t HeldMessages();
 // which cannot be abandoned on their own.
 void EndAfterFailure(const char *reason);
 
+// The first line of an uncaught exception's report: mmc's programs' with
+// -fmercury-messages, which defines merk_mercury_messages, and else
+// "Uncaught Merkurius exception:".
+const char *UncaughtExceptionHeader();
+
 // mailbox.cpp: tells those who monitor a process that has closed its
 // mailboxes that it ended, for `kind`, with `text` for kDownFailed.
 void FireMonitorsOf(Process *, DownKind kind, const char *text = "");

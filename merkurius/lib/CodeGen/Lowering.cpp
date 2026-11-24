@@ -4969,6 +4969,14 @@ void Lowerer::LowerEntry(merk::EntryOp entry) {
       rewriter_, loc, funcs_.lookup(entry.getProc()), mlir::ValueRange{})};
   call.setCConv(cconv_);
   mlir::LLVM::ReturnOp::create(rewriter_, loc, mlir::ValueRange{});
+  // The runtime's merk_mercury_messages is a weak 0, which this replaces.
+  if (entry.getMercuryMessages()) {
+    rewriter_.setInsertionPoint(entry);
+    auto i32{rewriter_.getI32Type()};
+    mlir::LLVM::GlobalOp::create(rewriter_, loc, i32, /*isConstant=*/true,
+        mlir::LLVM::Linkage::External, "merk_mercury_messages",
+        rewriter_.getI32IntegerAttr(1));
+  }
   rewriter_.eraseOp(entry);
 }
 

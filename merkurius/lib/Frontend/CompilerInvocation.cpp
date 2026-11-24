@@ -148,6 +148,7 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
   }
   opts.inferModes = args.hasArg(OPT_finfer_modes);
   opts.mmcUniqueness = args.hasArg(OPT_fmmc_uniqueness);
+  opts.mercuryMessages = args.hasArg(OPT_fmercury_messages);
   opts.stubUnimplemented = args.hasArg(OPT_fstub_unimplemented);
   opts.warnUnselectedMessage = args.hasFlag(
       OPT_Wunselected_message, OPT_Wno_unselected_message, true);

@@ -1779,8 +1779,8 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
         symbol.name == "main" && symbol.arity == 2) {
       if (merk::ProcOp proc{procs_.lookup(body.procedure)}) {
         builder_.setInsertionPointToEnd(module_.getBody());
-        merk::EntryOp::create(
-            builder_, Location(symbol.source), proc.getSymName());
+        merk::EntryOp::create(builder_, Location(symbol.source),
+            proc.getSymName(), mercuryMessages_);
       }
     }
   }

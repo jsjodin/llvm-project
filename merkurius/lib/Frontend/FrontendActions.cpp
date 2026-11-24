@@ -983,7 +983,7 @@ bool CodeGenAction::executeAction() {
           ci.getFrontendOpts().mmcUniqueness, ci.getFrontendOpts().traceFlags,
           deviceLibrary, ci.getFrontendOpts().deviceModuleDirectories,
           ci.getFrontendOpts().copyDeviceProcedures,
-          ci.getLangOpts().openTypes});
+          ci.getLangOpts().openTypes, ci.getFrontendOpts().mercuryMessages});
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   if (!module || r.messages.AnyFatalError()) {
     return false;

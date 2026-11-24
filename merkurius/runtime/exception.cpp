@@ -417,9 +417,22 @@ extern "C" const Word merk_try_nondet_closure[2]{
 
 #endif
 
+// 1 if the program was compiled with -fmercury-messages, whose main module
+// defines it: the messages that mmc's programs have too are printed as
+// those print them.
+extern "C" __attribute__((weak)) const std::int32_t merk_mercury_messages{0};
+
+const char *merkurius::runtime::UncaughtExceptionHeader() {
+  // Read through a volatile pointer, so that the weak definition's 0 is not
+  // folded in.
+  const volatile std::int32_t *flag{&merk_mercury_messages};
+  return *flag ? "Uncaught Mercury exception:" : "Uncaught Merkurius exception:";
+}
+
 extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception) {
   std::fflush(stdout);
-  std::fprintf(stderr, "Uncaught Merkurius exception:\n%s\n", exception);
+  std::fprintf(stderr, "%s\n%s\n",
+      merkurius::runtime::UncaughtExceptionHeader(), exception);
   merkurius::runtime::EndAfterFailure(exception);
   merkurius::runtime::ExitProgram(1);
 }
