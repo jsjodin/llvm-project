@@ -21,6 +21,7 @@
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/unparse.h"
 #include "merkurius/Semantics/check-determinism.h"
+#include "merkurius/Semantics/check-foreign.h"
 #include "merkurius/Semantics/check-gpu-code.h"
 #include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Semantics/check-purity.h"
@@ -779,6 +780,8 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
       semantics::CheckDeterminism(
           r.tokens, *types, *modes, r.messages, !earlier, r.tree,
           r.resolution.get())};
+  semantics::CheckForeign(
+      *r.tree, r.tokens, *r.resolution, *modes, *determinism, r.messages);
   semantics::CheckUniqueness(
       r.tokens, *modes, *determinism, r.messages, frontend.mmcUniqueness);
   semantics::CheckGpuCode(*r.tree, r.tokens, *modes, *determinism,

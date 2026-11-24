@@ -187,6 +187,10 @@ const ModuleInterface *ModuleLoader::Load(
         !(*foreign)->local) {
       interface.sharedForeignDecls.push_back(*foreign);
     }
+    if (std::holds_alternative<const parser::ForeignExportPragma *>(item) &&
+        named) {
+      interface.foreignExports = true;
+    }
     if (const auto *decl{std::get_if<const parser::AbstractTypeDecl *>(&item)};
         decl && inInterface) {
       abstract.insert(TypeKey(*(*decl)->name, (*decl)->parameters.size()));

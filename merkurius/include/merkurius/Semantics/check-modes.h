@@ -184,6 +184,10 @@ public:
       const Procedure &procedure) const {
     return foreignProcs_.lookup(&procedure);
   }
+  // The procedure a foreign_export names, if it names one.
+  const Procedure *ExportOf(const parser::ForeignExportPragma &pragma) const {
+    return foreignExports_.lookup(&pragma);
+  }
 
 private:
   friend class ModeChecker;
@@ -203,6 +207,8 @@ private:
   std::deque<MethodModes> methods_;
   llvm::DenseMap<const Procedure *, const parser::ForeignProcPragma *>
       foreignProcs_;
+  llvm::DenseMap<const parser::ForeignExportPragma *, const Procedure *>
+      foreignExports_;
   // The predicates without a `:- pred` declaration, whose modes are
   // inferred from their calls, and the procedures inferred for them.
   llvm::DenseSet<const Symbol *> inferable_;

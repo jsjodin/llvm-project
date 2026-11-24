@@ -298,6 +298,7 @@ private:
       std::vector<parser::CharBlock> &sources);
   void BuildProcedures(llvm::ArrayRef<parser::Item>, const ModuleSymbols &);
   void MatchForeignProcs(const parser::ParseTree &);
+  void MatchForeignExports(const parser::ParseTree &);
   void MatchClauses();
   void CheckHasClauses();
   // What CheckInstForType keeps for one argument of a declaration.
@@ -1139,6 +1140,7 @@ void ModeChecker::Run(const parser::ParseTree &tree) {
     result_.bySymbol_[procedure.symbol].push_back(&procedure);
   }
   MatchForeignProcs(tree);
+  MatchForeignExports(tree);
   MatchClauses();
   CheckHasClauses();
 }
@@ -1272,6 +1274,63 @@ void ModeChecker::MatchForeignProcs(const parser::ParseTree &tree) {
           .Attach(Source(it->second->tokens),
               "the other foreign_proc is here"_because_en_US);
     }
+  }
+}
+
+// Each foreign_export is of the procedure of the module's predicate or
+// function whose modes it names (reference manual, "Calling Merkurius from
+// foreign code"), whatever its language.
+void ModeChecker::MatchForeignExports(const parser::ParseTree &tree) {
+  const ModuleSymbols &own{resolution_.module()};
+  for (const parser::Item &item : tree.items) {
+    const auto *pragma{std::get_if<const parser::ForeignExportPragma *>(&item)};
+    if (!pragma) {
+      continue;
+    }
+    const parser::ProcSpec &spec{*(*pragma)->proc};
+    SymbolKind kind{spec.kind == parser::PredOrFunc::Function
+            ? SymbolKind::Function
+            : SymbolKind::Predicate};
+    const Symbol *symbol{nullptr};
+    if (spec.name->qualifiers.empty() ||
+        llvm::join(spec.name->qualifiers, ".") == own.name()) {
+      for (const Symbol *s : own.Lookup(spec.name->name)) {
+        if (s->kind == kind && s->arity == spec.modes.size()) {
+          symbol = s;
+        }
+      }
+    }
+    std::string name;
+    llvm::raw_string_ostream os{name};
+    spec.name->PrintInline(os);
+    if (!symbol) {
+      // mmc: "`:- pragma foreign_export' declaration for undeclared
+      // predicate `p'/1."
+      messages_.Say(Source(spec.tokens),
+          "`:- pragma foreign_export' names %s %s/%zu, which this module does not declare"_err_en_US,
+          kind == SymbolKind::Function ? "function" : "predicate", name,
+          spec.modes.size());
+      continue;
+    }
+    llvm::SmallVector<parser::Mode> modes{spec.modes.begin(), spec.modes.end()};
+    Declared declared{ConvertDeclaration(modes, spec.result, std::nullopt,
+        std::nullopt, {}, Source(spec.tokens))};
+    std::vector<ArgMode> erased{ErasedModes(declared.modes)};
+    const Procedure *found{nullptr};
+    for (const Procedure *procedure : result_.bySymbol_.lookup(symbol)) {
+      if (ErasedModes(procedure->modes) == erased) {
+        found = procedure;
+      }
+    }
+    if (!found) {
+      // mmc: "`:- pragma foreign_export' declaration for `p'/2 specifies
+      // non-existent mode."
+      messages_.Say(Source((*pragma)->tokens),
+          "this foreign_export is for a mode %s does not have"_err_en_US,
+          Text(*symbol));
+      continue;
+    }
+    result_.foreignExports_[*pragma] = found;
   }
 }
 

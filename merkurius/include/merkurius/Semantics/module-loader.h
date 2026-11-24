@@ -48,6 +48,9 @@ struct ModuleInterface {
   // `local`, whose code the modules that import this one see (reference
   // manual, "Adding foreign declarations"), in order.
   std::vector<const parser::ForeignDeclPragma *> sharedForeignDecls;
+  // Whether the module has a foreign_export, whose declaration a
+  // foreign_import_module of it would make visible.
+  bool foreignExports{false};
   // The implementation section's definitions of the types that the
   // interface declares abstractly and that are equivalences. Importing
   // modules see through them after type checking, so that a value of one
