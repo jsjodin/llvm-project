@@ -8722,6 +8722,14 @@ tested shows.
    export, and a `nondet` one (register). The manual's `set_compare_2`
    example is a type ambiguity in mmc (mmc bugs, "The reference manual").
 
+   *Type conversions, tests written (2026-11-24):* no bugs found. The
+   type and mode checks of coerce were already mmc's, for every rule the
+   manual gives: the parameters that must stay the same (higher-order,
+   foreign, abstract, and non-recursive discriminated union occurrences),
+   bound insts, ground ones of a subtype, and recursive inst nodes. The
+   run tests are `nyi-`, as subtypes have no code generation yet (below).
+   A parameter in a solver type waits for the solver types chapter.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
