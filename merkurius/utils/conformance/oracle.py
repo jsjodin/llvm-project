@@ -203,6 +203,11 @@ def mmc_error_texts(test, mmc):
             joined = " ".join(text)
             # mmc writes "Error:" and "Warning:"; a message that is
             # neither, as "In clause for ...", leads to an error.
+            # A note that points at the declaration an error conflicts
+            # with is not an error of its own.
+            if re.match(r"(Previous .* declaration was here|"
+                        r"Here is the conflicting .*)\.$", joined):
+                continue
             if re.search(r"\berror\b", joined, re.I) or not re.search(
                     r"\bwarning\b", joined, re.I):
                 errors.append((number, " ".join(t.strip() for t in text)))
