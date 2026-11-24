@@ -446,6 +446,7 @@ private:
   void LowerTrailRelease(merk::ForeignCallOp, mlir::Value mark);
   void LowerEntry(merk::EntryOp);
   void LowerConstructors();
+  std::optional<std::string> LowerInitialisers();
   mlir::Value CallRuntime(llvm::StringRef name, mlir::Type result,
       mlir::ValueRange arguments, mlir::Location);
   mlir::Value InitialElement(mlir::Value init, mlir::Location);
@@ -4971,11 +4972,66 @@ void Lowerer::LowerEntry(merk::EntryOp entry) {
   rewriter_.eraseOp(entry);
 }
 
+// Each merk.initialise's procedure is called by a C function of its own, as
+// the entry's is, which a C constructor registers with the runtime, in the
+// ops' order: the runtime calls them before main, or after it if final,
+// since the runtime is not started when constructors run. Returns the
+// constructor's name, if there are any.
+std::optional<std::string> Lowerer::LowerInitialisers() {
+  mlir::MLIRContext *context{module_.getContext()};
+  auto ops{llvm::to_vector(module_.getOps<merk::InitialiseOp>())};
+  if (ops.empty()) {
+    return std::nullopt;
+  }
+  auto voidType{mlir::LLVM::LLVMVoidType::get(context)};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
+  auto i32{rewriter_.getI32Type()};
+  mlir::LLVM::LLVMFuncOp registerFunc{
+      RuntimeFunc("merk_register_initialiser", voidType, {ptr, i32})};
+  rewriter_.setInsertionPointToEnd(module_.getBody());
+  std::string name{"merk.register_initialisers"};
+  auto registrar{mlir::LLVM::LLVMFuncOp::create(rewriter_, module_.getLoc(),
+      name, mlir::LLVM::LLVMFunctionType::get(voidType, {}),
+      mlir::LLVM::Linkage::Internal)};
+  mlir::Block *body{registrar.addEntryBlock(rewriter_)};
+  for (merk::InitialiseOp op : ops) {
+    mlir::Location loc{op.getLoc()};
+    rewriter_.setInsertionPoint(registrar);
+    std::string wrapperName{(op.getProc() + ".init").str()};
+    auto wrapper{mlir::LLVM::LLVMFuncOp::create(rewriter_, loc, wrapperName,
+        mlir::LLVM::LLVMFunctionType::get(voidType, {}),
+        mlir::LLVM::Linkage::Internal)};
+    mlir::Block *block{wrapper.addEntryBlock(rewriter_)};
+    rewriter_.setInsertionPointToStart(block);
+    auto call{mlir::LLVM::CallOp::create(
+        rewriter_, loc, funcs_.lookup(op.getProc()), mlir::ValueRange{})};
+    call.setCConv(cconv_);
+    mlir::LLVM::ReturnOp::create(rewriter_, loc, mlir::ValueRange{});
+    rewriter_.setInsertionPointToEnd(body);
+    mlir::Value address{
+        mlir::LLVM::AddressOfOp::create(rewriter_, loc, wrapper)};
+    mlir::Value final{mlir::LLVM::ConstantOp::create(
+        rewriter_, loc, i32, rewriter_.getI32IntegerAttr(op.getFinal()))};
+    mlir::LLVM::CallOp::create(
+        rewriter_, loc, registerFunc, mlir::ValueRange{address, final});
+    rewriter_.eraseOp(op);
+  }
+  rewriter_.setInsertionPointToEnd(body);
+  mlir::LLVM::ReturnOp::create(rewriter_, module_.getLoc(), mlir::ValueRange{});
+  return name;
+}
+
 // Each merk.constructor's procedure is called by a C function of its own,
-// as the entry's is, which llvm.mlir.global_ctors lists.
+// as the entry's is, which llvm.mlir.global_ctors lists, with the one that
+// registers the initialise and finalise directives' procedures.
 void Lowerer::LowerConstructors() {
   mlir::MLIRContext *context{module_.getContext()};
   llvm::SmallVector<mlir::Attribute> ctors, priorities, data;
+  if (std::optional<std::string> name{LowerInitialisers()}) {
+    ctors.push_back(mlir::FlatSymbolRefAttr::get(context, *name));
+    priorities.push_back(rewriter_.getI32IntegerAttr(65535));
+    data.push_back(mlir::LLVM::ZeroAttr::get(context));
+  }
   for (auto constructor :
       llvm::make_early_inc_range(module_.getOps<merk::ConstructorOp>())) {
     mlir::Location loc{constructor.getLoc()};
@@ -5899,7 +5955,7 @@ llvm::LogicalResult Lowerer::FilterKernelProcs() {
   }
   for (mlir::Operation &op :
       llvm::make_early_inc_range(module_.getBody()->getOperations())) {
-    if (mlir::isa<merk::EntryOp, merk::ConstructorOp>(op) ||
+    if (mlir::isa<merk::EntryOp, merk::ConstructorOp, merk::InitialiseOp>(op) ||
         (mlir::isa<merk::ProcOp>(op) && !reached.contains(&op))) {
       op.erase();
     }

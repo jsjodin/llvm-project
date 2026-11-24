@@ -8,7 +8,8 @@
 //
 // The C main of every Merkurius program (design document, "Runtime system").
 // The compiler gives the main module's main(di, uo) a C entry, merk_main;
-// this starts the runtime, saving the environment that the run time
+// this starts the runtime, calls the initialise directives' procedures
+// before it and the finalise directives' after, saving the environment that the run time
 // conditions of trace goals test (trace.cpp) and the command line, which
 // io.command_line_arguments and io.progname read, and the host's side of
 // target regions (offload.cpp), calls it, and returns the program's exit
@@ -32,7 +33,40 @@ namespace {
 int argumentCount{0};
 char **arguments{nullptr};
 int exitStatus{0};
+// The procedures of the initialise and finalise directives (reference
+// manual, "Module initialisation" and "Module finalisation"), each module's
+// in their order. Lists of zero-initialised statics, as modules'
+// constructors register them before any of this file's would be
+// constructed.
+struct Initialiser {
+  void (*procedure)(void);
+  Initialiser *next;
+};
+struct Initialisers {
+  Initialiser *first;
+  Initialiser **last;
+};
+Initialisers initialisers, finalisers;
+
+void RunAll(const Initialisers &list) {
+  for (Initialiser *i{list.first}; i; i = i->next) {
+    i->procedure();
+  }
+}
 } // namespace
+
+// Called by each module's C constructor, before main.
+extern "C" void merk_register_initialiser(void (*procedure)(void),
+    std::int32_t final) {
+  Initialisers &list{final ? finalisers : initialisers};
+  auto *added{static_cast<Initialiser *>(std::malloc(sizeof(Initialiser)))};
+  if (!added) {
+    std::abort();
+  }
+  *added = {procedure, nullptr};
+  *(list.last ? list.last : &list.first) = added;
+  list.last = &added->next;
+}
 
 // io.set_exit_status: the status main returns.
 extern "C" void merk_set_exit_status(std::int64_t status) {
@@ -48,7 +82,9 @@ extern "C" char *merk_argument(std::int64_t index) { return arguments[index]; }
 
 // The program ends with main, on whichever thread it then runs.
 static void EndWithMain(void) {
+  RunAll(initialisers);
   merk_main();
+  RunAll(finalisers);
   merk_process_stop();
   merkurius::runtime::CheckFreedAtEnd();
   merkurius::runtime::ExitProgram(exitStatus);

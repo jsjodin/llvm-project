@@ -1266,6 +1266,18 @@ void Resolver::Run(const parser::ParseTree &tree,
             "`:- pragma %s' may not be in the interface section"_err_en_US,
             pragma->first);
       }
+      if (const auto *decl{
+              std::get_if<const parser::InitialiseDecl *>(&item)};
+          decl && inInterface) {
+        // mmc: "Error: `:- initialise' declaration in module interface."
+        messages_.Say(
+            parser::CharBlock{
+                tokens.tokens[(*decl)->tokens.first].spelling.begin(),
+                tokens.tokens[(*decl)->tokens.last].spelling.end()},
+            "`:- %s' may not be in the interface section"_err_en_US,
+            (*decl)->kind == parser::InitialiseKind::Initialise ? "initialise"
+                                                                : "finalise");
+      }
       if (const auto *decl{std::get_if<const parser::InstanceDecl *>(&item)}) {
         result_.instances_.push_back({*decl, &tokens, true, inInterface});
       } else if (const auto *decl{

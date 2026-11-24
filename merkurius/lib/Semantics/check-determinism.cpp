@@ -3083,11 +3083,108 @@ static void AnalyseBody(const DeterminismChecking &checking,
   DeterminismAnalyser{checking, body, types, ops, tokens, messages}.Run();
 }
 
+static std::string SymbolText(const Symbol &symbol) {
+  std::string text;
+  llvm::raw_string_ostream os{text};
+  os << symbol;
+  return text;
+}
+
+static bool IsIOState(const Type *type) {
+  return type && type->kind == TypeKind::Named && type->arguments.empty() &&
+      type->constructor->module == "io" && type->constructor->name == "state";
+}
+
+// Whether an argument's inst is ground with `uniqueness`.
+static bool IsGroundWith(InstOps &ops, const Inst *inst, const Type *type,
+    Uniqueness uniqueness) {
+  inst = ops.Normalise(ops.Plain(inst), type);
+  return inst && inst->kind == InstKind::Ground &&
+      inst->uniqueness == uniqueness;
+}
+
+const Procedure *InitialiseProcedure(
+    const Symbol &symbol, TypeChecking &types, ModeChecking &modes) {
+  const Signature *signature{types.SignatureOf(symbol)};
+  if (symbol.kind != SymbolKind::Predicate || !signature) {
+    return nullptr;
+  }
+  if (symbol.arity == 0 ? signature->purity != parser::Purity::Impure
+                        : symbol.arity != 2 ||
+              signature->purity != parser::Purity::Pure ||
+              !IsIOState(signature->arguments[0]) ||
+              !IsIOState(signature->arguments[1])) {
+    return nullptr;
+  }
+  InstOps &ops{modes.ops()};
+  for (const Procedure *procedure : modes.ProceduresOf(symbol)) {
+    if (procedure->determinism != parser::Determinism::Det &&
+        procedure->determinism != parser::Determinism::CcMulti) {
+      continue;
+    }
+    if (symbol.arity == 0) {
+      return procedure;
+    }
+    const ArgMode &in{procedure->modes[0]};
+    const ArgMode &out{procedure->modes[1]};
+    const Type *type{signature->arguments[0]};
+    if (IsGroundWith(ops, in.initial, type, Uniqueness::Unique) &&
+        IsGroundWith(ops, in.final, type, Uniqueness::Clobbered) &&
+        ops.IsFree(out.initial) &&
+        IsGroundWith(ops, out.final, type, Uniqueness::Unique)) {
+      return procedure;
+    }
+  }
+  return nullptr;
+}
+
+// Each initialise or finalise directive names a predicate of this module
+// with a procedure the runtime can call.
+static void CheckInitialisers(const parser::TokenSequence &tokens,
+    TypeChecking &types, ModeChecking &modes, parser::Messages &messages,
+    const parser::ParseTree &tree, const NameResolution &resolution) {
+  for (const parser::Item &item : tree.items) {
+    const auto *decl{std::get_if<const parser::InitialiseDecl *>(&item)};
+    if (!decl) {
+      continue;
+    }
+    const parser::NameAndArity &pred{*(*decl)->pred};
+    std::string directive{
+        (*decl)->kind == parser::InitialiseKind::Initialise ? "initialise"
+                                                            : "finalise"};
+    parser::CharBlock where{tokens.tokens[(*decl)->tokens.first].spelling.begin(),
+        tokens.tokens[(*decl)->tokens.last].spelling.end()};
+    const Symbol *target{nullptr};
+    for (const Symbol *symbol : resolution.module().Lookup(pred.name->name)) {
+      if (symbol->kind == SymbolKind::Predicate &&
+          symbol->arity == pred.arity) {
+        target = symbol;
+      }
+    }
+    if (!target) {
+      // mmc: "Error: `p'/2 used in `:- initialise' declaration does not
+      // have a corresponding `:- pred' declaration."
+      messages.Say(where,
+          "`:- %s' names %s/%u, which this module does not declare as a predicate"_err_en_US,
+          directive, pred.name->name.str(), pred.arity);
+    } else if (!InitialiseProcedure(*target, types, modes)) {
+      // mmc: "Error: `p'/2 used in `:- initialise' declaration has an
+      // invalid signature."
+      messages.Say(where,
+          "`:- %s' names %s, which must be declared as pred(io::di, io::uo) or as an impure predicate with no arguments, det or cc_multi"_err_en_US,
+          directive, SymbolText(*target));
+    }
+  }
+}
+
 std::unique_ptr<DeterminismChecking> CheckDeterminism(
     const parser::TokenSequence &tokens, TypeChecking &types,
     ModeChecking &modes, parser::Messages &messages, bool analyse,
     const parser::ParseTree *tree, const NameResolution *resolution) {
   auto result{std::make_unique<DeterminismChecking>()};
+  if (tree && resolution && analyse) {
+    CheckInitialisers(tokens, types, modes, messages, *tree, *resolution);
+  }
   result->modes_ = &modes;
   if (tree && resolution) {
     for (const parser::Item &item : tree->items) {

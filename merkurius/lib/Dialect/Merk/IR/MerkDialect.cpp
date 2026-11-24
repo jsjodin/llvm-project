@@ -454,6 +454,20 @@ llvm::LogicalResult EntryOp::verifySymbolUses(
   return mlir::success();
 }
 
+llvm::LogicalResult InitialiseOp::verifySymbolUses(
+    mlir::SymbolTableCollection &symbolTable) {
+  auto proc{symbolTable.lookupNearestSymbolFrom<ProcOp>(*this, getProcAttr())};
+  if (!proc) {
+    return emitOpError("names ") << getProcAttr() << ", which is no procedure";
+  }
+  if (!proc.getFunctionType().getInputs().empty() ||
+      !proc.getFunctionType().getResults().empty()) {
+    return emitOpError("names ")
+        << getProcAttr() << ", which has inputs or outputs";
+  }
+  return mlir::success();
+}
+
 llvm::LogicalResult ConstructorOp::verifySymbolUses(
     mlir::SymbolTableCollection &symbolTable) {
   auto proc{symbolTable.lookupNearestSymbolFrom<ProcOp>(*this, getProcAttr())};

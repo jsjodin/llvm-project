@@ -998,6 +998,7 @@ private:
   // reaching no code of another module on the device but the copies that
   // CopyDeviceLibrary makes, which this follows as the module's own.
   void MarkRegionsForTeamMailboxes();
+  void Initialiser(const parser::InitialiseDecl &);
   mlir::Value TimeoutMilliseconds(mlir::Value timeout, mlir::Location);
   // The map entry of a term's cell of `words` words, by its pointer.
   mlir::Value MapCell(mlir::Value term, unsigned words, llvm::StringRef name,

@@ -1784,10 +1784,42 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
       }
     }
   }
+  // The procedures of the module's initialise and finalise directives, in
+  // their order, which the runtime calls before and after main.
+  if (!target_.options().IsDevice()) {
+    for (const parser::Item &item : tree_.items) {
+      const auto *decl{std::get_if<const parser::InitialiseDecl *>(&item)};
+      if (decl) {
+        Initialiser(**decl);
+      }
+    }
+  }
   // A goal's solutions give every variable it binds; only those used after
   // it stay.
   PruneSolutions(*owned);
   return owned;
+}
+
+// An initialise or finalise directive's procedure, which semantic analysis
+// checked it has (reference manual, "Module initialisation").
+void MerkGenerator::Initialiser(const parser::InitialiseDecl &decl) {
+  for (const semantics::Symbol *symbol :
+      resolution_.module().Lookup(decl.pred->name->name)) {
+    if (symbol->kind != semantics::SymbolKind::Predicate ||
+        symbol->arity != decl.pred->arity) {
+      continue;
+    }
+    const semantics::Procedure *procedure{
+        semantics::InitialiseProcedure(*symbol, types_, modes_)};
+    merk::ProcOp proc{procedure ? procs_.lookup(procedure) : nullptr};
+    if (!proc) {
+      continue;
+    }
+    builder_.setInsertionPointToEnd(module_.getBody());
+    merk::InitialiseOp::create(builder_,
+        Location(tokens_.tokens[decl.tokens.first].spelling),
+        proc.getSymName(), decl.kind == parser::InitialiseKind::Finalise);
+  }
 }
 
 } // namespace mlirgen

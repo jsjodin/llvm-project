@@ -1402,4 +1402,25 @@ def Merk_ConstructorOp : Merk_Op<"constructor", [
   let assemblyFormat = "$proc attr-dict";
 }
 
+def Merk_InitialiseOp : Merk_Op<"initialise", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>
+  ]> {
+  let summary = "a procedure that runs before or after main";
+  let description = [{
+    Names the procedure of an `initialise` directive, which the runtime
+    calls before the program's main procedure, or with `final`, of a
+    `finalise` directive, which it calls after (reference manual, "Module
+    initialisation" and "Module finalisation"). It has no inputs or
+    outputs: its I/O states have none. A module's run in the order of their
+    ops.
+
+    ```mlir
+    merk.initialise @m.setup_2_0
+    merk.initialise @m.teardown_2_0 final
+    ```
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$proc, UnitAttr:$final);
+  let assemblyFormat = "$proc (`final` $final^)? attr-dict";
+}
+
 #endif // MERKURIUS_DIALECT_MERK_IR_MERKOPS_TD

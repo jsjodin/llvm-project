@@ -222,6 +222,13 @@ private:
 // Whether mode analysis reaches the end of a goal, as in mmc.
 bool Reached(const Body *goal);
 
+// The procedure of an initialise or finalise directive's predicate that the
+// runtime calls (reference manual, "Module initialisation"): a pure
+// pred(io::di, io::uo) or an impure pred of no arguments, declared det or
+// cc_multi. Null if the predicate has none.
+const Procedure *InitialiseProcedure(
+    const Symbol &, TypeChecking &, ModeChecking &);
+
 // Prints a procedure's body, each goal with its position and its
 // determinism, as determinism analysis sees it.
 void DumpProcedureBody(llvm::raw_ostream &, const ProcedureBody &,
