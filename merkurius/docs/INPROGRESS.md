@@ -8664,6 +8664,23 @@ tested shows.
    *Higher-order, tests written (2026-11-23):* no compiler bugs. The
    library lacked list.perm, which the manual's solutions example uses.
 
+   *Modules, tests written (2026-11-23):* found and fixed:
+   - `initialise` and `finalise` were ignored. They now run (design
+     document, "Initialisers and finalisers"), and their errors are
+     mmc's. builtin.impure_true and semipure_true were not generated.
+   - A clause in the interface and an `end_module` naming another module
+     were accepted.
+   - Nested submodules were read as part of the parent, and imports after
+     one were dropped. They are now "not yet implemented" (below).
+   - The oracle saw only the first errors of a long mmc log.
+   - Tests of uncaught exceptions use `% MERKC-FLAGS: -fmercury-messages`,
+     which makes the runtime print mmc's "Uncaught Mercury exception:"
+     header (the user's decision, 2026-11-23: not the default).
+
+   Still to write, once mutables exist: reject tests for a mutable in the
+   interface, with a type variable, with a unique inst, constant with
+   attach_to_io_state, and thread_local with constant.
+
    *Subtypes have no code generation yet* (`nyi-` tests in
    `types/subtypes/`). The user put it after the fixes to existing
    features (2026-11-23). The design worked out:
@@ -8691,6 +8708,28 @@ tested shows.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.
+
+### Nested submodules
+
+Not yet implemented. Six reject tests of nested submodules have
+`KNOWN-BUG` lines, and four run tests are `nyi-` tests. merkc reports a
+second `:- module` in a file, in the module compiled or in one it imports.
+Separate submodules compile as modules of their own, so what is missing
+there is the parent's side:
+- a child does not see its parent's declarations
+  (`modules/separate-submodules/run-include-module.m`, a `KNOWN-BUG`);
+- nothing stops a module that is not the parent or a sibling from
+  importing a child declared in the parent's implementation section.
+
+What it needs:
+- a scope per submodule, holding the parent's declarations, its
+  implementation's too, and the parent's imports;
+- symbols qualified by the child's full name;
+- interfaces of nested children that importing modules can load from the
+  parent's file;
+- the checks of "Nested submodules": declared or defined twice, defined
+  without being declared, defined in the parent's interface, and an
+  implicit empty implementation.
 
 ## Spawning from a GPU process: later
 
