@@ -8803,6 +8803,21 @@ tested shows.
    -O0 and -O2. Left: the rule for a non-local of inst `any` in a negated
    context, which needs solver types' `any` insts (the next chapter).
 
+   *Solver types, tests written (2026-11-24):* solver types stay
+   unimplemented, as decided, but merkc ignored a solver type definition
+   without saying so. Its type was undefined unless also declared
+   abstractly, and none of mmc's checks ran. Now the front end declares the
+   type and makes mmc's checks: a definition in the interface, an abstract
+   declaration and a definition that disagree on being a solver type, a
+   second definition, an abstract solver type with no definition (which
+   merkc wrongly accepted), and the equality and comparison predicates.
+   The representation functions and the constraint store are reported as
+   not yet implemented, and so are solver values in code generation, so the
+   chapter has rejects and nyi- tests but no run- tests. The `any` inst and
+   negated contexts agreed with mmc throughout. Register: mmc does not
+   require an exported solver type's representation type or equality to be
+   exported, nor a constraint store.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
