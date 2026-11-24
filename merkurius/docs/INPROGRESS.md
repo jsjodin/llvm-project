@@ -8705,6 +8705,23 @@ tested shows.
    - A constraint's variable not determined by the constructor's arguments
      is now reported at the type, as mmc does.
 
+   *User-defined equality and comparison, tests written (2026-11-23):*
+   the chapter was skipped at first, after Determinism. Code generation
+   refused these types, and nothing checked them. Now built:
+   - the type checker's checks of the predicates: in the type's module,
+     their signatures, pure, and not for a type of one value;
+   - determinism analysis's rules: a deconstruction or switch that cannot
+     fail is `cc_multi`, one that can is an error, as in mmc;
+   - code generation: the unify and compare procedures call the
+     predicates, and a missing comparison throws mmc's software_error,
+     whose text names the type (`merk.throw_if` with a `type_info`);
+   - builtin.semidet_true, semidet_succeed, semidet_fail and
+     semidet_false, which were declared but not generated;
+   - the open walkers stop at such types (open types, "what is left", 6).
+   mmc accepts an equality predicate that an exported type does not
+   export, and a `nondet` one (register). The manual's `set_compare_2`
+   example is a type ambiguity in mmc (mmc bugs, "The reference manual").
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
