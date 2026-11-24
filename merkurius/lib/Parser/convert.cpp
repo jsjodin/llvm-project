@@ -547,13 +547,14 @@ static constexpr auto universalConstraints{commaListOf(expect("a constraint",
     anyOf<Constraint>(instConstraint, classConstraint)))};
 
 // The layers around pred(...), func(...) or mode(...), outermost first, as
-// mmc accepts them: all [Vs], some [Vs], <= Constraints, => Constraints, and
-// impure or semipure (reference manual, "Syntax for explicit type
+// mmc accepts them: all [Vs] and some [Vs], <= Constraints, => Constraints,
+// and impure or semipure (reference manual, "Syntax for explicit type
 // quantifiers", "Existential class constraints" and "Constrained
-// polymorphic modes").
+// polymorphic modes"). The manual puts all before some, but mmc takes any
+// number of each in any order ("Where mmc and the manual disagree").
 struct DeclarationLayers {
-  const Term *universalVars{nullptr};
-  const Term *existentialVars{nullptr};
+  llvm::SmallVector<const Term *, 1> universalVars;
+  llvm::SmallVector<const Term *, 1> existentialVars;
   const Term *universalConstraints{nullptr};
   const Term *existentialConstraints{nullptr};
   Purity purity{Purity::Pure};
@@ -563,19 +564,46 @@ struct DeclarationLayers {
 };
 
 // Name(Into, T) becomes T, with Into its first argument.
-static void PeelLayer(const Term *&t, llvm::StringRef name, std::size_t arity,
+static bool PeelLayer(const Term *&t, llvm::StringRef name, std::size_t arity,
     const Term *&into) {
   if (const CompoundTerm * c{AsCompound(*t, name, arity)}) {
     into = c->arguments()[0];
     t = c->arguments()[arity - 1];
+    return true;
   }
+  return false;
+}
+
+// The variables of each of a declaration's quantifiers of one kind, in order.
+static bool ConvertQuantifiers(llvm::ArrayRef<const Term *> layers,
+    llvm::ArrayRef<llvm::StringRef> &into, ConvertState &state) {
+  if (layers.size() == 1) {
+    return ConvertOptional(quantifiedVars, layers[0], into, state);
+  }
+  bool ok{true};
+  llvm::SmallVector<llvm::StringRef> all;
+  for (const Term *layer : layers) {
+    llvm::ArrayRef<llvm::StringRef> vars;
+    ok &= ConvertOptional(quantifiedVars, layer, vars, state);
+    all.append(vars.begin(), vars.end());
+  }
+  into = state.arena.SaveArray(llvm::ArrayRef<llvm::StringRef>{all});
+  return ok;
 }
 
 static std::optional<DeclarationLayers> PeelDeclaration(const Term &term) {
   DeclarationLayers layers;
   const Term *t{&term};
-  PeelLayer(t, "all", 2, layers.universalVars);
-  PeelLayer(t, "some", 2, layers.existentialVars);
+  while (true) {
+    const Term *vars{nullptr};
+    if (PeelLayer(t, "all", 2, vars)) {
+      layers.universalVars.push_back(vars);
+    } else if (PeelLayer(t, "some", 2, vars)) {
+      layers.existentialVars.push_back(vars);
+    } else {
+      break;
+    }
+  }
   if (const CompoundTerm * c{AsCompound(*t, "<=", 2)}) {
     layers.universalConstraints = c->arguments()[1];
     t = c->arguments()[0];
@@ -599,7 +627,7 @@ static std::optional<DeclarationLayers> PeelDeclaration(const Term &term) {
   } else if (const CompoundTerm * c{AsCompound(*t, "mode", 1)}) {
     // Only inst constraints apply to a mode declaration, and "Name ==
     // Mode" defines a mode instead.
-    if (layers.universalVars || layers.existentialVars ||
+    if (!layers.universalVars.empty() || !layers.existentialVars.empty() ||
         layers.existentialConstraints || layers.purity != Purity::Pure ||
         AsCompound(*c->arguments()[0], "==", 2)) {
       return std::nullopt;
@@ -668,10 +696,8 @@ public:
     DeclarationBody body{SplitBody(*layers.body, isFunction)};
     bool ok{true};
     llvm::ArrayRef<llvm::StringRef> universalVars, existentialVars;
-    ok &= ConvertOptional(quantifiedVars, layers.universalVars,
-        universalVars, state);
-    ok &= ConvertOptional(quantifiedVars, layers.existentialVars,
-        existentialVars, state);
+    ok &= ConvertQuantifiers(layers.universalVars, universalVars, state);
+    ok &= ConvertQuantifiers(layers.existentialVars, existentialVars, state);
     std::optional<std::tuple<const SymName *,
         llvm::ArrayRef<const TypeAndMode *>>>
         head{isFunction ? Apply(functionDeclHead, *body.head, state)

@@ -75,6 +75,18 @@
 % CHECK-NEXT: | | | | ClassConstraint
 % CHECK-NEXT: | | | | | name: SymName c3
 
+% Quantifiers of each kind in any order, as mmc takes them, though the
+% manual puts all before some ("Where mmc and the manual disagree").
+:- some [T2] all [T3] some [T4] all [T1] pred q(T1, T2, T3, T4).
+% CHECK:      | | PredDecl
+% CHECK-NEXT: | | | kind: Predicate
+% CHECK-NEXT: | | | universalVars:
+% CHECK-NEXT: | | | | T3
+% CHECK-NEXT: | | | | T1
+% CHECK-NEXT: | | | existentialVars:
+% CHECK-NEXT: | | | | T2
+% CHECK-NEXT: | | | | T4
+
 % A higher-order argument with its inst ("Builtin higher-order insts and
 % modes").
 :- pred foldl(pred(T, A, A), list(T), A, A).
