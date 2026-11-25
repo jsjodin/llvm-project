@@ -1,0 +1,11 @@
+run-gpu-team-loops.m's solver spawned on the machine's GPU, its distribute
+loops across the teams of its module's kernel and its parallel do loops
+across each team's threads, which prints what it prints at the host, the
+output the oracle checked. Without -fopenmp the directives are comments,
+and the solver runs its loops itself.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/run-gpu-team-loops.m -o %t2
+RUN: %gpu-env timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %S/run-gpu-team-loops.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/run-gpu-team-loops.m -o %t.sequential
+RUN: %gpu-env timeout -k 1 60 %t.sequential gpu 2>&1 | FileCheck %S/run-gpu-team-loops.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

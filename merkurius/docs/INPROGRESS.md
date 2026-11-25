@@ -8991,7 +8991,10 @@ tested shows.
    string as a last field, polling, ping-pong between GPU processes).
    Selective receive in a GPU process needs a closure and is reported
    (`nyi-gpu-selective-receive.m`); `reject-gpu-flat.m` has the flatness
-   rule. Still to do: team loops and cooperative kernels, blocks, flat
+   rule. `run-gpu-team-loops.m` runs teams distribute and parallel do
+   loops in a GPU process, with reductions, a loop of no iterations, and
+   an array of two million elements, checked at the host on four threads
+   and without -fopenmp, and on the GPU both ways. Still to do: flat
    records' own tests, distribution.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
