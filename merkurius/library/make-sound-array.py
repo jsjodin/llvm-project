@@ -7,7 +7,8 @@ array's uniqueness, and the predicates that read an array take it `in`.
 The sound stub has the insts that the manual's own comments give, so that
 arrays are unique, and gives each mode that takes arrays `in` copies
 before it that take them `array_ui`, each mix of them, so that reading a
-unique array keeps it unique. A declaration that gives types and modes together is split into a
+unique array keeps it unique; a mode that takes an array only `array_ui`
+gets a copy after it that takes it `in`. A declaration that gives types and modes together is split into a
 `:- pred` or `:- func` declaration and its `:- mode` declarations. merkc
 loads the sound stub unless -fmmc-uniqueness is given (design document,
 "Uniqueness checking").
@@ -32,7 +33,8 @@ INSTS = {
 HEADER = """\
 % The sound stub of the standard library module array, made by
 % make-sound-array.py from array.m: arrays are unique, and each mode that
-% takes an array `in` has copies before it that take it `array_ui`. Do not
+% takes an array `in` has copies before it that take it `array_ui`, and each
+% that takes one only `array_ui` a copy after it that takes it `in`. Do not
 % edit; edit array.m or the script.
 """
 
@@ -186,6 +188,16 @@ def main():
             out.append(wrap(text("mode", name, arguments, result, det)))
         else:
             out.append(item)
+        # A mode that the manual gives only with an array `array_ui`, as
+        # binary_search's, reads it, and reads a shared array too, as mmc's
+        # `in` does: a copy after it takes those arrays `in`.
+        uis = [i for i, a in enumerate(arguments)
+               if i < len(which) and which[i] and a == "array_ui"]
+        if uis:
+            shared = list(arguments)
+            for i in uis:
+                shared[i] = "in"
+            out.append(wrap(text("mode", name, shared, result, det)))
     open(output, "w").write("\n".join(out).rstrip("\n") + "\n")
 
 

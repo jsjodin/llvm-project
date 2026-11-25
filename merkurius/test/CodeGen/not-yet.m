@@ -33,7 +33,7 @@ w(X) = pow(X, 3).
 negate(B) = bool.not(B).
 % CHECK: not-yet.m:[[@LINE-1]]:13: error: not yet implemented: code generation for calls of bool.not/1
 
-% Of array, only generate, its folds and the foldl family are compiled.
+% Of array, fetch_items is not compiled yet.
 :- func total(array(int)) = int.
-total(A) = array.foldr((func(X, S) = X + S), A, 0).
-% CHECK: not-yet.m:[[@LINE-1]]:12: error: not yet implemented: code generation for calls of array.foldr/3
+total(A) = list.foldl((func(X, S) = X + S), array.fetch_items(A, 0, 1), 0).
+% CHECK: not-yet.m:[[@LINE-1]]:45: error: not yet implemented: code generation for calls of array.fetch_items/3

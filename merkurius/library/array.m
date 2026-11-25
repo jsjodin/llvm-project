@@ -474,7 +474,8 @@
 :- import_module require.
 
 % Temporary (chunk 1 step 6, docs/INPROGRESS.md): only generate, its folds,
-% map, to_list and the foldl family are compiled; the predicates code generation builds
+% map, to_list, the foldl and foldr families, sort, append and the binary
+% searches are compiled; the predicates code generation builds
 % in are called through it, and the others are reported as not yet
 % implemented where they are called. Step 6 (d) compiles the rest.
 
@@ -771,3 +772,311 @@ foldl5_from(Pred, Array, I, Size, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5) :-
 
 foldl5(Pred, Array, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5) :-
     foldl5_from(Pred, Array, 0, size(Array), !Acc1, !Acc2, !Acc3, !Acc4, !Acc5).
+
+foldr(Func, Array, Acc0) = Acc :-
+    foldr_func_from(Func, Array, size(Array) - 1, 0, Acc0, Acc).
+
+:- pred foldr_func_from(func(T1, T2) = T2, array(T1), int, int, T2, T2).
+:- mode foldr_func_from(func(in, in) = out is det, in, in, in, in, out)
+    is det.
+:- mode foldr_func_from(func(in, di) = uo is det, in, in, in, di, uo)
+    is det.
+
+foldr_func_from(Func, Array, I, Low, !Acc) :-
+    ( if I < Low then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        !:Acc = Func(X, !.Acc),
+        foldr_func_from(Func, Array, I - 1, Low, !Acc)
+    ).
+
+:- pred foldr_from(pred(T1, T2, T2), array(T1), int, int,
+    T2, T2).
+:- mode foldr_from(pred(in, in, out) is det, in, in, in,
+    in, out) is det.
+:- mode foldr_from(pred(in, mdi, muo) is det, in, in, in,
+    mdi, muo) is det.
+:- mode foldr_from(pred(in, di, uo) is det, in, in, in,
+    di, uo) is det.
+:- mode foldr_from(pred(in, in, out) is semidet, in, in, in,
+    in, out) is semidet.
+:- mode foldr_from(pred(in, mdi, muo) is semidet, in, in, in,
+    mdi, muo) is semidet.
+:- mode foldr_from(pred(in, di, uo) is semidet, in, in, in,
+    di, uo) is semidet.
+
+foldr_from(Pred, Array, I, Low, !Acc1) :-
+    ( if I < Low then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        Pred(X, !Acc1),
+        foldr_from(Pred, Array, I - 1, Low, !Acc1)
+    ).
+
+foldr(Pred, Array, !Acc1) :-
+    foldr_from(Pred, Array, size(Array) - 1, 0, !Acc1).
+
+:- pred foldr2_from(pred(T1, T2, T2, T3, T3), array(T1), int, int,
+    T2, T2, T3, T3).
+:- mode foldr2_from(pred(in, in, out, in, out) is det, in, in, in,
+    in, out, in, out) is det.
+:- mode foldr2_from(pred(in, in, out, mdi, muo) is det, in, in, in,
+    in, out, mdi, muo) is det.
+:- mode foldr2_from(pred(in, in, out, di, uo) is det, in, in, in,
+    in, out, di, uo) is det.
+:- mode foldr2_from(pred(in, in, out, in, out) is semidet, in, in, in,
+    in, out, in, out) is semidet.
+:- mode foldr2_from(pred(in, in, out, mdi, muo) is semidet, in, in, in,
+    in, out, mdi, muo) is semidet.
+:- mode foldr2_from(pred(in, in, out, di, uo) is semidet, in, in, in,
+    in, out, di, uo) is semidet.
+
+foldr2_from(Pred, Array, I, Low, !Acc1, !Acc2) :-
+    ( if I < Low then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        Pred(X, !Acc1, !Acc2),
+        foldr2_from(Pred, Array, I - 1, Low, !Acc1, !Acc2)
+    ).
+
+foldr2(Pred, Array, !Acc1, !Acc2) :-
+    foldr2_from(Pred, Array, size(Array) - 1, 0, !Acc1, !Acc2).
+
+:- pred foldr3_from(pred(T1, T2, T2, T3, T3, T4, T4), array(T1), int, int,
+    T2, T2, T3, T3, T4, T4).
+:- mode foldr3_from(pred(in, in, out, in, out, in, out) is det, in, in, in,
+    in, out, in, out, in, out) is det.
+:- mode foldr3_from(pred(in, in, out, in, out, mdi, muo) is det, in, in, in,
+    in, out, in, out, mdi, muo) is det.
+:- mode foldr3_from(pred(in, in, out, in, out, di, uo) is det, in, in, in,
+    in, out, in, out, di, uo) is det.
+:- mode foldr3_from(pred(in, in, out, in, out, in, out) is semidet, in, in, in,
+    in, out, in, out, in, out) is semidet.
+:- mode foldr3_from(pred(in, in, out, in, out, mdi, muo) is semidet, in, in, in,
+    in, out, in, out, mdi, muo) is semidet.
+:- mode foldr3_from(pred(in, in, out, in, out, di, uo) is semidet, in, in, in,
+    in, out, in, out, di, uo) is semidet.
+
+foldr3_from(Pred, Array, I, Low, !Acc1, !Acc2, !Acc3) :-
+    ( if I < Low then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        Pred(X, !Acc1, !Acc2, !Acc3),
+        foldr3_from(Pred, Array, I - 1, Low, !Acc1, !Acc2, !Acc3)
+    ).
+
+foldr3(Pred, Array, !Acc1, !Acc2, !Acc3) :-
+    foldr3_from(Pred, Array, size(Array) - 1, 0, !Acc1, !Acc2, !Acc3).
+
+:- pred foldr4_from(pred(T1, T2, T2, T3, T3, T4, T4, T5, T5), array(T1), int, int,
+    T2, T2, T3, T3, T4, T4, T5, T5).
+:- mode foldr4_from(pred(in, in, out, in, out, in, out, in, out) is det, in, in, in,
+    in, out, in, out, in, out, in, out) is det.
+:- mode foldr4_from(pred(in, in, out, in, out, in, out, mdi, muo) is det, in, in, in,
+    in, out, in, out, in, out, mdi, muo) is det.
+:- mode foldr4_from(pred(in, in, out, in, out, in, out, di, uo) is det, in, in, in,
+    in, out, in, out, in, out, di, uo) is det.
+:- mode foldr4_from(pred(in, in, out, in, out, in, out, in, out) is semidet, in, in, in,
+    in, out, in, out, in, out, in, out) is semidet.
+:- mode foldr4_from(pred(in, in, out, in, out, in, out, mdi, muo) is semidet, in, in, in,
+    in, out, in, out, in, out, mdi, muo) is semidet.
+:- mode foldr4_from(pred(in, in, out, in, out, in, out, di, uo) is semidet, in, in, in,
+    in, out, in, out, in, out, di, uo) is semidet.
+
+foldr4_from(Pred, Array, I, Low, !Acc1, !Acc2, !Acc3, !Acc4) :-
+    ( if I < Low then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        Pred(X, !Acc1, !Acc2, !Acc3, !Acc4),
+        foldr4_from(Pred, Array, I - 1, Low, !Acc1, !Acc2, !Acc3, !Acc4)
+    ).
+
+foldr4(Pred, Array, !Acc1, !Acc2, !Acc3, !Acc4) :-
+    foldr4_from(Pred, Array, size(Array) - 1, 0, !Acc1, !Acc2, !Acc3, !Acc4).
+
+:- pred foldr5_from(pred(T1, T2, T2, T3, T3, T4, T4, T5, T5, T6, T6), array(T1), int, int,
+    T2, T2, T3, T3, T4, T4, T5, T5, T6, T6).
+:- mode foldr5_from(pred(in, in, out, in, out, in, out, in, out, in, out) is det, in, in, in,
+    in, out, in, out, in, out, in, out, in, out) is det.
+:- mode foldr5_from(pred(in, in, out, in, out, in, out, in, out, mdi, muo) is det, in, in, in,
+    in, out, in, out, in, out, in, out, mdi, muo) is det.
+:- mode foldr5_from(pred(in, in, out, in, out, in, out, in, out, di, uo) is det, in, in, in,
+    in, out, in, out, in, out, in, out, di, uo) is det.
+:- mode foldr5_from(pred(in, in, out, in, out, in, out, in, out, in, out) is semidet, in, in, in,
+    in, out, in, out, in, out, in, out, in, out) is semidet.
+:- mode foldr5_from(pred(in, in, out, in, out, in, out, in, out, mdi, muo) is semidet, in, in, in,
+    in, out, in, out, in, out, in, out, mdi, muo) is semidet.
+:- mode foldr5_from(pred(in, in, out, in, out, in, out, in, out, di, uo) is semidet, in, in, in,
+    in, out, in, out, in, out, in, out, di, uo) is semidet.
+
+foldr5_from(Pred, Array, I, Low, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5) :-
+    ( if I < Low then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        Pred(X, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5),
+        foldr5_from(Pred, Array, I - 1, Low, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5)
+    ).
+
+foldr5(Pred, Array, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5) :-
+    foldr5_from(Pred, Array, size(Array) - 1, 0, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5).
+
+sort(Array0) = Array :-
+    size(Array0, Size),
+    ( if Size < 2 then
+        Array = Array0
+    else
+        array.copy(Array0, Scratch),
+        sort_passes(1, Size, Array0, Scratch, Array)
+    ).
+
+sort_fix_2014.
+
+    % Merges the sorted runs of Width elements of Src into runs of twice as
+    % many in Dst0, then passes back from Dst to Src, until a run holds the
+    % whole array. A bottom-up merge sort: each pass is a loop, so the stack
+    % does not grow with the array.
+    %
+:- pred sort_passes(int::in, int::in, array(T)::array_di,
+    array(T)::array_di, array(T)::array_uo) is det.
+
+sort_passes(Width, Size, Src, Dst0, Sorted) :-
+    ( if Width >= Size then
+        Sorted = Src
+    else
+        merge_pass(Width, Size, 0, Src, Dst0, Dst),
+        sort_passes(Width * 2, Size, Dst, Src, Sorted)
+    ).
+
+:- pred merge_pass(int::in, int::in, int::in, array(T)::in,
+    array(T)::array_di, array(T)::array_uo) is det.
+
+merge_pass(Width, Size, Lo, Src, !Dst) :-
+    ( if Lo >= Size then
+        true
+    else
+        Mid = int.min(Lo + Width, Size),
+        Hi = int.min(Lo + 2 * Width, Size),
+        merge_runs(Src, Lo, Mid, Mid, Hi, Lo, !Dst),
+        merge_pass(Width, Size, Hi, Src, !Dst)
+    ).
+
+    % Merges Src's elements I to IEnd - 1 and J to JEnd - 1 into Dst from K,
+    % taking the first run's element when two compare equal.
+    %
+:- pred merge_runs(array(T)::in, int::in, int::in, int::in, int::in,
+    int::in, array(T)::array_di, array(T)::array_uo) is det.
+
+merge_runs(Src, I, IEnd, J, JEnd, K, !Dst) :-
+    ( if I < IEnd, J < JEnd then
+        X = Src ^ unsafe_elem(I),
+        Y = Src ^ unsafe_elem(J),
+        compare(R, Y, X),
+        ( if R = (<) then
+            unsafe_set(K, Y, !Dst),
+            merge_runs(Src, I, IEnd, J + 1, JEnd, K + 1, !Dst)
+        else
+            unsafe_set(K, X, !Dst),
+            merge_runs(Src, I + 1, IEnd, J, JEnd, K + 1, !Dst)
+        )
+    else if I < IEnd then
+        copy_range(Src, I, IEnd, K, !Dst)
+    else
+        copy_range(Src, J, JEnd, K, !Dst)
+    ).
+
+    % Copies Src's elements I to End - 1 into Dst from K.
+    %
+:- pred copy_range(array(T)::in, int::in, int::in, int::in,
+    array(T)::array_di, array(T)::array_uo) is det.
+
+copy_range(Src, I, End, K, !Dst) :-
+    ( if I >= End then
+        true
+    else
+        unsafe_set(K, Src ^ unsafe_elem(I), !Dst),
+        copy_range(Src, I + 1, End, K + 1, !Dst)
+    ).
+
+append(A, B) = C :-
+    SizeA = size(A),
+    SizeB = size(B),
+    ( if SizeA > 0 then
+        init(SizeA + SizeB, A ^ unsafe_elem(0), C0),
+        copy_range(B, 0, SizeB, SizeA, C0, C1),
+        copy_range(A, 1, SizeA, 1, C1, C)
+    else if SizeB > 0 then
+        init(SizeB, B ^ unsafe_elem(0), C0),
+        copy_range(B, 1, SizeB, 1, C0, C)
+    else
+        make_empty_array(C)
+    ).
+
+binary_search(A, X, I) :-
+    binary_search(ordering, A, X, I).
+
+binary_search(Cmp, A, X, I) :-
+    binary_search_loop(Cmp, A, X, 0, size(A) - 1, I).
+
+approx_binary_search(A, X, I) :-
+    approx_binary_search(ordering, A, X, I).
+
+approx_binary_search(Cmp, A, X, I) :-
+    approx_binary_search_loop(Cmp, A, X, 0, size(A) - 1, I).
+
+    % If X is in A, it is between Lo and Hi. The middle is mmc's, so that
+    % among duplicates the same one is found.
+    %
+:- pred binary_search_loop(comparison_func(T)::in, array(T)::in,
+    T::in, int::in, int::in, int::out) is semidet.
+
+binary_search_loop(Cmp, A, X, Lo, Hi, I) :-
+    Lo =< Hi,
+    Mid = Lo + (Hi - Lo) / 2,
+    O = Cmp(A ^ unsafe_elem(Mid), X),
+    (
+        O = (>),
+        binary_search_loop(Cmp, A, X, Lo, Mid - 1, I)
+    ;
+        O = (=),
+        I = Mid
+    ;
+        O = (<),
+        binary_search_loop(Cmp, A, X, Mid + 1, Hi, I)
+    ).
+
+    % As binary_search_loop, but a middle element less than X is the answer
+    % if the next one is greater than X, or there is none up to Hi.
+    %
+:- pred approx_binary_search_loop(comparison_func(T)::in,
+    array(T)::in, T::in, int::in, int::in, int::out) is semidet.
+
+approx_binary_search_loop(Cmp, A, X, Lo, Hi, I) :-
+    Lo =< Hi,
+    Mid = Lo + (Hi - Lo) / 2,
+    O = Cmp(A ^ unsafe_elem(Mid), X),
+    (
+        O = (>),
+        approx_binary_search_loop(Cmp, A, X, Lo, Mid - 1, I)
+    ;
+        O = (=),
+        I = Mid
+    ;
+        O = (<),
+        ( if
+            ( if Mid < Hi then
+                Cmp(X, A ^ unsafe_elem(Mid + 1)) = (<)
+            else
+                Mid = Hi
+            )
+        then
+            I = Mid
+        else
+            approx_binary_search_loop(Cmp, A, X, Mid + 1, Hi, I)
+        )
+    ).

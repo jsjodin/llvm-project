@@ -319,7 +319,9 @@ bool MerkGenerator::CompiledArrayCall(
   llvm::StringRef name{symbol.name};
   bool compiled{llvm::is_contained(
       {"generate", "generate_foldl", "generate_foldl2", "foldl", "foldl2",
-          "foldl3", "foldl4", "foldl5", "map", "to_list"},
+          "foldl3", "foldl4", "foldl5", "foldr", "foldr2", "foldr3", "foldr4",
+          "foldr5", "map", "to_list", "sort", "sort_fix_2014", "append",
+          "binary_search", "approx_binary_search"},
       name)};
   if (compiled && !mmcUniqueness_) {
     return false;

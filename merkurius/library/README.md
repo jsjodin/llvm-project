@@ -68,8 +68,12 @@ errors' messages; `from_int`, which keeps an int's low 32 bits as mmc's
 does (design document, "Where mmc and the manual disagree"); the Unicode
 13 classes; and `hash`, which is Thomas Wang's 64-bit integer hash of the
 code point.
-`array.m` implements `generate`, `generate_foldl`, `generate_foldl2` and
-the foldl family, `foldl` to `foldl5`, in Mercury, with mmc's messages.
+`array.m` implements `generate`, `generate_foldl`, `generate_foldl2`, the
+foldl and foldr families, `foldl` to `foldl5` and `foldr` to `foldr5`,
+`map`, `to_list`, `sort`, a bottom-up merge sort, `append`, and
+`binary_search` and `approx_binary_search`, whose middle is mmc's, so that
+among duplicates they find the copy that mmc's do, in Mercury, with mmc's
+messages.
 Code generation builds in the predicates that make, read and update an
 array, and reports the others as not yet implemented where they are
 called. `unsafe_noinit`, a Merkurius extension, makes an array whose
@@ -132,7 +136,9 @@ take it `in`. `make-sound-array.py` makes a sound stub from `array.m`, in
 `lib/merkurius/sound`, with the insts the manual's comments give
 (`uniq_array(I) == unique`), and with each mode that takes arrays `in`
 preceded by copies that take them `array_ui`, so that reading a unique
-array keeps it unique. merkc searches `sound` before the library's own
+array keeps it unique, and each mode that takes one only `array_ui`, as
+`binary_search`'s, followed by a copy that takes it `in`, since reading a
+shared array is safe, and mmc's `in` takes it. merkc searches `sound` before the library's own
 directory unless `-fmmc-uniqueness` is given. The stub keeps `array.m`'s
 implementation, whose own predicates get the copies too. Edit `array.m`,
 never the generated stub.
