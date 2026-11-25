@@ -430,9 +430,16 @@ llvm::LogicalResult ClosureOp::verifySymbolUses(
   }
   mlir::FunctionType type{proc.getFunctionType()};
   mlir::Type word{WordType::get(getContext())};
-  if (type.getNumInputs() == 0 ||
-      !mlir::isa<ClosureType>(type.getInput(0)) ||
-      llvm::count(type.getInputs(), word) + 1 != type.getNumInputs() ||
+  llvm::ArrayRef<mlir::Type> inputs{type.getInputs()};
+  // A nondet entry, once outlining has rewritten it, takes the continuation
+  // and environment of its solutions last, and returns nothing.
+  if (inputs.size() >= 3 && type.getNumResults() == 0 &&
+      mlir::isa<ContType>(inputs[inputs.size() - 2]) &&
+      mlir::isa<EnvType>(inputs.back())) {
+    inputs = inputs.drop_back(2);
+  }
+  if (inputs.empty() || !mlir::isa<ClosureType>(inputs.front()) ||
+      llvm::count(inputs, word) + 1 != inputs.size() ||
       llvm::count(type.getResults(), word) != type.getNumResults()) {
     return emitOpError("names ") << getEntryAttr()
                                  << ", which does not take a closure and words";
