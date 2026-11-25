@@ -9015,7 +9015,26 @@ tested shows.
    with itself by the rewrite, which takes what a bundle lists to be a
    base (`CodeGen/gc-interior-pointer.m`). The oracle's collection run
    is at -O0, which found them only in the library's code, built at -O2.
-   Still to do: distribution.
+
+   *Distribution, begun (2026-11-25):* `extensions/distribution/`. A
+   test's `% NODES:` line names its roles, each a node: the program is
+   run once for each, over loopback, by `utils/conformance/nodes.py`
+   (`%nodes` in lit), which passes each listening node's address to the
+   later ones and prints each node's output prefixed with its role, so
+   the output does not depend on how the nodes interleave. The oracle is
+   a translation into distributed Erlang, which the design follows, run
+   by the same driver with an EPMD of its own on a free port, so no
+   daemon of the machine's is needed. Run tests: requests with reply
+   handles, values of many kinds echoed unchanged, pipelined replies in
+   order and a reply to a third mailbox (`run-remote-requests.m`);
+   monitors across nodes, normal, killed, noproc, demonitor, and
+   noconnection when the server quits, also for a monitor made after
+   (`run-remote-monitors.m`); request, its timeout, send_request and
+   down(noconnection) (`run-remote-calls.m`). Remote spawn by a kind's
+   name is an nyi- test with its translation (`nyi-remote-spawn.m`).
+   What only merkc has, as typed lookup's errors, the cookie and the
+   fence, stays in `CodeGen/process-remote.m` and
+   `process-remote-monitor.m`.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.

@@ -52,6 +52,12 @@ end of the header. Other header lines are the author's:
                                   Inputs/translation.erl, an escript, for
                                   processes, whose first line escript
                                   skips
+  % NODES: server client          the roles of a distribution test, each
+                                  a node: the program, and its Erlang
+                                  translation, are run once for each, by
+                                  utils/conformance/nodes.py, which
+                                  prints each node's output prefixed with
+                                  its role
   % ORACLE: none                  expectations written by hand, which the
                                   script leaves as they are, for a test of an
                                   extension that has no translation, as an
@@ -142,6 +148,7 @@ class Test:
         self.known_bug = None
         self.mmc_program = None
         self.no_oracle = False
+        self.nodes = []
         for line in self.authored:
             m = re.match(r"% MODULES:(.*)", line)
             if m:
@@ -166,6 +173,9 @@ class Test:
                 self.mmc_program = m.group(1)
             if re.match(r"% ORACLE:\s*none\s*$", line):
                 self.no_oracle = True
+            m = re.match(r"% NODES:(.*)", line)
+            if m:
+                self.nodes += m.group(1).split()
         if not any(l.startswith(("% MANUAL:", "% DESIGN:"))
                    for l in self.authored):
             raise TestError("no `% MANUAL:' or `% DESIGN:' line")
@@ -174,6 +184,11 @@ class Test:
                             "KIND one of " + ", ".join(DIFFERS_KINDS))
         if self.mmc_program and self.kind not in ("run", "nyi"):
             raise TestError("only a run- or nyi- test has a TRANSLATION")
+        if self.nodes and (self.kind not in ("run", "nyi") or
+                           not self.mmc_program or
+                           not self.mmc_program.endswith(".erl")):
+            raise TestError("only a run- or nyi- test with an Erlang "
+                            "TRANSLATION has NODES")
         if self.known_bug and self.kind not in ("run", "reject"):
             raise TestError("only a run- or reject- test has a known bug; "
                             "a %s- test says what merkc does" % self.kind)
@@ -231,6 +246,9 @@ def mmc_run(test, mmc):
         ".erl": ["escript"],
     }
     extension = os.path.splitext(test.mmc_program or "")[1]
+    if test.nodes:
+        program = os.path.join(os.path.dirname(test.path), test.mmc_program)
+        return run_nodes(["--erlang", program], test.nodes)
     if extension in interpreters:
         program = os.path.join(os.path.dirname(test.path), test.mmc_program)
         status, out, _ = run(interpreters[extension] +
@@ -245,6 +263,19 @@ def mmc_run(test, mmc):
             raise TestError("mmc cannot compile it:\n" + out + err)
         status, out, _ = run(["./" + module], tmp, merge=True)
         return status, out
+
+
+NODES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nodes.py")
+
+
+def run_nodes(arguments, roles):
+    """The output of a distribution test's nodes, as nodes.py prints it,
+    and its exit status."""
+    status, out, err = run([sys.executable, NODES] + arguments + roles, None,
+                           timeout=300)
+    if status != 0:
+        raise TestError("nodes.py failed:\n" + out + err)
+    return status, out
 
 
 def mmc_errors(test, mmc):
@@ -345,7 +376,11 @@ def merkc_build(test, merkc, level, directory, sequential=False):
 
 
 def run_program(test, merkc, exe, directory):
-    """Runs a built program; an OpenMP test's on four threads."""
+    """Runs a built program; an OpenMP test's on four threads, and a
+    distribution test's nodes."""
+    if test.nodes:
+        status, out = run_nodes([exe], test.nodes)
+        return status, out, ""
     env = None
     if test.openmp():
         env = dict(os.environ, OMP_NUM_THREADS="4",
@@ -411,6 +446,17 @@ def run_lines(test, status):
             "% RUN: " + expect + "%t0s 2>&1 | " + FILECHECK_OUTPUT,
             "% RUN: merkc -O2 " + sequential + " -o %t2s",
             "% RUN: " + expect + "%t2s 2>&1 | " + FILECHECK_OUTPUT,
+        ]
+    if test.nodes:
+        # The driver prints the nodes' exit statuses, and exits with 0.
+        roles = " ".join(test.nodes)
+        return [
+            "% RUN: merkc -O0 " + arguments + " -o %t0",
+            "% RUN: %nodes %t0 " + roles + " | " + FILECHECK_OUTPUT,
+            "% RUN: env MERK_GC_EVERY_ALLOC=1 %nodes %t0 " + roles + " | " +
+            FILECHECK_OUTPUT,
+            "% RUN: merkc -O2 " + arguments + " -o %t2",
+            "% RUN: %nodes %t2 " + roles + " | " + FILECHECK_OUTPUT,
         ]
     return [
         "% RUN: merkc -O0 " + arguments + " -o %t0",

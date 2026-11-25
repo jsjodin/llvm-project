@@ -18,6 +18,8 @@ mercury_string(T) when is_float(T) ->
     io_lib:format("~w", [T]);
 mercury_string(T) when is_atom(T) ->
     atom_to_list(T);
+mercury_string(<<>>) ->
+    "\"\"";
 mercury_string(T) when is_binary(T) ->
     io_lib:format("~p", [binary_to_list(T)]);
 mercury_string(L) when is_list(L) ->

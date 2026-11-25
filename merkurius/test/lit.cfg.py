@@ -186,6 +186,20 @@ config.substitutions.append(
     )
 )
 
+# The driver that runs a distribution test's nodes against each other
+# (utils/conformance/nodes.py).
+config.substitutions.append(
+    (
+        "%nodes",
+        "%s -I %s"
+        % (
+            config.python_executable,
+            os.path.join(config.merkurius_src_root, "utils", "conformance",
+                         "nodes.py"),
+        ),
+    )
+)
+
 # The harness that kills nodes (utils/faults/kill-nodes.py).
 config.substitutions.append(
     (
