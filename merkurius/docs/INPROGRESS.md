@@ -8875,8 +8875,24 @@ tested shows.
    closures of `unify` and the comparisons lacked their type_info; and a
    declaration qualified by another module's name was accepted.
    provenance.cpp's misses are Flang's search paths, compiler insertions
-   and colours, which merkc does not use. Still to measure: the codegen
-   gaps a host program can reach, at the next coverage run.
+   and colours, which merkc does not use.
+
+   *Coverage run 2 and codegen gaps, tests written (2026-11-24):* the
+   second run measured 89.7% of lines, 91.6% of functions and 82.8% of
+   branches. Most uncovered codegen lines are NotYet reports and
+   defensive returns; of the working code a host program can reach, new
+   tests cover arrays in polymorphic code (fill, resize and the flat
+   record elements), the OpenMP clauses that are not yet lowered and the
+   `/\` reduction, open-term equality of closed fields, compare/3 of an
+   open type, from_open without a copy, deconstructions of bound open
+   terms, and a flat record in a nondeterministic environment. One bug
+   was found and fixed, with its tests: a comparison predicate of any
+   determinism was accepted, committed to its first solution, and a
+   `failure` one crashed. Left uncovered: `GenerateAggregate`, which only
+   the library's build runs; the device rings in `mailbox.cpp` and
+   `node.cpp`, which the GPU tests run; `frame-info.cpp`'s CFI opcodes and
+   pointer encodings that the toolchain does not emit; and
+   `Lowerer::ArrayWords`, which nothing calls.
 
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
