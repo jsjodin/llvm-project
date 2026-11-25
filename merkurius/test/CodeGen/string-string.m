@@ -1,5 +1,9 @@
 % string.string writes a value as io.write does, into a string: each line
-% is a value written by both. The output is mmc's for the same program.
+% is a value written by both. The output is mmc's for the same program,
+% but for the last three lines: mmc's string.string quotes a 64-bit integer,
+% '0u64', which then reads back as an atom, where io.write and merkc do
+% not (the design document's register, "string.string of a 64-bit
+% integer").
 %
 % RUN: merkc -O0 %s -o %t0 && %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t2 && %t2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
@@ -32,6 +36,9 @@
 % OUTPUT-NEXT:'<<function>>' | '<<function>>'
 % OUTPUT-NEXT:{{\[\[}}1], [2, 3]] | {{\[\[}}1], [2, 3]]
 % OUTPUT-NEXT:"h�" | "h�"
+% OUTPUT-NEXT:0u64 | 0u64
+% OUTPUT-NEXT:-5i64 | -5i64
+% OUTPUT-NEXT:[3u64] | [3u64]
 
 :- module string_string.
 :- interface.
@@ -52,4 +59,5 @@ main(!IO) :-
     w(f((1 + 2) : op, '-'(3) : op), !IO), w('a b', !IO), w([] : op, !IO), w(x("y", 'z'), !IO),
     w(array([1, 2]), !IO), w(-1i8, !IO), w(7u, !IO), w(["é", "日本"], !IO),
     w((func(X) = int.(X + 1)) : (func(int) = int), !IO), w([[1], [2, 3]], !IO),
-    w(string.left("héllo", 2) : string, !IO).
+    w(string.left("héllo", 2) : string, !IO),
+    w(0u64, !IO), w(-5i64, !IO), w([3u64], !IO).
