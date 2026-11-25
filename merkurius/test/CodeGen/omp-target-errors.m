@@ -4,7 +4,7 @@
 % and its type (design document, "Target regions"). And what they cannot
 % do yet: map other values that are not scalars, arrays of them or terms
 % whose cells hold only scalars, give terms, or take clauses; and the other
-% directives.
+% directives. A region's goal must be det, since a region cannot fail.
 %
 % RUN: not merkc -fc1 -fopenmp -emit-merk %s 2>&1 | FileCheck %s --implicit-check-not=error:
 
@@ -81,6 +81,18 @@ apply(F, X, Y) :-
     Y = F(X).
 % CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: F has type (func(int) = int), which cannot be mapped to a device
 
+:- pred positive(int::in, int::out) is semidet.
+positive(X, Y) :-
+    %$omp target
+    ( X > 0, Y = X ).
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: the goal of a target directive must be det, but it is semidet
+
+:- pred halve(int::in, int::out) is semidet.
+halve(X, Y) :-
+    %$omp target teams
+    ( X mod 2 = 0, Y = X / 2 ).
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: the goal of a target teams directive must be det, but it is semidet
+
 :- pred next(int::in, int::out) is det.
 next(X, Y) :-
     %$omp target map(tofrom: X)
@@ -103,6 +115,7 @@ main(!IO) :-
     total([1, 2], _),
     root(node(leaf, 1, leaf), _),
     apply(int.plus(1), 1, _),
+    ( if positive(1, _), halve(2, _) then true else true ),
     next(N, M),
     twice(M, K),
     io.write_int(K, !IO).

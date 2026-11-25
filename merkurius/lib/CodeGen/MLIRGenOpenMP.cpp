@@ -1998,6 +1998,17 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
     NotYet(at, "target regions in target regions");
     return;
   }
+  // The region gives its outputs, and has no way to fail (design document,
+  // "Target regions": the goal satisfies the rules for a parallel loop).
+  if (auto it{body.goals.find(goal.goals.front())}; it != body.goals.end() &&
+      it->second != parser::Determinism::Det &&
+      it->second != parser::Determinism::Erroneous) {
+    Error(at, "%s"_err_en_US,
+        "the goal of a " + std::string{parser::EnumToString(directive.id)} +
+            " directive must be det, but it is " +
+            semantics::DeterminismName(it->second));
+    return;
+  }
   std::optional<mlir::Value> device{IntegerClause(queue->front(),
       llvm::omp::OMPC_device, "device number", body, at, Location(goal.tokens))};
   if (!device) {
