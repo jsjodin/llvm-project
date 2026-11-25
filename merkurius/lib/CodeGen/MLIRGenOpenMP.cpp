@@ -128,6 +128,61 @@ bool MerkGenerator::ConstantWord(mlir::Type type) {
   return false;
 }
 
+// Whether no value of the type can ever be mapped to a device, which holds
+// only flat values (design document, "Target regions"): a string, a
+// closure, a term of a recursive type, such as a list, and anything that
+// holds one, as an array of strings. Other types, such as tuples, may be
+// mapped later.
+bool MerkGenerator::NeverMappable(
+    mlir::Type type, llvm::SmallVectorImpl<llvm::StringRef> &around) {
+  if (mlir::isa<merk::StringType, merk::ClosureType>(type)) {
+    return true;
+  }
+  if (auto array{mlir::dyn_cast<merk::ArrayType>(type)}) {
+    return NeverMappable(array.getElement(), around);
+  }
+  auto term{mlir::dyn_cast<merk::TermType>(type)};
+  if (!term) {
+    return false;
+  }
+  if (llvm::is_contained(around, term.getName())) {
+    return true;
+  }
+  for (auto def : module_.getOps<merk::TypeDefOp>()) {
+    if (def.getName() != term.getName()) {
+      continue;
+    }
+    around.push_back(term.getName());
+    bool never{llvm::any_of(def.getConstructors(), [&](mlir::Attribute a) {
+      return llvm::any_of(mlir::cast<merk::ConstructorAttr>(a).getFields(),
+          [&](mlir::Type field) { return NeverMappable(field, around); });
+    })};
+    around.pop_back();
+    return never;
+  }
+  return false;
+}
+
+// An unmappable value's error, or the not-yet-implemented one; `var` is the
+// variable whose value it is.
+void MerkGenerator::Unmappable(parser::CharBlock at, mlir::Type type,
+    std::optional<BodyVar> var, const ProcedureBody &body) {
+  using namespace parser::literals;
+  if (!var) {
+    NotYet(at, "values that are not scalars in target regions");
+    return;
+  }
+  std::string typeName{semantics::TypeToString(*body.vars[*var].type)};
+  llvm::SmallVector<llvm::StringRef> around;
+  if (NeverMappable(type, around)) {
+    Error(at, "%s"_err_en_US,
+        body.vars[*var].name + " has type " + typeName +
+            ", which cannot be mapped to a device");
+    return;
+  }
+  NotYet(at, "values of type " + typeName + " in target regions");
+}
+
 // An array of flat records, which holds them inline (runtime/array.h), so
 // that it is mapped by its words as an array of numbers is.
 bool MerkGenerator::RecordArray(mlir::Type type) {
@@ -2537,12 +2592,8 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   }
   for (mlir::Value input : inputs) {
     if (!FindUpdatedSlot(slots, input) && !Mappable(input.getType())) {
-      std::optional<BodyVar> var{VarWithValue(before, goal.nonlocals, input)};
-      NotYet(at,
-          var ? "values of type " +
-                  semantics::TypeToString(*body.vars[*var].type) +
-                  " in target regions"
-              : std::string{"values that are not scalars in target regions"});
+      Unmappable(at, input.getType(),
+          VarWithValue(before, goal.nonlocals, input), body);
       values_ = before;
       return;
     }
@@ -2568,9 +2619,7 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     }
     if (!Givable(value.getType()) && !ArrayMessage(value.getType()) &&
         !RecordArray(value.getType())) {
-      NotYet(at,
-          "values of type " + semantics::TypeToString(*body.vars[var].type) +
-              " in target regions");
+      Unmappable(at, value.getType(), var, body);
       values_ = before;
       return;
     }

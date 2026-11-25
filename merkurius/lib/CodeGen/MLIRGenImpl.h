@@ -916,6 +916,10 @@ private:
   // Whether a value of the type can cross into a target region.
   bool Mappable(mlir::Type);
   bool ConstantWord(mlir::Type);
+  bool NeverMappable(
+      mlir::Type, llvm::SmallVectorImpl<llvm::StringRef> &around);
+  void Unmappable(parser::CharBlock at, mlir::Type, std::optional<BodyVar> var,
+      const ProcedureBody &);
   bool WordMessage(mlir::Type);
   // Whether a message of the type is an array of one-word elements.
   bool ArrayMessage(mlir::Type);

@@ -1,7 +1,10 @@
-% What target regions cannot do yet: map values that are not scalars,
-% arrays of them or terms whose cells hold only scalars, give terms, make
-% or fill arrays, which the device has no runtime for, or take clauses;
-% and the other directives.
+% What target regions cannot do: map a value that can never be flat on a
+% device, a string, a closure, a term of a recursive type such as a list,
+% or anything that holds one, which is an error that names the variable
+% and its type (design document, "Target regions"). And what they cannot
+% do yet: map other values that are not scalars, arrays of them or terms
+% whose cells hold only scalars, give terms, or take clauses; and the other
+% directives.
 %
 % RUN: not merkc -fc1 -fopenmp -emit-merk %s 2>&1 | FileCheck %s --implicit-check-not=error:
 
@@ -10,19 +13,19 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module array, int.
+:- import_module array, int, list.
 
 :- pred same(string::in, string::out) is det.
 same(S, T) :-
     %$omp target
     T = S.
-% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for values of type string in target regions
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: T has type string, which cannot be mapped to a device
 
 :- pred first(array(string)::array_ui, string::out) is det.
 first(A, S) :-
     %$omp target
     S = A ^ elem(0).
-% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for values of type array.array(string) in target regions
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: A has type array.array(string), which cannot be mapped to a device
 
 :- type shape
     --->    circle(float, float)
@@ -45,7 +48,7 @@ width(Shape, W) :-
 number(Named, N) :-
     %$omp target
     Named = named(_, N).
-% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for values of type omp_target_errors.named in target regions
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: Named has type omp_target_errors.named, which cannot be mapped to a device
 
 :- type pair
     --->    pair(int, int).
@@ -55,6 +58,28 @@ double(X, P) :-
     %$omp target
     P = pair(X, X).
 % CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for values of type omp_target_errors.pair in target regions
+
+:- pred total(list(int)::in, int::out) is det.
+total(Xs, S) :-
+    %$omp target
+    S = list.foldl(int.plus, Xs, 0).
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: Xs has type list.list(int), which cannot be mapped to a device
+
+:- type tree
+    --->    leaf
+    ;       node(tree, int, tree).
+
+:- pred root(tree::in, int::out) is det.
+root(T, R) :-
+    %$omp target
+    ( T = node(_, R, _) ; T = leaf, R = 0 ).
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: T has type omp_target_errors.tree, which cannot be mapped to a device
+
+:- pred apply(func(int) = int::in, int::in, int::out) is det.
+apply(F, X, Y) :-
+    %$omp target
+    Y = F(X).
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: F has type (func(int) = int), which cannot be mapped to a device
 
 :- pred next(int::in, int::out) is det.
 next(X, Y) :-
@@ -75,6 +100,9 @@ main(!IO) :-
     width(circle(1.0, 2.0), _),
     number(named("a", 1), _),
     double(1, _),
+    total([1, 2], _),
+    root(node(leaf, 1, leaf), _),
+    apply(int.plus(1), 1, _),
     next(N, M),
     twice(M, K),
     io.write_int(K, !IO).
