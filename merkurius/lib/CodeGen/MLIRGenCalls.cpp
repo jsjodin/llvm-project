@@ -733,10 +733,29 @@ merk::ProcOp MerkGenerator::BuiltinEntry(const Body &goal,
   builder_.setInsertionPointToStart(block);
   Values saved;
   saved.swap(values_);
+  llvm::DenseMap<unsigned, mlir::Value> savedInfos;
+  savedInfos.swap(typeInfos_);
   std::optional<llvm::SmallVector<BodyVar>> savedWords{std::move(wordOutputs_)};
   wordOutputs_.reset();
   mlir::Value closure{block->getArgument(0)};
+  // A polymorphic procedure's closure captures a type_info for each of its
+  // type variables first, as its calls pass them, then the curried arguments.
   unsigned captured{0};
+  bool constrained{false};
+  if (const semantics::Signature *signature{
+          types_.SignatureOf(*callee.symbol)}) {
+    constrained = !signature->constraints.empty();
+    for (unsigned var{0}; var < signature->typeVars - signature->existentials;
+        ++var) {
+      typeInfos_[var] =
+          Coerce(merk::ClosureWordOp::create(builder_, loc,
+                     merk::WordType::get(&context_), closure, captured++),
+              merk::TypeInfoType::get(&context_), loc);
+    }
+  }
+  if (constrained) {
+    NotYet(at, "closures of built-in procedures with class constraints");
+  }
   unsigned input{1};
   bool represented{true};
   for (auto [i, mode, type] : llvm::enumerate(callee.modes, types)) {
@@ -755,7 +774,7 @@ merk::ProcOp MerkGenerator::BuiltinEntry(const Body &goal,
       values_[vars[i]] = Coerce(word, value->type, loc);
     }
   }
-  bool handled{represented && Builtin(call, callee, vars, own)};
+  bool handled{!constrained && represented && Builtin(call, callee, vars, own)};
   if (handled && !failed_ && !Terminated()) {
     llvm::SmallVector<mlir::Value> results;
     for (auto [i, mode, type] : llvm::enumerate(callee.modes, types)) {
@@ -776,6 +795,7 @@ merk::ProcOp MerkGenerator::BuiltinEntry(const Body &goal,
     }
   }
   values_.swap(saved);
+  typeInfos_.swap(savedInfos);
   wordOutputs_ = std::move(savedWords);
   if (!handled || failed_) {
     failed = failed_;
