@@ -1,0 +1,19 @@
+The program of omp-target-word-terms.m, compiled by the driver for the
+machine's GPU and run there: each one-word term is mapped as its word, by
+copy into the region and back from it.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-word-terms.m -o %t.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.O2 2> %t.O2.info \
+RUN:   | FileCheck %S/omp-target-word-terms.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.O2.info
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-word-terms.m:{{[0-9]+}}:5 with 8 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
+CHECK-NEXT: info: to(K)[8]
+CHECK-NEXT: info: to(M)[8]
+CHECK-NEXT: info: to(T)[8]
+CHECK-NEXT: info: from(K1)[8]
+CHECK-NEXT: info: from(M1)[8]
+CHECK-NEXT: info: from(T1)[8]
+CHECK-NEXT: info: from(N)[8]
+CHECK-NOT: Entering OpenMP kernel

@@ -915,6 +915,7 @@ private:
   bool RecordArray(mlir::Type);
   // Whether a value of the type can cross into a target region.
   bool Mappable(mlir::Type);
+  bool ConstantWord(mlir::Type);
   bool WordMessage(mlir::Type);
   // Whether a message of the type is an array of one-word elements.
   bool ArrayMessage(mlir::Type);

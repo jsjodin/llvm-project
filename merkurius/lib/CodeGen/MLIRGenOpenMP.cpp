@@ -96,7 +96,36 @@ std::optional<unsigned> MerkGenerator::FlatCell(mlir::Type type) {
 
 bool MerkGenerator::Mappable(mlir::Type type) {
   return Givable(type) || ArrayMessage(type) || RecordArray(type) ||
-      Passed(type) || FlatCell(type);
+      Passed(type) || FlatCell(type) || ConstantWord(type);
+}
+
+// A term that is one word with no cell, which crosses a target region's
+// boundary as its word, an i64, either way: a constant of a type of
+// constants only, an enum, or a value of a type of one constructor of one
+// argument, which is its argument (design document, "Target regions"), a
+// scalar or another such term.
+bool MerkGenerator::ConstantWord(mlir::Type type) {
+  auto term{mlir::dyn_cast<merk::TermType>(type)};
+  if (!term) {
+    return false;
+  }
+  if (WordMessage(type)) {
+    return true;
+  }
+  for (auto def : module_.getOps<merk::TypeDefOp>()) {
+    if (def.getName() != term.getName()) {
+      continue;
+    }
+    if (def.getConstructors().size() != 1) {
+      return false;
+    }
+    auto constructor{
+        mlir::cast<merk::ConstructorAttr>(def.getConstructors()[0])};
+    llvm::ArrayRef<mlir::Type> fields{constructor.getFields()};
+    return constructor.getHidden() == 0 && fields.size() == 1 &&
+        (Scalar(fields[0]) || ConstantWord(fields[0]));
+  }
+  return false;
 }
 
 // An array of flat records, which holds them inline (runtime/array.h), so
@@ -2533,8 +2562,7 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   llvm::DenseMap<BodyVar, mlir::Type> constants;
   for (BodyVar var : outputs) {
     mlir::Value value{values_.lookup(var)};
-    if (mlir::isa<merk::TermType>(value.getType()) &&
-        WordMessage(value.getType())) {
+    if (ConstantWord(value.getType())) {
       constants[var] = value.getType();
       continue;
     }
@@ -2598,10 +2626,13 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
       maps.push_back(MapCell(input, *words, name, loc));
       continue;
     }
-    mlir::Value slot{Slot(input.getType(), loc)};
-    mlir::LLVM::StoreOp::create(builder_, loc, input, slot);
+    mlir::Value word{ConstantWord(input.getType())
+            ? Coerce(input, builder_.getI64Type(), loc)
+            : input};
+    mlir::Value slot{Slot(word.getType(), loc)};
+    mlir::LLVM::StoreOp::create(builder_, loc, word, slot);
     // Named after the variable whose value it is, if it is one's.
-    maps.push_back(MapSlot(slot, input.getType(), mlir::omp::ClauseMapFlags::to,
+    maps.push_back(MapSlot(slot, word.getType(), mlir::omp::ClauseMapFlags::to,
         mlir::omp::VariableCaptureKind::ByCopy, name, loc));
   }
   llvm::SmallVector<mlir::Value> outputSlots;
@@ -2653,6 +2684,10 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
             ? mlir::UnrealizedConversionCastOp::create(
                   builder_, loc, input.getType(), argument)
                   .getResult(0)
+            : ConstantWord(input.getType())
+            ? Coerce(mlir::LLVM::LoadOp::create(
+                         builder_, loc, builder_.getI64Type(), argument),
+                  input.getType(), loc)
             : mlir::Value{mlir::LLVM::LoadOp::create(
                   builder_, loc, input.getType(), argument)}};
     mlir::replaceAllUsesInRegionWith(input, value, targetOp.getRegion());
