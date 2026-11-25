@@ -8049,6 +8049,13 @@ Sketched for a later stage:
      takes `noproc` as a worker's down too, as a fault can hit a
      restarted worker before its supervisor monitors it. 96 runs, 24 at a
      time, pass.
+   - *Fixed 2026-11-24,* as `Benchmarks/mandel-recover.test` failed once
+     under a full lit run: its lost place ended `noproc`, not `injected`.
+     The fault hit place 1 between its spawn and its monitor, as a 5 ms
+     pause there showed in every replay of a fault at time 0. The program
+     treats the down as a loss either way, so the test now takes both.
+     `spawn_monitor` would close the window; it stays deferred while
+     taking `noproc` as a down is enough.
 4. **D1 at host places, then GPU places:** the stop flag at polls, a
    kernel's processes ended together, `kernel_ended`. Built 2026-11-22,
    and passing at host places and on the gfx1030

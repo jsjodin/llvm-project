@@ -22,9 +22,11 @@ NONE-NEXT: Places lost: 0
 NONE-NEXT: Tiles given back: 0
 FREED: Merkurius runtime: 0 messages are neither read nor freed
 
-A place that is lost with no restarts left, at the first fault.
+A place that is lost with no restarts left, at the first fault. The fault
+may hit the place between its spawn and its monitor, which the monitor
+reports as noproc, as Erlang's does.
 RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=1000 MANDEL_PLACES=3 MANDEL_RESTARTS=0 MERK_FAULTS="seed=4 mtbf=2 fail=order count=1" not %t0 host 2>/dev/null | FileCheck %s --check-prefix=LOST
-LOST: Place {{[0-2]}} ended, injected, with no restarts left.
+LOST: Place {{[0-2]}} ended, {{injected|noproc}}, with no restarts left.
 
 RUN: %libomp-env MANDEL_TILE=12 not %t0 host | FileCheck %s --check-prefix=USAGE
 RUN: %libomp-env MANDEL_RESTARTS=-1 not %t0 host | FileCheck %s --check-prefix=USAGE
