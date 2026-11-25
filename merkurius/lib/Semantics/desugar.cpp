@@ -168,6 +168,10 @@ public:
     return true;
   }
   void Post(const parser::Lambda &) { --lambdas_; }
+  // A directive's clauses name variables of the goal, as private(X) or
+  // reduction((+) : S), but are no occurrences of them: a variable that
+  // only they name around a loop is not visible there.
+  bool Pre(const parser::OmpDirective &) { return false; }
   void Post(const parser::Variable &var) {
     if (var.name == "_") {
       return;
