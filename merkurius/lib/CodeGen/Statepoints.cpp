@@ -1239,6 +1239,18 @@ struct StatepointRoots {
 // Type index of a root that a collection only updates, -1 being one it ignores.
 static constexpr std::int64_t kForwardOnly{-2};
 
+// Whether code after a statepoint uses a root's relocation, so that its slot
+// is read after a collection in the call.
+static bool IsUsedAfter(
+    llvm::GCStatepointInst *statepoint, const llvm::Value *root) {
+  for (const llvm::GCRelocateInst *relocate : statepoint->getGCRelocates()) {
+    if (relocate->getDerivedPtr() == root && !relocate->use_empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static std::int64_t RootKindOf(llvm::Module &module, llvm::Constant *type) {
   auto *table{llvm::cast<llvm::ConstantStruct>(
       module.getNamedGlobal(kRootTable)->getInitializer())};
@@ -1303,8 +1315,9 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
         });
   }
   // The rewrite makes roots of the call's own arguments too. One the bundle
-  // does not list is dead after the call, and the callee looks after it. It is
-  // not put in the bundle, which inlining would then keep alive in the callee.
+  // does not list is dead after the call, and the callee looks after it,
+  // unless code after the call uses it (IsUsedAfter). It is not put in the
+  // bundle, which inlining would then keep alive in the callee.
   llvm::SmallPtrSet<const llvm::Value *, 8> arguments;
   for (const llvm::Use &argument : statepoint->actual_args()) {
     arguments.insert(CellOf(argument.get()));
@@ -1350,6 +1363,15 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
       llvm::Constant *type{it != types.end() ? it->second : nullptr};
       if (!type) {
         type = FindType(root, known);
+      }
+      if (!type && !IsFromStaticData(root) &&
+          arguments.contains(CellOf(root)) && IsUsedAfter(statepoint, root)) {
+        // An argument that the bundle does not list, but that code after
+        // the call uses, as when LLVM replaces the call's result by the
+        // argument the callee returns (a `returned` parameter): the callee
+        // holds it as a typed root and moves it, and this follows.
+        type = llvm::ConstantInt::getSigned(
+            llvm::Type::getInt64Ty(function.getContext()), kForwardOnly);
       }
       if (!type && (IsFromStaticData(root) || arguments.contains(CellOf(root)))) {
         type = dead;
