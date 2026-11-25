@@ -411,7 +411,8 @@ std::optional<const TablingAttributes *> ConvertTablingAttributes(
   return state.arena.Make<TablingAttributes>(attributes);
 }
 
-// The attribute list of a foreign_export_enum: prefix("P") and uppercase.
+// The attribute list of a foreign_export_enum: prefix("P"), at most once,
+// and uppercase.
 bool ConvertExportEnumAttributes(const Term &term,
     std::optional<llvm::StringRef> &prefix, bool &uppercase,
     ConvertState &state) {
@@ -431,7 +432,8 @@ bool ConvertExportEnumAttributes(const Term &term,
       ok &= text.has_value();
       prefix = text.value_or(prefix.value_or(""));
     } else if (llvm::isa<NameTerm>(a) && FunctorName(a) == "uppercase") {
-      duplicate = uppercase;
+      // The manual allows at most one prefix, and says nothing of uppercase
+      // given twice, which mmc accepts.
       uppercase = true;
     } else {
       SayExpected(state, a, "'prefix(\"Prefix\")' or 'uppercase'");
