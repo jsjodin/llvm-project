@@ -31,6 +31,7 @@ end of the header. Other header lines are the author's:
   % DESIGN: <a section of the design document>
   % MODULES: Inputs/other.m ...   more modules of the program
   % MERKC-FLAGS: ...              more flags for merkc
+  % FLAGS-FOR-MMC: ...            more flags for mmc, as for --trace-flag
   % DIFFERS: <mmc-bug|manual|implementation>: <why>
   % KNOWN-BUG: <what merkc gets wrong, and where it is recorded>
 
@@ -109,6 +110,7 @@ class Test:
             raise TestError("no `:- module' declaration")
         self.modules = []
         self.flags = []
+        self.mmc_flags = []
         self.differs = None
         self.known_bug = None
         for line in self.authored:
@@ -118,6 +120,9 @@ class Test:
             m = re.match(r"% MERKC-FLAGS:(.*)", line)
             if m:
                 self.flags += m.group(1).split()
+            m = re.match(r"% FLAGS-FOR-MMC:(.*)", line)
+            if m:
+                self.mmc_flags += m.group(1).split()
             m = re.match(r"% DIFFERS: *([a-z-]+):", line)
             if m:
                 self.differs = m.group(1)
@@ -160,7 +165,8 @@ def mmc_run(test, mmc):
     they are written, and its exit status."""
     with tempfile.TemporaryDirectory() as tmp:
         test.copy_to(tmp)
-        status, out, err = run([mmc, "--make", test.module], tmp, timeout=600)
+        status, out, err = run([mmc] + test.mmc_flags + ["--make", test.module],
+                               tmp, timeout=600)
         if status != 0:
             raise TestError("mmc cannot compile it:\n" + out + err)
         status, out, _ = run(["./" + test.module], tmp, merge=True)
@@ -179,7 +185,8 @@ def mmc_error_texts(test, mmc):
         test.copy_to(tmp)
         # --make builds the interfaces of the modules it imports first.
         status, out, err = run(
-            [mmc, "--make", test.module + ".err"], tmp, timeout=600)
+            [mmc] + test.mmc_flags + ["--make", test.module + ".err"], tmp,
+            timeout=600)
         if status == 0:
             raise TestError("mmc accepts it")
         # mmc --make cuts what it writes short ("error log truncated");

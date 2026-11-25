@@ -8818,6 +8818,17 @@ tested shows.
    require an exported solver type's representation type or equality to be
    exported, nor a constraint store.
 
+   *Trace goals, tests written (2026-11-24):* no bugs. merkc agreed with
+   mmc on io in det, semidet, nondet and function code, compile-time
+   conditions with and without `--trace-flag`, the grade tests and trace
+   levels, run-time `env` conditions, calls whose outputs are unused, and
+   every error probed: duplicate parameters, bad conditions, bindings of
+   outside variables, an io state not given back unique, and a trace goal
+   that is not det or cc_multi. A `state` parameter waits for mutables
+   (nyi-). The oracle gained a `% FLAGS-FOR-MMC:` line, so that a test's
+   trace flags reach mmc too; a name starting `% MMC` would be one of the
+   oracle's own lines.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
