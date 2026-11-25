@@ -55,13 +55,22 @@ class Feature:
 
 
 class Context:
-    def __init__(self, name, manual, imports, code, summary):
+    def __init__(self, name, manual, imports, code, summary, flags=(),
+                 plain=None, io=False):
         self.name = name
         self.manual = manual
         self.imports = set(imports)
-        # Defines run(N) = String, from make and use.
+        # Defines run(N) = String, from make and use; or with io,
+        # run(N, String, !IO).
         self.code = code.strip("\n")
         self.summary = summary
+        # merkc's flags, for an extension of Merkurius's.
+        self.flags = list(flags)
+        # For an extension, which mmc does not have, the run of the
+        # translation that mmc runs instead: plain Mercury that prints the
+        # same, as the context must not change what the feature computes.
+        self.plain = plain.strip("\n") if plain else None
+        self.io = io
 
 
 FEATURES = [
@@ -573,6 +582,161 @@ run(N) = S :-
 ]
 
 
+EXTENSION_CONTEXTS = [
+    Context(
+        "do-loop", "Loops", ["int", "list", "string"],
+        """
+    % Values made in a loop's iterations and gathered by a fromto, and a
+    % value carried from one iteration to the next.
+:- func run(int) = string.
+
+run(N) = S :-
+    ( foreach(K, [N, N + 1]), fromto([], Ss0, Ss1, Ss) do
+        V = make(K),
+        Ss1 = [use(V) | Ss0]
+    ),
+    ( for(I, 1, 2), fromto(make(N), V0, V1, Last) do
+        ( if I > 0 then V1 = make(N + I * 10) else V1 = V0 )
+    ),
+    S = string.join_list(" | ", list.reverse(Ss)) ++ " | last " ++ use(Last).
+""",
+        "a do loop that makes, gathers and carries the values",
+        flags=["-fdo-loops"],
+        plain="""
+:- func run(int) = string.
+
+run(N) = string.join_list(" | ",
+    list.map((func(K) = use(make(K))), [N, N + 1])) ++ " | last " ++
+    use(make(N + 20)).
+"""),
+    Context(
+        "parallel-do", "Loops / Under a parallel directive",
+        ["int", "list", "string", "array"],
+        """
+    % Each iteration of a parallel loop, on one of four threads, makes a
+    % value and stores what use makes of it.
+:- pred fill(int::in, array(string)::array_di, array(string)::array_uo)
+    is det.
+
+fill(N, !A) :-
+    %$omp parallel do
+    ( for(I, 0, 3) do
+        V = make(N + I),
+        !A ^ unsafe_elem(I) := use(V)
+    ).
+
+:- func run(int) = string.
+
+run(N) = S :-
+    array.init(4, "", A0),
+    fill(N, A0, A),
+    S = string.join_list(" | ", array.to_list(A)).
+""",
+        "a parallel loop's iterations, which make and use the values",
+        flags=["-fdo-loops", "-fopenmp"],
+        plain="""
+:- func run(int) = string.
+
+run(N) = string.join_list(" | ",
+    list.map((func(I) = use(make(N + I))), 0 .. 3)).
+"""),
+    Context(
+        "host-process", "Processes and mailboxes",
+        ["int", "list", "string", "process"],
+        """
+    % Another process makes and uses the values, in its own heap, and
+    % sends the text back.
+:- pred worker(mailbox(string)::in, mailbox(int)::in, io::di, io::uo)
+    is det.
+
+worker(Replies, Self, !IO) :-
+    receive(Self, any, infinity, R, !IO),
+    (
+        R = message(K),
+        ( if K < 0 then
+            true
+        else
+            send(Replies, use(make(K)), !IO),
+            worker(Replies, Self, !IO)
+        )
+    ;
+        R = timeout
+    ).
+
+:- pred run(int::in, string::out, io::di, io::uo) is det.
+
+run(N, S, !IO) :-
+    new_mailbox(Replies, !IO),
+    spawn(worker(Replies), Worker, !IO),
+    send(Worker, N, !IO),
+    send(Worker, N + 1, !IO),
+    send(Worker, -1, !IO),
+    reply(Replies, S1, !IO),
+    reply(Replies, S2, !IO),
+    S = S1 ++ " | " ++ S2.
+
+:- pred reply(mailbox(string)::in, string::out, io::di, io::uo) is det.
+
+reply(Replies, S, !IO) :-
+    receive(Replies, any, infinity, R, !IO),
+    ( R = message(S) ; R = timeout, S = "timeout" ).
+""",
+        "another process, which makes and uses the values",
+        plain="""
+:- pred run(int::in, string::out, io::di, io::uo) is det.
+
+run(N, use(make(N)) ++ " | " ++ use(make(N + 1)), !IO).
+""", io=True),
+    Context(
+        "message", "Processes and mailboxes",
+        ["int", "list", "string", "process"],
+        """
+    % The values as messages: copied into another process's heap, and back.
+:- pred echo(int::in, mailbox(fdata)::in, mailbox(fdata)::in,
+    io::di, io::uo) is det.
+
+echo(Left, Back, Self, !IO) :-
+    ( if Left = 0 then
+        true
+    else
+        receive(Self, any, infinity, R, !IO),
+        (
+            R = message(V),
+            send(Back, V, !IO),
+            echo(Left - 1, Back, Self, !IO)
+        ;
+            R = timeout
+        )
+    ).
+
+:- pred run(int::in, string::out, io::di, io::uo) is det.
+
+run(N, S, !IO) :-
+    new_mailbox(Back, !IO),
+    spawn(echo(2, Back), Echo, !IO),
+    send(Echo, make(N), !IO),
+    send(Echo, make(N + 1), !IO),
+    back(Back, S1, !IO),
+    back(Back, S2, !IO),
+    S = S1 ++ " | " ++ S2.
+
+:- pred back(mailbox(fdata)::in, string::out, io::di, io::uo) is det.
+
+back(Back, S, !IO) :-
+    receive(Back, any, infinity, R, !IO),
+    ( R = message(V), S = use(V) ; R = timeout, S = "timeout" ).
+""",
+        "messages sent to another process and back",
+        plain="""
+:- pred run(int::in, string::out, io::di, io::uo) is det.
+
+run(N, use(make(N)) ++ " | " ++ use(make(N + 1)), !IO).
+""", io=True),
+]
+
+CONTEXTS += EXTENSION_CONTEXTS
+
+
 def mercury_name(*parts):
     return "_".join(p.replace("-", "_") for p in parts)
 
@@ -587,7 +751,9 @@ def test_text(feature, context):
     header = [
         "% MANUAL: " + feature.manual,
     ]
-    if context.manual != feature.manual:
+    if context.plain:
+        header.append("% DESIGN: " + context.manual)
+    elif context.manual != feature.manual:
         header.append("% MANUAL: " + context.manual)
     header += textwrap.wrap(
         "Interaction: %s, in %s." % (feature.summary, context.summary),
@@ -597,6 +763,12 @@ def test_text(feature, context):
         "% the generator rather than this file.",
     ]
     main_imports = {"io", "int", "list", "string"} | context.imports
+    if context.flags:
+        header.append("% MERKC-FLAGS: " + " ".join(context.flags))
+    translation = None
+    if context.plain:
+        translation = module + "_translation"
+        header.append("%% TRANSLATION: Inputs/%s.m" % translation)
     lib = None
     if context.name == "another-module":
         library = module + "_lib"
@@ -623,27 +795,49 @@ def test_text(feature, context):
         main_imports |= feature.imports
         body_feature = "\n".join([feature.interface, "",
                                   feature.implementation, ""])
-    lines = header + [
+    text = "\n".join(header + program(module, main_imports, body_feature,
+                                      context.code, context.io))
+    others = [lib] if lib else []
+    if translation:
+        # mmc has no process module: the translation needs none.
+        others.append((translation, "\n".join(
+            ["%% The translation of run-%s.m in %s for mmc: the same"
+             % (feature.name, context.name),
+             "% feature in plain Mercury, which must print the same."] +
+            program(translation, main_imports - {"process"}, body_feature,
+                    context.plain, context.io))))
+    return text, others
+
+
+def program(module, imports, feature, code, io):
+    """A test's module, from the feature's code and the context's."""
+    lines = [
         ":- module %s." % module,
         ":- interface.",
         ":- import_module io.",
         ":- pred main(io::di, io::uo) is det.",
         ":- implementation.",
-        imports_line(main_imports - {"io"}) if main_imports - {"io"} else "",
+        imports_line(imports - {"io"}) if imports - {"io"} else "",
         "",
     ]
-    if body_feature:
-        lines += [body_feature]
-    lines += [context.code, "",
+    if feature:
+        lines += [feature]
+    lines += [code, "",
               "main(!IO) :-",
               "    list.foldl(show, 1 .. 4, !IO).",
               "",
               ":- pred show(int::in, io::di, io::uo) is det.",
-              "",
-              "show(N, !IO) :-",
-              '    io.format("%d: %s\\n", [i(N), s(run(N))], !IO).',
               ""]
-    return "\n".join(lines), lib
+    if io:
+        lines += ["show(N, !IO) :-",
+                  "    run(N, S, !IO),",
+                  '    io.format("%d: %s\\n", [i(N), s(S)], !IO).',
+                  ""]
+    else:
+        lines += ["show(N, !IO) :-",
+                  '    io.format("%d: %s\\n", [i(N), s(run(N))], !IO).',
+                  ""]
+    return lines
 
 
 def main():
@@ -657,12 +851,12 @@ def main():
     for context in CONTEXTS:
         directory = os.path.join(args.out, context.name)
         for feature in FEATURES:
-            text, lib = test_text(feature, context)
+            text, others = test_text(feature, context)
             files = [(os.path.join(directory, "run-%s.m" % feature.name),
                       text)]
-            if lib:
+            for name, other in others:
                 files.append((os.path.join(directory, "Inputs",
-                                           lib[0] + ".m"), lib[1]))
+                                           name + ".m"), other))
             for path, content in files:
                 old = None
                 if os.path.exists(path):

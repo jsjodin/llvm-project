@@ -9053,13 +9053,20 @@ tested shows.
    code, an array in unique modes, and a try goal. Contexts: closures, a
    type class's methods called by their dictionary, polymorphic
    procedures and containers, a nondet goal, a value thrown and caught,
-   and another module. The 66 tests pass at -O0 and -O2, with and
-   without a collection at every allocation, and found no bug; the
-   generator's `--check` says whether the checked-in tests are what it
-   writes. Still to do: the extension contexts, a do loop, a parallel
-   region, a host process, a GPU process and a message's type, whose
-   oracle is the same program in a plain context, and open types as a
-   feature; then triples of the contexts that nest.
+   and another module. The generator's `--check` says whether the
+   checked-in tests are what it writes.
+
+   The extension contexts, a do loop with fromto accumulators, a parallel
+   loop on four threads, a host process that makes and uses the values,
+   and the values as messages to another process and back, have a
+   translation for mmc: the same feature in plain Mercury, which must
+   print the same, since a context does not change what the feature
+   computes. The 110 tests pass at -O0 and -O2, with and without a
+   collection at every allocation, the parallel ones also sequentially.
+   They found one bug: a closure of a nondet procedure in a parallel loop
+   did not compile (fixed 2026-11-25). Still to do: a GPU process, whose
+   features are those it allows (flat values, no closures), open types
+   as a feature, and triples of the contexts that nest.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.
 
