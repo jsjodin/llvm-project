@@ -33,7 +33,11 @@ end of the header. Other header lines are the author's:
   % FILES: Inputs/facts ...       data files the program's build reads, such
                                   as a fact table's, copied beside it for
                                   mmc but not compiled
-  % MERKC-FLAGS: ...              more flags for merkc
+  % MERKC-FLAGS: ...              more flags for merkc; with -fopenmp,
+                                  the program is linked with libomp and
+                                  run on four threads, and also built
+                                  without -fopenmp, and must print the
+                                  same both ways
   % FLAGS-FOR-MMC: ...            more flags for mmc, as for --trace-flag
   % DIFFERS: <mmc-bug|manual|implementation>: <why>
   % KNOWN-BUG: <what merkc gets wrong, and where it is recorded>
@@ -68,7 +72,7 @@ import sys
 import tempfile
 
 GENERATED = ("% RUN:", "% OUTPUT", "% ERRORS", "% NYI", "% MMC", "% STATUS",
-             "% XFAIL:")
+             "% XFAIL:", "% REQUIRES:")
 CLASSES = ("run", "reject", "nyi", "differs")
 DIFFERS_KINDS = ("mmc-bug", "manual", "implementation")
 FILECHECK_OUTPUT = (
@@ -79,13 +83,14 @@ class TestError(Exception):
     pass
 
 
-def run(command, cwd, timeout=120, merge=False):
+def run(command, cwd, timeout=120, merge=False, env=None):
     try:
         result = subprocess.run(
             command, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
-            timeout=timeout) if not merge else subprocess.run(
+            timeout=timeout, env=env) if not merge else subprocess.run(
             command, cwd=cwd, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
+            env=env)
     except subprocess.TimeoutExpired:
         raise TestError("timed out: " + " ".join(command))
     out = result.stdout.decode("utf-8", "replace")
@@ -167,6 +172,12 @@ class Test:
         if self.known_bug and self.kind not in ("run", "reject"):
             raise TestError("only a run- or reject- test has a known bug; "
                             "a %s- test says what merkc does" % self.kind)
+
+    def openmp(self):
+        """Whether merkc compiles the program with -fopenmp: then it is run
+        on four threads, and also built without -fopenmp, and prints the
+        same either way."""
+        return "-fopenmp" in self.flags
 
     def module_paths(self):
         here = os.path.dirname(self.path)
@@ -279,12 +290,49 @@ def merkc_arguments(test, lit):
             [here + "/" + m for m in test.modules])
 
 
-def merkc_build(test, merkc, level, directory):
-    exe = os.path.join(directory, "prog%d" % level)
-    status, out, err = run([merkc, "-O%d" % level] +
-                           merkc_arguments(test, False) + ["-o", exe],
+def libomp_dirs(merkc):
+    """The directories of libomp and libomptarget in merkc's build, as the
+    lit configuration finds them."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(merkc)))
+    lib = os.path.join(root, "lib")
+    candidates = [lib] + ([os.path.join(lib, d) for d in sorted(os.listdir(lib))
+                           if "-linux" in d] if os.path.isdir(lib) else [])
+    candidates.append(os.path.join(root, "runtimes", "runtimes-bins",
+                                   "openmp", "runtime", "src"))
+    dirs = []
+    for library in ("libomp.so", "libomptarget.so"):
+        found = [d for d in candidates
+                 if os.path.exists(os.path.join(d, library))]
+        if not found:
+            raise TestError("no %s in merkc's build" % library)
+        if found[0] not in dirs:
+            dirs.append(found[0])
+    return dirs
+
+
+def merkc_build(test, merkc, level, directory, sequential=False):
+    """Builds the program; an OpenMP test's with libomp, or, `sequential`,
+    without -fopenmp."""
+    exe = os.path.join(directory, "prog%d%s" % (level, "s" if sequential
+                                                 else ""))
+    arguments = merkc_arguments(test, False)
+    if test.openmp():
+        if sequential:
+            arguments = [a for a in arguments if a != "-fopenmp"]
+        else:
+            arguments += ["-L" + d for d in libomp_dirs(merkc)]
+    status, out, err = run([merkc, "-O%d" % level] + arguments + ["-o", exe],
                            directory, timeout=600)
     return status, out + err, exe
+
+
+def run_program(test, merkc, exe, directory):
+    """Runs a built program; an OpenMP test's on four threads."""
+    env = None
+    if test.openmp():
+        env = dict(os.environ, OMP_NUM_THREADS="4",
+                   LD_LIBRARY_PATH=":".join(libomp_dirs(merkc)))
+    return run([exe], directory, merge=True, env=env)
 
 
 def escape(line):
@@ -327,6 +375,25 @@ def output_lines(prefix, output):
 def run_lines(test, status):
     arguments = " ".join(merkc_arguments(test, True))
     expect = "not " if status != 0 else ""
+    if test.openmp():
+        # Run on four threads, and built without -fopenmp, the program
+        # prints the same.
+        sequential = " ".join(a for a in merkc_arguments(test, True)
+                              if a != "-fopenmp")
+        threads = "%libomp-env OMP_NUM_THREADS=4 "
+        return [
+            "% REQUIRES: libomp",
+            "% RUN: merkc -O0 " + arguments + " %libomp-flags -o %t0",
+            "% RUN: " + threads + expect + "%t0 2>&1 | " + FILECHECK_OUTPUT,
+            "% RUN: " + threads + "MERK_GC_EVERY_ALLOC=1 " + expect +
+            "%t0 2>&1 | " + FILECHECK_OUTPUT,
+            "% RUN: merkc -O2 " + arguments + " %libomp-flags -o %t2",
+            "% RUN: " + threads + expect + "%t2 2>&1 | " + FILECHECK_OUTPUT,
+            "% RUN: merkc -O0 " + sequential + " -o %t0s",
+            "% RUN: " + expect + "%t0s 2>&1 | " + FILECHECK_OUTPUT,
+            "% RUN: merkc -O2 " + sequential + " -o %t2s",
+            "% RUN: " + expect + "%t2s 2>&1 | " + FILECHECK_OUTPUT,
+        ]
     return [
         "% RUN: merkc -O0 " + arguments + " -o %t0",
         "% RUN: " + expect + "%t0 2>&1 | " + FILECHECK_OUTPUT,
@@ -387,7 +454,7 @@ def generate(test, args):
         status, out, exe = merkc_build(test, args.merkc, 0, tmp)
         if status != 0:
             raise TestError("merkc cannot compile it:\n" + out)
-        status, out, _ = run([exe], tmp, merge=True)
+        status, out, _ = run_program(test, args.merkc, exe, tmp)
     if mmc_status is not None and (status != 0) == (mmc_status != 0) and \
             out == mmc_out:
         raise TestError("merkc's program agrees with mmc's; make it a run- "
@@ -401,20 +468,25 @@ def generate(test, args):
 
 
 def triage(test, merkc, mmc_status, mmc_out):
-    with tempfile.TemporaryDirectory() as tmp:
-        status, out, exe = merkc_build(test, merkc, 0, tmp)
-        if status != 0:
-            return ["merkc cannot compile it: " +
-                    (out.strip().split("\n") or [""])[0]]
-        status, out, _ = run([exe], tmp, merge=True)
     notes = []
-    if (status != 0) != (mmc_status != 0):
-        notes.append("exit status %d, mmc's %d" % (status, mmc_status))
-    if out != mmc_out:
-        import difflib
-        notes.append("output differs from mmc's:\n" + "".join(
-            difflib.unified_diff(mmc_out.splitlines(True),
-                                 out.splitlines(True), "mmc", "merkc")))
+    for sequential in ([False, True] if test.openmp() else [False]):
+        which = "merkc" + (" without -fopenmp" if sequential else "")
+        with tempfile.TemporaryDirectory() as tmp:
+            status, out, exe = merkc_build(test, merkc, 0, tmp, sequential)
+            if status != 0:
+                notes.append(which + " cannot compile it: " +
+                             (out.strip().split("\n") or [""])[0])
+                continue
+            status, out, _ = run_program(test, merkc, exe, tmp)
+        if (status != 0) != (mmc_status != 0):
+            notes.append("%s: exit status %d, mmc's %d" %
+                         (which, status, mmc_status))
+        if out != mmc_out:
+            import difflib
+            notes.append(which + ": output differs from mmc's:\n" +
+                         "".join(difflib.unified_diff(
+                             mmc_out.splitlines(True), out.splitlines(True),
+                             "mmc", which)))
     return notes
 
 

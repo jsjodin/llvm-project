@@ -8933,7 +8933,17 @@ tested shows.
    The messages for a local variable unbound in a loop and a shared
    variable bound in its body, which the design promised and merkc gave
    as plain mode errors naming the translation's predicates, are built
-   too. Still to do: OpenMP, then the other extensions.
+   too.
+
+   *OpenMP, begun (2026-11-25):* `extensions/openmp/parallel-do/`:
+   reductions, arrays updated in place, schedules, the loop's forms, and
+   `collapse` as a nyi- test. A test whose MERKC-FLAGS have `-fopenmp`
+   is run on four threads with libomp and also built without
+   `-fopenmp`, and both must print what the translation does under mmc.
+   Found: the design's `private` clause, a warning on a variable local
+   to the body and an error on a shared one, is a not-yet-implemented
+   error in merkc; to build next. Still to do: target regions, which
+   need a GPU and so -gpu tests, then the other extensions.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.
