@@ -11,12 +11,6 @@
 :- implementation.
 :- import_module int.
 
-:- pred p0(int::in, int::out) is det.
-p0(K, U) :-
-    %$omp parallel do private(K)
-% CHECK: omp-clause-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the private clause of the do directive
-    ( for(I, 1, K), fromto(0, U0, U1, U) do U1 = U0 + I ).
-
 :- pred p1(int::in, int::out) is det.
 p1(K, U) :-
     %$omp parallel do firstprivate(K)

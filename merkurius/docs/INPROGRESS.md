@@ -8941,8 +8941,11 @@ tested shows.
    is run on four threads with libomp and also built without
    `-fopenmp`, and both must print what the translation does under mmc.
    Found: the design's `private` clause, a warning on a variable local
-   to the body and an error on a shared one, is a not-yet-implemented
-   error in merkc; to build next. Still to do: target regions, which
+   to the body and an error on a shared one, was a not-yet-implemented
+   error in merkc; now built (`warn-private-redundant.m`,
+   `reject-private.m`), with the clauses each leaf takes listed in
+   `OpenMPClauses.h` and checked against OMP.td by a unit test. Still to
+   do: target regions, which
    need a GPU and so -gpu tests, then the other extensions.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with

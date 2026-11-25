@@ -9,6 +9,7 @@ function(add_merkurius_unittest test_dirname)
   add_unittest(MerkuriusUnitTests ${test_dirname} ${ARGN})
 endfunction()
 
+add_subdirectory(CodeGen)
 add_subdirectory(Common)
 add_subdirectory(Parser)
 add_subdirectory(Runtime)

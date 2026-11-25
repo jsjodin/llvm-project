@@ -705,48 +705,6 @@ static const Body *LastCallOf(const Body &goal, const semantics::Symbol *callee)
   return found;
 }
 
-// A reduction is on the leaves the decomposition puts it on, do and teams, as
-// Flang puts it, and the map of its variable that target implies is the
-// reduction's.
-static bool IsOmpLoopClauseHandled(
-    llvm::omp::Directive leaf, llvm::omp::Clause id, bool synthesized) {
-  if (synthesized) {
-    return id == llvm::omp::OMPC_map && leaf == llvm::omp::OMPD_target;
-  }
-  if (id == llvm::omp::OMPC_device) {
-    return leaf == llvm::omp::OMPD_target;
-  }
-  if (id == llvm::omp::OMPC_schedule) {
-    return leaf == llvm::omp::OMPD_do; // ScheduleOf
-  }
-  return id == llvm::omp::OMPC_reduction &&
-      (leaf == llvm::omp::OMPD_do || leaf == llvm::omp::OMPD_teams);
-}
-
-// The same for a teams distribute loop in a GPU process, whose teams leaf
-// may have a dyn_groupprivate clause (GroupPrivateClause).
-static bool IsProcessDistributeClauseHandled(
-    llvm::omp::Directive leaf, llvm::omp::Clause id, bool synthesized) {
-  return (!synthesized && id == llvm::omp::OMPC_dyn_groupprivate &&
-             leaf == llvm::omp::OMPD_teams) ||
-      IsOmpLoopClauseHandled(leaf, id, synthesized);
-}
-
-static bool IsTargetClauseHandled(
-    llvm::omp::Directive, llvm::omp::Clause id, bool) {
-  return id == llvm::omp::OMPC_device;
-}
-
-static bool IsTeamsClauseHandled(
-    llvm::omp::Directive, llvm::omp::Clause id, bool) {
-  return id == llvm::omp::OMPC_num_teams;
-}
-
-static bool IsTargetDataClauseHandled(
-    llvm::omp::Directive, llvm::omp::Clause id, bool) {
-  return id == llvm::omp::OMPC_map || id == llvm::omp::OMPC_device;
-}
-
 static bool IsNamedType(const semantics::Type &type, llvm::StringRef module,
     llvm::StringRef name) {
   return type.kind == semantics::TypeKind::Named &&
@@ -917,8 +875,8 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
       directive.id == llvm::omp::Directive::OMPD_teams_distribute};
   for (const omp::Leaf &leaf : *queue) {
     if (!LeafClauses(leaf, at,
-            distributeLoop ? IsProcessDistributeClauseHandled
-                           : IsOmpLoopClauseHandled)) {
+            distributeLoop ? omp::kProcessDistributeClauses
+                           : omp::kLoopClauses)) {
       return;
     }
   }
@@ -1007,6 +965,9 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
       types_.SignatureOf(*loop->bodyPredicate)};
   if (signature && signature->purity != parser::Purity::Pure) {
     Error(at, "the body of a parallel do loop must be pure"_err_en_US);
+    return;
+  }
+  if (!PrivateClauses(*queue, *loop, at)) {
     return;
   }
   // An open value that the iterations share may only be read, by
@@ -1719,6 +1680,70 @@ std::optional<omp::ConstructQueue> MerkGenerator::Decompose(
   return std::move(decomposition.queue);
 }
 
+// The private clauses of a loop's leaves, which are checked rather than
+// generated: a variable that occurs only in the body, or the for's
+// counter, is local to each iteration already, and naming it is redundant;
+// one that is shared, or carried from one iteration to the next, has one
+// value, which it cannot have in each iteration (design document, "Loops",
+// Under a parallel directive). False after an error.
+bool MerkGenerator::PrivateClauses(const omp::ConstructQueue &queue,
+    const semantics::TranslatedLoop &loop, parser::CharBlock at) {
+  using namespace parser::literals;
+  llvm::SmallVector<llvm::StringRef> named;
+  for (const omp::Leaf &leaf : queue) {
+    for (const parser::OmpClause *c : leaf.clauses) {
+      const auto *generic{std::get_if<const parser::OmpGenericClause *>(c)};
+      if (!generic || (*generic)->id != llvm::omp::OMPC_private) {
+        continue;
+      }
+      for (const parser::DataTerm &argument : (*generic)->arguments) {
+        const auto *variable{std::get_if<const parser::Variable *>(&argument)};
+        if (!variable) {
+          Error(at, "a private clause names variables"_err_en_US);
+          return false;
+        }
+        llvm::StringRef name{(*variable)->name};
+        // The decomposition copies a clause to each leaf that takes it.
+        if (llvm::is_contained(named, name)) {
+          continue;
+        }
+        named.push_back(name);
+        if (llvm::any_of(loop.threaded,
+                [&](const semantics::TranslatedLoop::Threaded &value) {
+                  return value.name == name;
+                })) {
+          Error(at,
+              "%s is carried from one iteration of the loop to the next, so it cannot be private"_err_en_US,
+              name);
+          return false;
+        }
+        if (name == loop.counter) {
+          Warning(at,
+              "%s is local to each iteration of the loop already, so naming it in a private clause is redundant"_warn_en_US,
+              name);
+          continue;
+        }
+        auto found{llvm::find(loop.bodyNames, name)};
+        if (found == loop.bodyNames.end()) {
+          Error(at, "%s does not occur in the loop's body"_err_en_US, name);
+          return false;
+        }
+        if (!llvm::is_contained(
+                loop.locals, loop.bodyVars[found - loop.bodyNames.begin()])) {
+          Error(at,
+              "%s is shared by the iterations of the loop, since it occurs around it, and has one value, so it cannot be private"_err_en_US,
+              name);
+          return false;
+        }
+        Warning(at,
+            "%s is local to each iteration of the loop already, so naming it in a private clause is redundant"_warn_en_US,
+            name);
+      }
+    }
+  }
+  return true;
+}
+
 // OpenMP 6.1's dyn_groupprivate([modifiers :] A, ...), where each A is an
 // array that the loop's body makes with array.init or array.unsafe_noinit
 // (docs/INPROGRESS.md, GPU processes that run loops, (s5)), rather than
@@ -1810,21 +1835,22 @@ bool MerkGenerator::GroupPrivateClause(const omp::ConstructQueue &queue,
 }
 
 bool MerkGenerator::LeafClauses(const omp::Leaf &leaf, parser::CharBlock at,
-    llvm::function_ref<bool(llvm::omp::Directive, llvm::omp::Clause, bool)>
-        handled) {
+    const omp::ClauseTable &table) {
   std::string directive{parser::EnumToString(leaf.id)};
   for (const parser::OmpClause *clause : leaf.clauses) {
     llvm::omp::Clause id{omp::ClauseId(*clause)};
-    if (handled && handled(leaf.id, id, false)) {
-      continue;
+    omp::ClauseStatus status{omp::StatusOf(table, leaf.id, id, false)};
+    assert(status != omp::ClauseStatus::Unlisted &&
+        "a clause that the decomposition allows is in the clause lists");
+    if (status != omp::ClauseStatus::Handled) {
+      NotYet(at,
+          "the " + llvm::omp::getOpenMPClauseName(id).str() +
+              " clause of the " + directive + " directive");
+      return false;
     }
-    NotYet(at,
-        "the " + llvm::omp::getOpenMPClauseName(id).str() + " clause of the " +
-            directive + " directive");
-    return false;
   }
   for (llvm::omp::Clause id : leaf.synthesized) {
-    if (id != llvm::omp::OMPC_shared && !(handled && handled(leaf.id, id, true))) {
+    if (omp::StatusOf(table, leaf.id, id, true) != omp::ClauseStatus::Handled) {
       NotYet(at,
           "the " + llvm::omp::getOpenMPClauseName(id).str() +
               " clause that the " + directive + " directive implies");
@@ -1866,7 +1892,7 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   }
   if (directive.id == llvm::omp::Directive::OMPD_target_data) {
     std::optional<omp::ConstructQueue> queue{Decompose(directive, at)};
-    if (queue && LeafClauses(queue->front(), at, IsTargetDataClauseHandled)) {
+    if (queue && LeafClauses(queue->front(), at, omp::kTargetDataClauses)) {
       TargetData(goal, body, queue->front());
     }
     return;
@@ -1879,8 +1905,8 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
     return;
   }
   std::optional<omp::ConstructQueue> queue{Decompose(directive, at)};
-  if (!queue || !LeafClauses(queue->front(), at, IsTargetClauseHandled) ||
-      (teams && !LeafClauses(queue->back(), at, IsTeamsClauseHandled))) {
+  if (!queue || !LeafClauses(queue->front(), at, omp::kTargetClauses) ||
+      (teams && !LeafClauses(queue->back(), at, omp::kTargetClauses))) {
     return;
   }
   if (builder_.getInsertionBlock()->getParent()

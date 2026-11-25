@@ -1128,6 +1128,7 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
   translated.line = Position(loop).first;
   for (unsigned var : occurring.set_bits()) {
     translated.bodyVars.push_back(var);
+    translated.bodyNames.push_back(vars_[var].name);
     if (!inBodyHead.count(var)) {
       translated.locals.push_back(var);
     }

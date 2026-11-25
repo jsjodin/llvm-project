@@ -16,30 +16,31 @@
 #ifndef MERKURIUS_LIB_CODEGEN_MLIRGENIMPL_H_
 #define MERKURIUS_LIB_CODEGEN_MLIRGENIMPL_H_
 
-#include "merkurius/CodeGen/MLIRGen.h"
 #include "Decomposer.h"
 #include "merkurius/CodeGen/Lowering.h"
+#include "merkurius/CodeGen/MLIRGen.h"
+#include "merkurius/CodeGen/OpenMPClauses.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "merkurius/Parser/parse-tree.h"
 #include "merkurius/Parser/term-reader.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
-#include "mlir/IR/Builders.h"
-#include "mlir/IR/Verifier.h"
-#include "mlir/Transforms/RegionUtils.h"
-#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/ScopeExit.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/Transforms/RegionUtils.h"
 #include <optional>
 
 namespace merkurius::codegen {
@@ -987,6 +988,9 @@ private:
   // array.init in its loop's body, as group private, and makes each such
   // body start by ending its last iteration's (merk_device_group_begin).
   void MarkGroupPrivateArrays();
+  // The private clauses of a loop's leaves, checked; false after an error.
+  bool PrivateClauses(const omp::ConstructQueue &,
+      const semantics::TranslatedLoop &, parser::CharBlock at);
   // The dyn_groupprivate clause of a loop's leaves, if it has one, checked;
   // false after an error.
   bool GroupPrivateClause(const omp::ConstructQueue &, parser::CharBlock at,
@@ -1050,14 +1054,16 @@ private:
   void TargetData(const Body &, const ProcedureBody &, const omp::Leaf &);
   std::optional<omp::ConstructQueue> Decompose(const parser::OmpDirective &,
       parser::CharBlock at, std::optional<llvm::StringRef> counter = {});
-  // Reports the leaf's clauses that are not generated yet: all but those
-  // `handled` takes, of the leaf's directive, the clause and whether the
-  // decomposition added it, and shared clauses the decomposition adds,
-  // since a variable is shared already. Whether there were none.
-  bool LeafClauses(const omp::Leaf &, parser::CharBlock at,
-      llvm::function_ref<bool(llvm::omp::Directive, llvm::omp::Clause,
-          bool synthesized)>
-          handled = nullptr);
+  // Reports the first of the leaf's clauses, written or added by the
+  // decomposition, that the table does not list as handled for the kind of
+  // construct. Whether there were none.
+  bool LeafClauses(
+      const omp::Leaf &, parser::CharBlock at, const omp::ClauseTable &);
+  // A warning, which leaves the procedure in.
+  void Warning(parser::CharBlock at, parser::MessageFixedText text,
+      llvm::StringRef argument = {}) {
+    messages_.Say(at, text, argument.str());
+  }
   // An error that leaves the procedure out.
   void Error(parser::CharBlock at, parser::MessageFixedText text,
       llvm::StringRef argument = {}) {

@@ -56,6 +56,9 @@ struct TranslatedLoop {
   // The variables of the body predicate's clause, and of those the ones
   // local to each iteration, which its head does not have.
   std::vector<VarId> bodyVars, locals;
+  // The names of bodyVars, in order, as written, which a private clause
+  // names them by.
+  std::vector<llvm::StringRef> bodyNames;
   // Each local variable that has the name of a variable of another loop
   // of the clause, a different one, and that loop's line: a local
   // variable unbound in the body was most likely meant to be given out
