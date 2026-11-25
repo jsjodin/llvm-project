@@ -8983,7 +8983,16 @@ tested shows.
    was one type variable, and `any` never matched `ground`, even for a
    mailbox taken out of a message with open terms in it. A process that
    fails, and a server that fails in a request, are `run-process-failure.m`.
-   Still to do: GPU processes, flat records, distribution.
+   *GPU processes, begun (2026-11-25):* `extensions/gpu-processes/`. A
+   run- test spawns its kinds at the host when run without an argument,
+   which the oracle checks against an Erlang translation, and its
+   `-gpu.test` runs the same program with `gpu` and checks the same
+   output (`run-gpu-kinds.m`: flat records, arrays of ints and floats, a
+   string as a last field, polling, ping-pong between GPU processes).
+   Selective receive in a GPU process needs a closure and is reported
+   (`nyi-gpu-selective-receive.m`); `reject-gpu-flat.m` has the flatness
+   rule. Still to do: team loops and cooperative kernels, blocks, flat
+   records' own tests, distribution.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.

@@ -1,0 +1,6 @@
+run-gpu-kinds.m's process kinds spawned on the machine's GPU, which print
+what they print at the host, the output the oracle checked.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/run-gpu-kinds.m -o %t2
+RUN: %gpu-env timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %S/run-gpu-kinds.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
