@@ -1066,6 +1066,26 @@ static TypeInfosOf GatherTypeInfos(
   return infos;
 }
 
+// What a bundle lists for a live pointer: the pointer, or for one into its
+// cell past the tag, as an array's elements that LLVM computes once before a
+// loop, the cell. The rewrite takes whatever a bundle lists to be a base, so
+// it would pair such a pointer with itself, and a collection would take it
+// for the start of a cell. Listing the cell has the rewrite pair the pointer
+// with it, and the pointer moves by its offset (InteriorSlot in the runtime).
+static llvm::Value *RootOf(llvm::Value *value) {
+  auto *cell{const_cast<llvm::Value *>(CellOf(value))};
+  auto *instruction{llvm::dyn_cast<llvm::Instruction>(value)};
+  if (cell == value || !instruction) {
+    return value;
+  }
+  llvm::APInt offset{64, 0};
+  const llvm::Value *base{value->stripAndAccumulateConstantOffsets(
+      instruction->getModule()->getDataLayout(), offset,
+      /*AllowNonInbounds=*/true)};
+  bool tagged{base == cell && !offset.isNegative() && offset.ult(8)};
+  return tagged ? value : cell;
+}
+
 // Lists at a safepoint what is live there and its bundle does not have: the
 // optimizer can keep a value alive for longer than the Merkurius code did, and
 // the rewrite would then make a root that nothing describes. Its type_infos
@@ -1108,10 +1128,10 @@ static void ListLiveRoots(llvm::Function &function, KnownTypes &known) {
               [&](llvm::Constant *, llvm::Value *value,
                   llvm::ArrayRef<llvm::Use>) { listed.insert(CellOf(value)); });
           // In a fixed order, for the same code from the same module.
-          llvm::SmallVector<llvm::Value *> missing;
+          llvm::SmallSetVector<llvm::Value *, 8> missing;
           for (llvm::Value *value : after) {
             if (!listed.contains(CellOf(value))) {
-              missing.push_back(value);
+              missing.insert(RootOf(value));
             }
           }
           std::vector<llvm::Value *> entries{
