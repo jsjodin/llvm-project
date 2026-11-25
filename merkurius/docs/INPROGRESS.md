@@ -8964,8 +8964,23 @@ tested shows.
    loops the rule allows. Reject tests: purity, modes, determinism, the
    parallel loop rule and the flag. Found and fixed: a collection after
    one hole was bound to another stopped on an update-only root.
-   Still to do: messages with open terms (with `processes/`), and the
-   other extensions.
+   Still to do: messages with open terms (with `processes/`).
+
+   *Processes, begun (2026-11-25):* `extensions/processes/`. A run-
+   test's oracle is a translation into Erlang (`Inputs/*.erl`, run with
+   escript), as the design takes Erlang's order of messages and its
+   monitors' reasons; a process's mailboxes are its one Erlang mailbox,
+   each message tagged with its mailbox. Run tests: the order of
+   messages, selective receives and selectors, spawn, `request`,
+   `send_request`, monitors (normal, noproc, killed), the receive goal and
+   process declarations; the three receive errors at run time, with
+   hand-written expectations. Reject tests: the receive goal's syntax, an
+   unhandled message in a det loop, an untested pattern variable, and the
+   `unselected-message` warning. A kind with several message types is an
+   nyi- test. Found and fixed on the way: each `_` in type qualifications
+   was one type variable. Still to do: monitors of failed processes,
+   exceptions in processes, open-term messages, GPU processes, flat
+   records, distribution.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.

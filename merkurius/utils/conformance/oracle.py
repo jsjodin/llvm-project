@@ -48,7 +48,10 @@ end of the header. Other header lines are the author's:
                                   as plain Mercury, whose output the test's
                                   must be; or Inputs/translation.pl, a
                                   program that SWI-Prolog runs, main/0 in
-                                  the file's directory, for open terms
+                                  the file's directory, for open terms; or
+                                  Inputs/translation.erl, an escript, for
+                                  processes, whose first line escript
+                                  skips
   % ORACLE: none                  expectations written by hand, which the
                                   script leaves as they are, for a test of an
                                   extension that has no translation, as an
@@ -221,12 +224,17 @@ class Test:
 def mmc_run(test, mmc):
     """mmc's program's output, standard error after standard output as
     they are written, and its exit status; or, for a translation into
-    Prolog, swipl's, which runs its main/0 in the translation's directory,
-    where the helpers it loads are."""
-    if test.mmc_program and test.mmc_program.endswith(".pl"):
+    Prolog or Erlang, swipl's or escript's, which run it in the
+    translation's directory, where the helpers it loads are."""
+    interpreters = {
+        ".pl": ["swipl", "-q", "-g", "main", "-t", "halt"],
+        ".erl": ["escript"],
+    }
+    extension = os.path.splitext(test.mmc_program or "")[1]
+    if extension in interpreters:
         program = os.path.join(os.path.dirname(test.path), test.mmc_program)
-        status, out, _ = run(["swipl", "-q", "-g", "main", "-t", "halt",
-                              os.path.basename(program)],
+        status, out, _ = run(interpreters[extension] +
+                             [os.path.basename(program)],
                              os.path.dirname(program), merge=True)
         return status, out
     with tempfile.TemporaryDirectory() as tmp:
