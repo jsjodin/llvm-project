@@ -2,7 +2,10 @@
 % equality and comparison"): compare/3 at the type is det, so its procedure
 % that gives the result and takes the values in may be det or erroneous, but
 % must not fail or have more than one solution, as mmc's generated
-% __Compare__ requires. Each error is at the type's definition.
+% __Compare__ requires. Each error is at the type's definition. A predicate
+% declared without a determinism is checked with the one inferred for it;
+% a mode that does not give the result, as one that checks a given result,
+% may have any.
 %
 % RUN: not merkc -fc1 -fdebug-dump-determinism %s 2>%t.err >/dev/null
 % RUN: FileCheck --implicit-check-not=error: %s < %t.err
@@ -50,3 +53,23 @@ cmp_erroneous(_, _, _) :- throw(42).
 :- type c_det ---> c_det(int) where comparison is cmp_det.
 :- pred cmp_det(comparison_result::uo, c_det::in, c_det::in) is det.
 cmp_det(R, _, _) :- R = (=).
+
+:- type c_inferred_multi ---> c_inferred_multi(int)
+    where comparison is cmp_inferred_multi.
+% CHECK: [[@LINE-2]]:9: error: the comparison predicate of type c_inferred_multi/0 must be det, but cmp_inferred_multi(uo, in, in) is inferred multi
+:- pred cmp_inferred_multi(comparison_result, c_inferred_multi,
+    c_inferred_multi).
+:- mode cmp_inferred_multi(uo, in, in).
+cmp_inferred_multi(R, _, _) :- ( R = (=) ; R = (<) ).
+
+:- type c_inferred_det ---> c_inferred_det(int)
+    where comparison is cmp_inferred_det.
+:- pred cmp_inferred_det(comparison_result, c_inferred_det, c_inferred_det).
+:- mode cmp_inferred_det(uo, in, in).
+cmp_inferred_det(R, _, _) :- R = (=).
+
+:- type c_checking ---> c_checking(int) where comparison is cmp_checking.
+:- pred cmp_checking(comparison_result, c_checking, c_checking).
+:- mode cmp_checking(uo, in, in) is det.
+:- mode cmp_checking(in, in, in) is semidet.
+cmp_checking((=), _, _).

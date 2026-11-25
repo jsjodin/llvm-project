@@ -3293,10 +3293,11 @@ static void CheckInitialisers(const parser::TokenSequence &tokens,
 // calls its procedure that gives the result and takes the values in, so
 // that procedure may be det or erroneous, but must not fail or have more
 // solutions. An equality predicate, with no outputs, may be nondet, as mmc
-// accepts (see the register). A procedure whose determinism is inferred
-// rather than declared is not checked here.
-static void CheckComparisonDeterminism(TypeChecking &types, ModeChecking &modes,
-    parser::Messages &messages, const NameResolution &resolution) {
+// accepts (see the register). A procedure declared without a determinism
+// is checked with the one inferred for it, so this runs after inference.
+static void CheckComparisonDeterminism(const DeterminismChecking &checking,
+    TypeChecking &types, ModeChecking &modes, parser::Messages &messages,
+    const NameResolution &resolution) {
   InstOps &ops{modes.ops()};
   for (const Symbol *type : resolution.module().symbols()) {
     const UserEquality *user{
@@ -3306,7 +3307,9 @@ static void CheckComparisonDeterminism(TypeChecking &types, ModeChecking &modes,
       continue;
     }
     for (const Procedure *procedure : modes.ProceduresOf(*user->comparison)) {
-      if (procedure->modes.size() != 3 || !procedure->determinism) {
+      std::optional<parser::Determinism> determinism{
+          checking.DeterminismOf(*procedure)};
+      if (procedure->modes.size() != 3 || !determinism) {
         continue;
       }
       bool fits{true};
@@ -3319,14 +3322,15 @@ static void CheckComparisonDeterminism(TypeChecking &types, ModeChecking &modes,
       if (!fits) {
         continue;
       }
-      if (!Within(ComponentsOf(*procedure->determinism),
+      if (!Within(ComponentsOf(*determinism),
               ComponentsOf(parser::Determinism::Det))) {
         // mmc: "In `__Compare__'(uo, in, in): error: implicit determinism
         // declaration not satisfied. Declared `det', inferred `multi'."
         messages.Say(type->source,
-            "the comparison predicate of type %s/%u must be det, but %s is %s"_err_en_US,
+            "the comparison predicate of type %s/%u must be det, but %s is %s%s"_err_en_US,
             type->name.str(), type->arity, ProcedureToString(*procedure),
-            DeterminismName(*procedure->determinism));
+            procedure->determinism ? "" : "inferred ",
+            DeterminismName(*determinism));
       }
       break;
     }
@@ -3384,7 +3388,6 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
   auto result{std::make_unique<DeterminismChecking>()};
   if (tree && resolution && analyse) {
     CheckInitialisers(tokens, types, modes, messages, *tree, *resolution);
-    CheckComparisonDeterminism(types, modes, messages, *resolution);
   }
   result->modes_ = &modes;
   if (tree && resolution) {
@@ -3467,6 +3470,9 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
   }
   if (resolution) {
     CheckEmptyProcedures(*result, modes, resolution->module(), messages);
+  }
+  if (tree && resolution) {
+    CheckComparisonDeterminism(*result, types, modes, messages, *resolution);
   }
   return result;
 }
