@@ -459,7 +459,13 @@ std::optional<DataTerm> DataTermRule::Convert(
     }
     return state.arena.Make<FieldSelection>(t.tokens(), *term, *fields);
   }
-  if (auto operands{BinaryOperands(t, ":")}) {
+  // Term : Type, or with_type(Term, Type), which the manual gives as an
+  // alternative syntax; X `with_type` T is a backquote term.
+  auto operands{BinaryOperands(t, ":")};
+  if (!operands) {
+    operands = BinaryOperands(t, "with_type");
+  }
+  if (operands) {
     std::optional<DataTerm> term{Apply(dataTerm, *operands->first, state)};
     std::optional<Type> ty{Apply(type, *operands->second, state)};
     if (!term || !ty) {

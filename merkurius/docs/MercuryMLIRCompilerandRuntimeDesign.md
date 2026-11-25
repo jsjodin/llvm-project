@@ -555,7 +555,7 @@ constexpr auto ifThenElse =
     - Malformed lambda heads, such as `pred(X) :- G` without a determinism.
   - **Lambdas.** `pred(...)` or `func(...)` that is neither a lambda nor malformed is an ordinary functor.
   - **Left to semantic analysis.** mmc reports a goal construct used as a data-term, such as `X = (a, b)`, during type checking, so here it stays a `FunctorData`.
-  - **Data-terms.** The special data-terms are their own nodes: conditional expressions, `@`, field selection and update, lambdas, `: Type`, `` `with_type` `` and `coerce`.
+  - **Data-terms.** The special data-terms are their own nodes: conditional expressions, `@`, field selection and update, lambdas, `: Type`, `` `with_type` `` or `with_type(Term, Type)`, and `coerce`.
   - **DCG goals.** `{ G1, G2 }`, which the reader reads as a tuple, holds the conjunction of the goals. `&` is a DCG parallel conjunction, which mmc accepts. `if C then T` without an else has `[]` as its else, as in mmc (see the register); `C -> T` without `;` is an error.
   - **OpenMP.** A goal with a `%$omp` directive is an `OmpGoal` (OpenMP directives). A directive anywhere else draws a warning and is ignored.
   - **Atomic goals.** The reference manual lists `atomic` only as an operator, so `atomic [Params] G` follows what mmc 22.01.9 accepts: `outer` and `inner` are required, each `!S` or a pair `S0, S`, with an optional `vars([Vars])`, and none may be repeated. `G1 or_else G2` is an operator of goals only at the top of the goal, where the alternatives become a list; elsewhere it is a call, as in mmc.
