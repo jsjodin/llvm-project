@@ -228,6 +228,49 @@ parser::CharBlock NameSource(
       tokens.tokens[name.tokens.last].spelling.end()};
 }
 
+// The names that an item defines: its type, constructors, fields, inst,
+// mode, type class, methods, predicate or function.
+void DefinedNames(const parser::Item &item,
+    llvm::SmallVectorImpl<const parser::SymName *> &names) {
+  std::visit(
+      common::visitors{
+          [&](const parser::DuTypeDefn *defn) {
+            names.push_back(defn->name);
+            for (const parser::Constructor *constructor : defn->constructors) {
+              names.push_back(constructor->name);
+              for (const parser::ConstructorArg *argument :
+                  constructor->arguments) {
+                if (argument->field) {
+                  names.push_back(argument->field);
+                }
+              }
+            }
+          },
+          [&](const parser::EquivalenceTypeDefn *defn) {
+            names.push_back(defn->name);
+          },
+          [&](const parser::AbstractTypeDecl *decl) {
+            names.push_back(decl->name);
+          },
+          [&](const parser::SolverTypeDefn *defn) {
+            names.push_back(defn->name);
+          },
+          [&](const parser::InstDefn *defn) { names.push_back(defn->name); },
+          [&](const parser::ModeDefn *defn) { names.push_back(defn->name); },
+          [&](const parser::PredDecl *decl) { names.push_back(decl->name); },
+          [&](const parser::ModeDecl *decl) { names.push_back(decl->name); },
+          [&](const parser::TypeclassDecl *decl) {
+            names.push_back(decl->name);
+            for (const parser::ClassMethod &method : decl->methods) {
+              std::visit(
+                  [&](const auto *m) { names.push_back(m->name); }, method);
+            }
+          },
+          [](const auto *) {},
+      },
+      item);
+}
+
 // The pragma that `item` is, if it is one that may not be in the interface
 // section, and its tokens. The reference manual says so only of
 // foreign_export_enum ("Using Mercury enumerations in foreign code"); mmc
@@ -1324,6 +1367,22 @@ void Resolver::Run(const parser::ParseTree &tree,
         }
       }
     } else {
+      // mmc: "module qualifier in definition does not match preceding
+      // `:- module' declaration". A qualifier names the module, fully or
+      // by its last components.
+      llvm::SmallVector<const parser::SymName *, 8> defined;
+      DefinedNames(item, defined);
+      for (const parser::SymName *each : defined) {
+        if (each && !each->qualifiers.empty()) {
+          std::string qualifier{llvm::join(each->qualifiers, ".")};
+          llvm::StringRef module{name};
+          if (module != qualifier && !module.ends_with("." + qualifier)) {
+            messages_.Say(NameSource(tokens, *each),
+                "the module qualifier %s does not name this module, %s"_err_en_US,
+                qualifier, name);
+          }
+        }
+      }
       Declare(own, item, inInterface, tokens);
     }
   }
