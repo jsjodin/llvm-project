@@ -3,6 +3,7 @@ add_merkurius_library(MerkuriusSemantics
   check-foreign.cpp
   check-gpu-code.cpp
   check-modes.cpp
+  check-pragmas.cpp
   check-purity.cpp
   check-receives.cpp
   check-types.cpp

@@ -188,6 +188,12 @@ public:
   const Procedure *ExportOf(const parser::ForeignExportPragma &pragma) const {
     return foreignExports_.lookup(&pragma);
   }
+  // The procedure the modes of an obsolete_proc or type_spec pragma name,
+  // the module's own or, for obsolete_proc, an imported module's, if they
+  // name one.
+  const Procedure *ProcedureOf(const parser::ProcSpec &spec) const {
+    return pragmaProcedures_.lookup(&spec);
+  }
 
 private:
   friend class ModeChecker;
@@ -209,6 +215,7 @@ private:
       foreignProcs_;
   llvm::DenseMap<const parser::ForeignExportPragma *, const Procedure *>
       foreignExports_;
+  llvm::DenseMap<const parser::ProcSpec *, const Procedure *> pragmaProcedures_;
   // The predicates without a `:- pred` declaration, whose modes are
   // inferred from their calls, and the procedures inferred for them.
   llvm::DenseSet<const Symbol *> inferable_;

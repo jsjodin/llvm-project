@@ -298,6 +298,9 @@ private:
       std::vector<parser::CharBlock> &sources);
   void BuildProcedures(llvm::ArrayRef<parser::Item>, const ModuleSymbols &);
   void MatchForeignProcs(const parser::ParseTree &);
+  void MatchPragmaProcs(const parser::ParseTree &);
+  void MatchPragmaProc(const ModuleSymbols &, const parser::ProcSpec &,
+      const parser::TokenSequence &);
   void MatchForeignExports(const parser::ParseTree &);
   void MatchClauses();
   void CheckHasClauses();
@@ -1140,6 +1143,7 @@ void ModeChecker::Run(const parser::ParseTree &tree) {
     result_.bySymbol_[procedure.symbol].push_back(&procedure);
   }
   MatchForeignProcs(tree);
+  MatchPragmaProcs(tree);
   MatchForeignExports(tree);
   MatchClauses();
   CheckHasClauses();
@@ -1213,6 +1217,67 @@ void ModeChecker::MatchClauses() {
       messages_.Say(Source(form.tokens),
           "this clause is for a mode %s does not have"_err_en_US,
           Text(*clause.definition));
+    }
+  }
+}
+
+// The procedures that obsolete_proc and type_spec pragmas name by their
+// modes (reference manual, "Obsolescence", "Syntax and semantics of type
+// specialization pragmas"): the module's own, and an imported module's
+// obsolete ones, whose calls are warned of. Pragma checking reports a mode
+// that names none.
+void ModeChecker::MatchPragmaProcs(const parser::ParseTree &tree) {
+  for (const parser::Item &item : tree.items) {
+    const parser::PredSpec *spec{nullptr};
+    if (const auto *pragma{
+            std::get_if<const parser::ObsoletePragma *>(&item)}) {
+      spec = &(*pragma)->pred;
+    } else if (const auto *pragma{
+                   std::get_if<const parser::TypeSpecPragma *>(&item)}) {
+      spec = &(*pragma)->pred;
+    }
+    if (const auto *proc{
+            spec ? std::get_if<const parser::ProcSpec *>(spec) : nullptr}) {
+      MatchPragmaProc(resolution_.module(), **proc, tokens_);
+    }
+  }
+  for (const ModuleInterface *module : resolution_.interfaces()) {
+    const ModuleSymbols *symbols{resolution_.Module(module->name)};
+    if (!symbols) {
+      continue;
+    }
+    for (const parser::Item &item : module->items) {
+      const auto *pragma{std::get_if<const parser::ObsoletePragma *>(&item)};
+      if (const auto *proc{pragma
+                  ? std::get_if<const parser::ProcSpec *>(&(*pragma)->pred)
+                  : nullptr}) {
+        MatchPragmaProc(*symbols, **proc, *module->tokens);
+      }
+    }
+  }
+}
+
+void ModeChecker::MatchPragmaProc(const ModuleSymbols &symbols,
+    const parser::ProcSpec &spec, const parser::TokenSequence &tokens) {
+  SymbolKind kind{spec.kind == parser::PredOrFunc::Function
+          ? SymbolKind::Function
+          : SymbolKind::Predicate};
+  const Symbol *symbol{nullptr};
+  for (const Symbol *s : symbols.Lookup(spec.name->name)) {
+    if (s->kind == kind && s->arity == spec.modes.size()) {
+      symbol = s;
+    }
+  }
+  if (!symbol) {
+    return;
+  }
+  parser::CharBlock where{tokens.tokens[spec.tokens.first].spelling.begin(),
+      tokens.tokens[spec.tokens.last].spelling.end()};
+  Declared declared{ConvertDeclaration(
+      spec.modes, spec.result, std::nullopt, std::nullopt, {}, where)};
+  for (const Procedure *procedure : result_.bySymbol_.lookup(symbol)) {
+    if (llvm::ArrayRef<ArgMode>{declared.modes} == procedure->modes) {
+      result_.pragmaProcedures_[&spec] = procedure;
     }
   }
 }

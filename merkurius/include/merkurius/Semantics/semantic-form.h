@@ -24,6 +24,7 @@
 #include "merkurius/Common/enum-class.h"
 #include "merkurius/Parser/parse-tree.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
@@ -322,6 +323,10 @@ struct SemanticForm {
     return modules;
   }
 };
+
+// Calls f on each goal of `goal`, outermost first, and on those of its
+// lambda expressions' bodies.
+void ForEachGoal(const Goal &goal, llvm::function_ref<void(const Goal &)> f);
 
 // Prints the semantic form, one goal per line, indented by depth. Program
 // variables print as their names, anonymous ones as _$N and fresh ones as

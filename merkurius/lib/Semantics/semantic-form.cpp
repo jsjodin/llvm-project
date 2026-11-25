@@ -397,6 +397,45 @@ private:
 
 } // namespace
 
+// Calls f on each goal of `goal`, outermost first, and on those of its
+// lambda expressions' bodies.
+void ForEachGoal(const Goal &goal, llvm::function_ref<void(const Goal &)> f) {
+  f(goal);
+  common::visit(common::visitors{
+                    [&](const Conj *x) {
+                      for (const Goal &g : x->goals) {
+                        ForEachGoal(g, f);
+                      }
+                    },
+                    [&](const Disj *x) {
+                      for (const Goal &g : x->goals) {
+                        ForEachGoal(g, f);
+                      }
+                    },
+                    [&](const IfThenElse *x) {
+                      ForEachGoal(x->condition, f);
+                      ForEachGoal(x->then, f);
+                      ForEachGoal(x->otherwise, f);
+                    },
+                    [&](const Not *x) { ForEachGoal(x->goal, f); },
+                    [&](const Unify *x) {
+                      if (x->functor.lambda) {
+                        ForEachGoal(x->functor.lambda->body, f);
+                      }
+                    },
+                    [&](const Call *) {},
+                    [&](const HOCall *) {},
+                    [&](const Scope *x) { ForEachGoal(x->goal, f); },
+                    [&](const Atomic *x) {
+                      for (const AtomicAlternative &a : x->alternatives) {
+                        ForEachGoal(a.goal, f);
+                      }
+                    },
+                    [&](const Loop *x) { ForEachGoal(x->body, f); },
+                },
+      goal);
+}
+
 void DumpSemanticForm(
     llvm::raw_ostream &os, const SemanticForm &form, bool nonlocals) {
   for (const ClauseForm *clause : form.clauses) {

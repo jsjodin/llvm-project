@@ -24,6 +24,7 @@
 #include "merkurius/Semantics/check-foreign.h"
 #include "merkurius/Semantics/check-gpu-code.h"
 #include "merkurius/Semantics/check-modes.h"
+#include "merkurius/Semantics/check-pragmas.h"
 #include "merkurius/Semantics/check-purity.h"
 #include "merkurius/Semantics/check-receives.h"
 #include "merkurius/Semantics/check-types.h"
@@ -782,6 +783,7 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
           r.resolution.get())};
   semantics::CheckForeign(
       *r.tree, r.tokens, *r.resolution, *modes, *determinism, r.messages);
+  semantics::CheckPragmas(*r.tree, r.tokens, *r.resolution, *modes, r.messages);
   semantics::CheckUniqueness(
       r.tokens, *modes, *determinism, r.messages, frontend.mmcUniqueness);
   semantics::CheckGpuCode(*r.tree, r.tokens, *modes, *determinism,
