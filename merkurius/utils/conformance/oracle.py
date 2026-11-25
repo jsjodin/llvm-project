@@ -30,6 +30,9 @@ end of the header. Other header lines are the author's:
   % MANUAL: <a node of the reference manual, as matrix.py lists them>
   % DESIGN: <a section of the design document>
   % MODULES: Inputs/other.m ...   more modules of the program
+  % FILES: Inputs/facts ...       data files the program's build reads, such
+                                  as a fact table's, copied beside it for
+                                  mmc but not compiled
   % MERKC-FLAGS: ...              more flags for merkc
   % FLAGS-FOR-MMC: ...            more flags for mmc, as for --trace-flag
   % DIFFERS: <mmc-bug|manual|implementation>: <why>
@@ -109,6 +112,7 @@ class Test:
         if not self.module:
             raise TestError("no `:- module' declaration")
         self.modules = []
+        self.files = []
         self.flags = []
         self.mmc_flags = []
         self.differs = None
@@ -117,6 +121,9 @@ class Test:
             m = re.match(r"% MODULES:(.*)", line)
             if m:
                 self.modules += m.group(1).split()
+            m = re.match(r"% FILES:(.*)", line)
+            if m:
+                self.files += m.group(1).split()
             m = re.match(r"% MERKC-FLAGS:(.*)", line)
             if m:
                 self.flags += m.group(1).split()
@@ -146,7 +153,9 @@ class Test:
     def copy_to(self, directory):
         """The program's modules in a directory, as mmc --make wants them."""
         shutil.copy(self.path, os.path.join(directory, self.module + ".m"))
-        for path in self.module_paths():
+        here = os.path.dirname(self.path)
+        for path in self.module_paths() + [os.path.join(here, f)
+                                           for f in self.files]:
             shutil.copy(path, directory)
 
     def marked_lines(self, generated):
