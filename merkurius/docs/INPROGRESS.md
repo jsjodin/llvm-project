@@ -9039,7 +9039,7 @@ tested shows.
    `process-remote-monitor.m`.
 4. The interaction generator, with the features and contexts above.
 
-   *Begun (2026-11-25):* `utils/conformance/generate-interactions.py`
+   `utils/conformance/generate-interactions.py`
    writes `interactions/<context>/run-<feature>.m`, checked in, and the
    oracle writes their expectations from mmc's output. A feature is a
    type and two functions, `make(int) = fdata` and `use(fdata) = string`,
@@ -9085,9 +9085,21 @@ tested shows.
    if it has one; in another module, the plain module is a `% FILES:`
    input, which only mmc builds. The process contexts call
    `process.send` and `process.receive`, as `open` exports a `send` of
-   the same types, which makes an unqualified call ambiguous. The 126
-   host tests and 6 GPU tests pass. Still to do: triples of the contexts
-   that nest.
+   the same types, which makes an unqualified call ambiguous.
+
+   *Done (2026-11-25):* nesting, in `interactions/nested/<outer>-<inner>/`.
+   The inner contexts are those whose run is a function (closure, type
+   class method, polymorphic, nondet, try, do loop, parallel loop), the
+   outer ones those and the two host process contexts; another module is
+   how a nesting is written, and a GPU process has only flat values. The
+   feature and the inner context, its run renamed `inner_run`, are
+   another module; the outer context works on `nested(K, make(K))`,
+   whose use is the feature's and `inner_run(K)`, so that it moves the
+   feature's values and the inner context runs inside it. Of the
+   triples of a feature, an outer and an inner context, the generator
+   writes a greedy cover of every pair of the three: 108, as many as
+   features times outer contexts, which is the least. All pass, 234 host
+   tests in all and 6 on the GPU; the interactions found one bug.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.
 

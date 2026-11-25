@@ -32,6 +32,7 @@ Usage: generate-interactions.py [--out DIR] [--check]
 
 import argparse
 import os
+import re
 import sys
 import textwrap
 
@@ -1162,6 +1163,139 @@ def library_text(library, feature, imports, implementation, comment):
         ""])
 
 
+# Nesting: an inner context's run inside an outer context. The inner
+# contexts are those whose run is a function; the outer ones those and the
+# processes. Another module is how the nesting is written, and a GPU
+# process has only flat values.
+INNER = ["closure", "typeclass-method", "polymorphic", "nondet", "try",
+         "do-loop", "parallel-do"]
+OUTER = INNER + ["host-process", "message"]
+
+
+def nested_triples():
+    """The (feature, outer, inner) triples to write: every pair of a
+    feature and an outer context, of a feature and an inner one, and of an
+    outer and an inner one, in at least one triple, chosen greedily, each
+    time the triple that covers the most pairs not yet covered."""
+    features = [f.name for f in FEATURES]
+    candidates = [(f, o, i) for f in features for o in OUTER for i in INNER
+                  if o != i]
+    uncovered = set()
+    for f, o, i in candidates:
+        uncovered |= {("fo", f, o), ("fi", f, i), ("oi", o, i)}
+    chosen = []
+    while uncovered:
+        best = max(candidates, key=lambda t: len(
+            {("fo", t[0], t[1]), ("fi", t[0], t[2]), ("oi", t[1], t[2])} &
+            uncovered))
+        chosen.append(best)
+        uncovered -= {("fo", best[0], best[1]), ("fi", best[0], best[2]),
+                      ("oi", best[1], best[2])}
+    return chosen
+
+
+def rename(code, names):
+    """code with each of names, as words, replaced."""
+    for old, new in names.items():
+        code = re.sub(r"(?<![\w.'])%s\b" % old, new, code)
+    return code
+
+
+def inner_code(code):
+    """An inner context's code, with its run renamed inner_run, which its
+    module exports."""
+    code = rename(code, {"run": "inner_run"})
+    return code.replace(":- func inner_run(int) = string.\n", "")
+
+
+def outer_code(code):
+    """An outer context's code, over the nested values."""
+    return rename(code, {"fdata": "nested", "make": "make_nested",
+                         "use": "use_nested"})
+
+
+NESTED = """
+    % The feature's values, with what the inner context makes of the same
+    % number, which runs as the outer context uses them.
+:- type nested
+    --->    nested(int, fdata).
+
+:- func make_nested(int) = nested.
+
+make_nested(N) = nested(N, make(N)).
+
+:- func use_nested(nested) = string.
+
+use_nested(nested(K, V)) = use(V) ++ " / " ++ inner_run(K).
+"""
+
+
+def nested_text(feature, outer, inner):
+    """A nested test's text, and its other modules', as (name, text)
+    pairs."""
+    module = mercury_name("nested", outer.name, inner.name, feature.name)
+    library = module + "_lib"
+    header = []
+    for line in ["%% %s: %s" % ("DESIGN" if c.plain else "MANUAL", c.manual)
+                 for c in (feature, outer, inner)]:
+        if line not in header:
+            header.append(line)
+    header += textwrap.wrap(
+        "Interaction: %s, in %s, in %s." % (feature.summary, inner.summary,
+                                            outer.summary),
+        width=76, initial_indent="% ", subsequent_indent="% ")
+    header += [
+        "% Written by utils/conformance/generate-interactions.py; change",
+        "% the generator rather than this file.",
+    ]
+    flags = []
+    for f in outer.flags + inner.flags + feature.flags:
+        if f not in flags:
+            flags.append(f)
+    if flags:
+        header.append("% MERKC-FLAGS: " + " ".join(flags))
+    plain = outer.plain or inner.plain or feature.plain
+    translation = module + "_translation"
+    if plain:
+        header.append("%% TRANSLATION: Inputs/%s.m" % translation)
+    header.append("%% MODULES: Inputs/%s.m" % library)
+    plain_library = library + "_translation"
+    if inner.plain or feature.plain:
+        header.append("%% FILES: Inputs/%s.m" % plain_library)
+    else:
+        plain_library = library
+    interface = feature.interface + "\n\n:- func inner_run(int) = string."
+    lib_feature = Feature(feature.name, feature.manual, feature.imports,
+                          interface, "", feature.summary,
+                          feature.interface_imports | {"string"})
+
+    def lib(name, implementation, imports, code):
+        return library_text(
+            name, lib_feature, imports | inner.imports | {"string"},
+            implementation + "\n\n" + inner_code(code),
+            "%% The feature and inner context of run-%s.m." % feature.name)
+
+    others = [(library, lib(library, feature.implementation,
+                            feature.imports, inner.code))]
+    if plain_library != library:
+        others.append((plain_library, lib(
+            plain_library, feature.plain or feature.implementation,
+            feature.plain_imports, inner.plain or inner.code)))
+    main_imports = {"io", "int", "list", "string", library} | outer.imports
+    text = "\n".join(header + program(module, main_imports, NESTED.strip("\n")
+                                      + "\n", outer_code(outer.code),
+                                      outer.io))
+    if plain:
+        plain_imports = (main_imports - {"process", library}) | {plain_library}
+        others.append((translation, "\n".join(
+            ["%% The translation of run-%s.m in %s in %s for mmc: the"
+             % (feature.name, inner.name, outer.name),
+             "% same program in plain Mercury, which must print the same."] +
+            program(translation, plain_imports, NESTED.strip("\n") + "\n",
+                    outer_code(outer.plain or outer.code), outer.io))))
+    return text, others
+
+
 def gpu_test(feature, context):
     """The test that runs a GPU context's test on the GPU."""
     test = "run-%s.m" % feature.name
@@ -1239,23 +1373,39 @@ def main():
                     directory, "run-%s-gpu.test" % feature.name),
                     gpu_test(feature, context)))
             for path, content in files:
-                old = None
-                if os.path.exists(path):
-                    with open(path, encoding="utf-8") as f:
-                        old = f.read()
-                # The oracle adds its lines to the test's header; compare
-                # what this writes, the header's other lines and the body.
-                if old is not None and strip_generated(old) == content:
-                    continue
-                changed.append(path)
-                if not args.check:
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(content)
+                write_if_changed(path, content, args.check, changed)
+    by_name = {c.name: c for c in CONTEXTS}
+    features = {f.name: f for f in FEATURES}
+    for f, o, i in nested_triples():
+        directory = os.path.join(args.out, "nested", "%s-%s" % (o, i))
+        text, others = nested_text(features[f], by_name[o], by_name[i])
+        files = [(os.path.join(directory, "run-%s.m" % f), text)]
+        for name, other in others:
+            files.append((os.path.join(directory, "Inputs", name + ".m"),
+                          other))
+        for path, content in files:
+            write_if_changed(path, content, args.check, changed)
     for path in changed:
         print(("would change: " if args.check else "wrote: ") +
               os.path.relpath(path))
     sys.exit(1 if args.check and changed else 0)
+
+
+def write_if_changed(path, content, check, changed):
+    """Writes content to path, unless it is there already, as the oracle
+    left it; adds path to changed if not."""
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            old = f.read()
+        # The oracle adds its lines to the test's header; compare what this
+        # writes, the header's other lines and the body.
+        if strip_generated(old) == content:
+            return
+    changed.append(path)
+    if not check:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
 
 
 def strip_generated(text):
