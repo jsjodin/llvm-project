@@ -3,7 +3,7 @@ one per byte, and one more for the end of the file.
 
 RUN: merkc -fc1 -fdebug-dump-provenance %S/../Driver/Inputs/sumsq.m | FileCheck %s
 CHECK:      AllSources range_ [1..[[END:[0-9]+]]]
-CHECK-NEXT:    [1..1] (1 bytes) -> compiler '?'(0x3f)
+CHECK-NEXT:    [1..1] (1 bytes) -> reserved
 CHECK-NEXT:    [2..[[END]]] ([[SIZE:[0-9]+]] bytes) -> file {{.*}}sumsq.m
 CHECK-NEXT: SourceFile '{{.*}}sumsq.m': {{[0-9]+}} bytes, 19 lines
 CHECK-NEXT:   origin_[1] -> '{{.*}}sumsq.m' 1

@@ -25,14 +25,6 @@
 
 namespace merkurius::parser {
 
-llvm::raw_ostream &operator<<(llvm::raw_ostream &o, const MessageFixedText &t) {
-  std::size_t n{t.text().size()};
-  for (std::size_t j{0}; j < n; ++j) {
-    o << t.text()[j];
-  }
-  return o;
-}
-
 void MessageFormattedText::Format(const MessageFixedText *text, ...) {
   const char *p{text->text().begin()};
   std::string asString;
@@ -80,20 +72,6 @@ const char *MessageFormattedText::Convert(std::string &&s) {
   return conversions_.front().c_str();
 }
 
-const char *MessageFormattedText::Convert(const std::string_view &s) {
-  conversions_.emplace_front(s);
-  return conversions_.front().c_str();
-}
-
-const char *MessageFormattedText::Convert(std::string_view &&s) {
-  conversions_.emplace_front(s);
-  return conversions_.front().c_str();
-}
-
-const char *MessageFormattedText::Convert(CharBlock x) {
-  return Convert(x.ToString());
-}
-
 const char *MessageFormattedText::Convert(llvm::StringRef x) {
   return Convert(x.str());
 }
@@ -126,16 +104,6 @@ Severity Message::severity() const {
       text_);
 }
 
-Message &Message::set_severity(Severity severity) {
-  common::visit(
-      common::visitors{
-          [severity](MessageFixedText &x) { x.set_severity(severity); },
-          [severity](MessageFormattedText &x) { x.set_severity(severity); },
-      },
-      text_);
-  return *this;
-}
-
 std::string Message::ToString() const {
   return common::visit(
       common::visitors{
@@ -145,18 +113,6 @@ std::string Message::ToString() const {
           [](const MessageFormattedText &t) { return t.string(); },
       },
       text_);
-}
-
-void Message::ResolveProvenances(const AllSources &allSources) {
-  if (CharBlock * cb{std::get_if<CharBlock>(&location_)}) {
-    if (std::optional<ProvenanceRange> resolved{
-            allSources.GetProvenanceRange(*cb)}) {
-      location_ = *resolved;
-    }
-  }
-  if (Message * attachment{attachment_.get()}) {
-    attachment->ResolveProvenances(allSources);
-  }
 }
 
 std::optional<ProvenanceRange> Message::GetProvenanceRange(
@@ -177,8 +133,6 @@ static std::string Prefix(Severity severity) {
     return "warning: ";
   case Severity::Because:
     return "because: ";
-  case Severity::Context:
-    return "in the context: ";
   case Severity::Todo:
     return "error: not yet implemented: ";
   case Severity::None:
@@ -187,61 +141,15 @@ static std::string Prefix(Severity severity) {
   return "";
 }
 
-static llvm::raw_ostream::Colors PrefixColor(Severity severity) {
-  if (IsFatalSeverity(severity)) {
-    return llvm::raw_ostream::RED;
-  } else if (IsWarningSeverity(severity)) {
-    return llvm::raw_ostream::MAGENTA;
-  } else {
-    return llvm::raw_ostream::SAVEDCOLOR;
-  }
-}
-
-static constexpr int MAX_CONTEXTS_EMITTED{2};
-static constexpr bool OMIT_SHARED_CONTEXTS{true};
-
 void Message::Emit(llvm::raw_ostream &o, const AllSources &sources,
     bool echoSourceLine) const {
   std::optional<ProvenanceRange> provenanceRange{GetProvenanceRange(sources)};
-  sources.EmitMessage(o, provenanceRange, ToString(), Prefix(severity()),
-      PrefixColor(severity()), echoSourceLine);
-  // Refers to whether the attachment in the loop below is a context, but can't
-  // be declared inside the loop because the previous iteration's
-  // attachment->attachmentIsContext_ indicates this.
-  bool isContext{attachmentIsContext_};
-  int contextsEmitted{0};
-  // Emit attachments.
+  sources.EmitMessage(
+      o, provenanceRange, ToString(), Prefix(severity()), echoSourceLine);
   for (const Message *attachment{attachment_.get()}; attachment;
-       isContext = attachment->attachmentIsContext_,
-       attachment = attachment->attachment_.get()) {
-    Severity severity = isContext ? Severity::Context : attachment->severity();
-    auto emitAttachment = [&]() {
-      sources.EmitMessage(o, attachment->GetProvenanceRange(sources),
-          attachment->ToString(), Prefix(severity), PrefixColor(severity),
-          echoSourceLine);
-    };
-
-    if (isContext) {
-      // Truncate the number of contexts emitted.
-      if (contextsEmitted < MAX_CONTEXTS_EMITTED) {
-        emitAttachment();
-        ++contextsEmitted;
-      }
-      if constexpr (OMIT_SHARED_CONTEXTS) {
-        // Skip less specific contexts at the same location.
-        for (const Message *next_attachment{attachment->attachment_.get()};
-             next_attachment && next_attachment->attachmentIsContext_ &&
-             next_attachment->AtSameLocation(*attachment);
-             next_attachment = next_attachment->attachment_.get()) {
-          attachment = next_attachment;
-        }
-        // NB, this loop increments `attachment` one more time after the
-        // previous loop is done advancing it to the last context at the same
-        // location.
-      }
-    } else {
-      emitAttachment();
-    }
+      attachment = attachment->attachment_.get()) {
+    sources.EmitMessage(o, attachment->GetProvenanceRange(sources),
+        attachment->ToString(), Prefix(attachment->severity()), echoSourceLine);
   }
 }
 
@@ -249,8 +157,7 @@ void Message::Emit(llvm::raw_ostream &o, const AllSources &sources,
 // visible aspects of their attachments are the same
 bool Message::operator==(const Message &that) const {
   if (!AtSameLocation(that) || ToString() != that.ToString() ||
-      severity() != that.severity() ||
-      attachmentIsContext_ != that.attachmentIsContext_) {
+      severity() != that.severity()) {
     return false;
   }
   const Message *thatAttachment{that.attachment_.get()};
@@ -279,10 +186,6 @@ Message &Message::Attach(Message *m) {
   return *this;
 }
 
-Message &Message::Attach(std::unique_ptr<Message> &&m) {
-  return Attach(m.release());
-}
-
 bool Message::AtSameLocation(const Message &that) const {
   return common::visit(
       common::visitors{
@@ -295,19 +198,6 @@ bool Message::AtSameLocation(const Message &that) const {
           [](const auto &, const auto &) { return false; },
       },
       location_, that.location_);
-}
-
-void Messages::Copy(const Messages &that) {
-  for (const Message &m : that.messages_) {
-    Message copy{m};
-    Say(std::move(copy));
-  }
-}
-
-void Messages::ResolveProvenances(const AllSources &allSources) {
-  for (Message &m : messages_) {
-    m.ResolveProvenances(allSources);
-  }
 }
 
 void Messages::Emit(llvm::raw_ostream &o, const AllSources &allSources,
@@ -353,17 +243,6 @@ void Messages::Emit(llvm::raw_ostream &o, const AllSources &allSources,
       break;
     }
   }
-}
-
-void Messages::AttachTo(Message &msg, std::optional<Severity> severity) {
-  for (Message &m : messages_) {
-    Message m2{std::move(m)};
-    if (severity) {
-      m2.set_severity(*severity);
-    }
-    msg.Attach(std::move(m2));
-  }
-  messages_.clear();
 }
 
 bool Messages::AnyFatalError(bool warningsAreErrors) const {

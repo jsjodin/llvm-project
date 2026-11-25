@@ -50,12 +50,6 @@ void SourceFile::IdentifyPayload() {
   }
 }
 
-std::string DirectoryName(std::string path) {
-  llvm::SmallString<128> pathBuf{path};
-  llvm::sys::path::remove_filename(pathBuf);
-  return pathBuf.str().str();
-}
-
 std::optional<std::string> LocateSourceFile(
     std::string name, const std::list<std::string> &searchPath) {
   if (name == "-" || llvm::sys::path::is_absolute(name)) {

@@ -26,21 +26,20 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <variant>
 #include <vector>
 
 namespace merkurius::parser {
 
-// Every character of every source file, and every piece of text the
-// compiler inserts, has a provenance: an offset into an (unmaterialized)
-// concatenation of all of them. Given a Provenance, we can find the origin
-// that contains it in time O(log(# of origins)).
+// Every character of every source file has a provenance: an offset into an
+// (unmaterialized) concatenation of all of them. Given a Provenance, we can
+// find the origin that contains it in time O(log(# of origins)).
 //
 // Flang's prescanner rewrites its input into a cooked character stream and
 // keeps maps between cooked offsets and provenances. Merkurius has no such
 // stage: the lexer reads each source file's bytes directly (see source.h),
 // so a CharBlock points into a SourceFile's buffer and AllSources maps it to
-// its provenance itself.
+// its provenance itself. Nor does it insert text of its own, as Flang's
+// prescanner does, so every origin but the first is a source file.
 
 class Provenance {
 public:
@@ -81,9 +80,9 @@ public:
   ~AllSources();
 
   std::size_t size() const { return range_.size(); }
-  const char &operator[](Provenance) const;
 
-  void ClearSearchPath();
+  // The directories that imported modules are looked for in, after the
+  // importing module's (module-loader.cpp).
   void AppendSearchPathDirectory(std::string); // new last directory
   const std::list<std::string> &searchPath() const { return searchPath_; }
 
@@ -92,8 +91,6 @@ public:
   // the file can be reported even when the file is empty. On failure they
   // write the reason to `error` and return null.
   SourceFile *OpenPath(std::string path, llvm::raw_ostream &error);
-  SourceFile *Open(std::string path, llvm::raw_ostream &error,
-      std::optional<std::string> &&prependPath = std::nullopt);
   SourceFile *ReadStandardInput(llvm::raw_ostream &error);
   SourceFile *AddBuffer(
       std::string path, std::unique_ptr<llvm::MemoryBuffer>);
@@ -101,48 +98,26 @@ public:
   // The provenances of a source file opened above, its end included.
   ProvenanceRange GetProvenanceRange(const SourceFile &) const;
 
-  ProvenanceRange AddCompilerInsertion(std::string);
-  Provenance CompilerInsertionProvenance(char ch);
-
   bool IsValid(Provenance at) const { return range_.Contains(at); }
   bool IsValid(ProvenanceRange range) const {
     return range.size() > 0 && range_.Contains(range);
   }
-  void setShowColors(bool showColors) { showColors_ = showColors; }
-  bool getShowColors() const { return showColors_; }
   void EmitMessage(llvm::raw_ostream &, const std::optional<ProvenanceRange> &,
       const std::string &message, const std::string &prefix,
-      llvm::raw_ostream::Colors color, bool echoSourceLine = false) const;
-  const SourceFile *GetSourceFile(
-      Provenance, std::size_t *offset = nullptr) const;
-  const char *GetSource(ProvenanceRange) const;
+      bool echoSourceLine = false) const;
   std::optional<SourcePosition> GetSourcePosition(Provenance) const;
-  std::optional<ProvenanceRange> GetFirstFileProvenance() const;
-  std::string GetPath(Provenance) const;
-  int GetLineNumber(Provenance) const;
 
-  // Between CharBlocks within source files and their provenances. A block
-  // may end at, or be empty at, the end of its file.
+  // The provenances of a CharBlock within a source file. A block may end
+  // at, or be empty at, the end of its file.
   std::optional<ProvenanceRange> GetProvenanceRange(CharBlock) const;
-  std::optional<CharBlock> GetCharBlock(ProvenanceRange) const;
 
   llvm::raw_ostream &Dump(llvm::raw_ostream &) const;
 
 private:
-  struct Inclusion {
-    const SourceFile &source;
-  };
-  struct CompilerInsertion {
-    std::string text;
-  };
-
+  // A source file's provenances, or, with no source, the first origin's,
+  // which keeps provenance 0 for an uninitialized value.
   struct Origin {
-    Origin(ProvenanceRange, const SourceFile &);
-    Origin(ProvenanceRange, const std::string &);
-
-    const char &operator[](std::size_t) const;
-
-    std::variant<Inclusion, CompilerInsertion> u;
+    const SourceFile *source;
     ProvenanceRange covers;
   };
 
@@ -152,12 +127,10 @@ private:
   // Elements are in ascending & contiguous order of .covers.
   std::vector<Origin> origin_;
   ProvenanceRange range_;
-  std::map<char, Provenance> compilerInsertionProvenance_;
   std::vector<std::unique_ptr<SourceFile>> ownedSourceFiles_;
   // Index into origin_ of each source file, by the address of its content.
   std::map<const char *, std::size_t> fileOrigins_;
   std::list<std::string> searchPath_;
-  bool showColors_{false};
 };
 
 } // namespace merkurius::parser

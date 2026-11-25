@@ -36,7 +36,6 @@
 
 namespace merkurius::parser {
 
-std::string DirectoryName(std::string path);
 std::optional<std::string> LocateSourceFile(
     std::string name, const std::list<std::string> &searchPath);
 

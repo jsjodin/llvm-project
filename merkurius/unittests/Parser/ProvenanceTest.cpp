@@ -96,12 +96,8 @@ TEST(AllSourcesTest, CharBlocksAndProvenances) {
   std::optional<ProvenanceRange> range{all.GetProvenanceRange(bar)};
   ASSERT_TRUE(range);
   EXPECT_EQ(range->start(), rb.start());
-  EXPECT_EQ(all.GetPath(range->start()), "b.m");
-  EXPECT_EQ(all[range->start() + std::size_t{2}], 'r');
-  std::optional<CharBlock> back{all.GetCharBlock(*range)};
-  ASSERT_TRUE(back);
-  EXPECT_EQ(back->data(), bar.data());
-  EXPECT_EQ(*back, "bar");
+  EXPECT_EQ(range->size(), 3u);
+  EXPECT_EQ(*all.GetSourcePosition(range->start())->path, "b.m");
 
   // An empty block at the end of a file has the file's end provenance.
   CharBlock end{a.content().end(), std::size_t{0}};
@@ -124,8 +120,8 @@ TEST(AllSourcesTest, EmitMessageCaret) {
   ProvenanceRange range{all.GetProvenanceRange(file).start() + y, 1};
   std::string out;
   llvm::raw_string_ostream os{out};
-  all.EmitMessage(os, range, "undefined variable",
-      "error: ", llvm::raw_ostream::RED, /*echoSourceLine=*/true);
+  all.EmitMessage(os, range, "undefined variable", "error: ",
+      /*echoSourceLine=*/true);
   EXPECT_EQ(out,
       "test.m:2:18: error: undefined variable\n"
       "  \tX = \"\xc3\xa5\xc3\xa4\xc3\xb6\" ++ y.\n"

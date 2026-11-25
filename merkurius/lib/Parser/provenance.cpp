@@ -14,11 +14,9 @@
 
 #include "merkurius/Parser/provenance.h"
 #include "merkurius/Common/idioms.h"
-#include "merkurius/Common/visit.h"
 #include "llvm/Support/Unicode.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
-#include <set>
 #include <utility>
 
 namespace merkurius::parser {
@@ -27,17 +25,10 @@ AllSources::AllSources() : range_{1, 1} {
   // Start the origin_ array with a dummy entry that has a forced provenance,
   // so that provenance offset 0 remains reserved as an uninitialized
   // value.
-  origin_.emplace_back(range_, std::string{'?'});
+  origin_.push_back({nullptr, range_});
 }
 
 AllSources::~AllSources() {}
-
-const char &AllSources::operator[](Provenance at) const {
-  const Origin &origin{MapToOrigin(at)};
-  return origin[origin.covers.MemberOffset(at)];
-}
-
-void AllSources::ClearSearchPath() { searchPath_.clear(); }
 
 void AllSources::AppendSearchPathDirectory(std::string directory) {
   searchPath_.push_back(directory);
@@ -49,7 +40,7 @@ SourceFile *AllSources::AddSourceFile(
   CHECK(range_.AnnexIfPredecessor(covers));
   CHECK(origin_.back().covers.ImmediatelyPrecedes(covers));
   fileOrigins_.emplace(source->content().data(), origin_.size());
-  origin_.emplace_back(covers, *source);
+  origin_.push_back({source.get(), covers});
   return ownedSourceFiles_.emplace_back(std::move(source)).get();
 }
 
@@ -59,25 +50,6 @@ SourceFile *AllSources::OpenPath(
   if (source->Open(path, error)) {
     return AddSourceFile(std::move(source));
   } else {
-    return nullptr;
-  }
-}
-
-SourceFile *AllSources::Open(std::string path, llvm::raw_ostream &error,
-    std::optional<std::string> &&prependPath) {
-  if (prependPath) {
-    // Set to "." for the initial source file, or to the directory of the
-    // importing module for its imports.
-    searchPath_.emplace_front(std::move(*prependPath));
-  }
-  std::optional<std::string> found{LocateSourceFile(path, searchPath_)};
-  if (prependPath) {
-    searchPath_.pop_front();
-  }
-  if (found) {
-    return OpenPath(*found, error);
-  } else {
-    error << "source file '" << path << "' was not found";
     return nullptr;
   }
 }
@@ -103,28 +75,6 @@ ProvenanceRange AllSources::GetProvenanceRange(const SourceFile &source) const {
   return origin_[iter->second].covers;
 }
 
-ProvenanceRange AllSources::AddCompilerInsertion(std::string text) {
-  ProvenanceRange covers{range_.NextAfter(), text.size()};
-  CHECK(range_.AnnexIfPredecessor(covers));
-  CHECK(origin_.back().covers.ImmediatelyPrecedes(covers));
-  origin_.emplace_back(covers, text);
-  return covers;
-}
-
-static void EmitPrefix(llvm::raw_ostream &o, llvm::raw_ostream::Colors color,
-    const std::string &prefix, bool showColors) {
-  if (prefix.empty()) {
-    return;
-  }
-  if (showColors) {
-    o.changeColor(color, true);
-  }
-  o << prefix;
-  if (showColors) {
-    o.resetColor();
-  }
-}
-
 // Writes whitespace as wide on screen as `text`, keeping its tabs, so that a
 // caret written after it lines up under the next character, multi-byte
 // UTF-8 characters included.
@@ -142,129 +92,53 @@ static void EmitPadding(llvm::raw_ostream &o, llvm::StringRef text) {
 
 void AllSources::EmitMessage(llvm::raw_ostream &o,
     const std::optional<ProvenanceRange> &range, const std::string &message,
-    const std::string &prefix, llvm::raw_ostream::Colors color,
-    bool echoSourceLine) const {
-  if (!range) {
-    EmitPrefix(o, color, prefix, this->getShowColors());
-    o << message << '\n';
+    const std::string &prefix, bool echoSourceLine) const {
+  const Origin *origin{nullptr};
+  if (range) {
+    CHECK(IsValid(*range));
+    origin = &MapToOrigin(range->start());
+  }
+  if (!origin || !origin->source) {
+    o << prefix << message << '\n';
     return;
   }
-  CHECK(IsValid(*range));
-  const Origin &origin{MapToOrigin(range->start())};
-  common::visit(
-      common::visitors{
-          [&](const Inclusion &inc) {
-            std::size_t offset{origin.covers.MemberOffset(range->start())};
-            SourcePosition pos{inc.source.GetSourcePosition(offset)};
-            o << pos.path << ':' << pos.line << ':' << pos.column << ": ";
-            EmitPrefix(o, color, prefix, this->getShowColors());
-            o << message << '\n';
-            if (echoSourceLine) {
-              llvm::StringRef line{inc.source.GetLine(pos.trueLineNumber)};
-              std::size_t column{
-                  std::min<std::size_t>(pos.column - 1, line.size())};
-              o << "  " << line << "\n  ";
-              EmitPadding(o, line.take_front(column));
-              o << '^';
-              if (range->size() > 1) {
-                // Underline the rest of the range if it is on this line.
-                std::size_t end{column + range->size()};
-                if (end <= line.size()) {
-                  llvm::StringRef rest{line.slice(column, end)};
-                  int width{llvm::sys::unicode::columnWidthUTF8(rest)};
-                  if (width < 0) {
-                    width = static_cast<int>(rest.size());
-                  }
-                  for (int j{1}; j < width; ++j) {
-                    o << '^';
-                  }
-                }
-              }
-              o << '\n';
-            }
-          },
-          [&](const CompilerInsertion &) {
-            EmitPrefix(o, color, prefix, this->getShowColors());
-            o << message << '\n';
-          },
-      },
-      origin.u);
-}
-
-const SourceFile *AllSources::GetSourceFile(
-    Provenance at, std::size_t *offset) const {
-  const Origin &origin{MapToOrigin(at)};
-  return common::visit(common::visitors{
-                           [&](const Inclusion &inc) {
-                             if (offset) {
-                               *offset = origin.covers.MemberOffset(at);
-                             }
-                             return &inc.source;
-                           },
-                           [offset](const CompilerInsertion &) {
-                             if (offset) {
-                               *offset = 0;
-                             }
-                             return static_cast<const SourceFile *>(nullptr);
-                           },
-                       },
-      origin.u);
-}
-
-const char *AllSources::GetSource(ProvenanceRange range) const {
-  Provenance start{range.start()};
-  const Origin &origin{MapToOrigin(start)};
-  return origin.covers.Contains(range)
-      ? &origin[origin.covers.MemberOffset(start)]
-      : nullptr;
+  const SourceFile *source{origin->source};
+  std::size_t offset{origin->covers.MemberOffset(range->start())};
+  SourcePosition pos{source->GetSourcePosition(offset)};
+  o << pos.path << ':' << pos.line << ':' << pos.column << ": " << prefix
+    << message << '\n';
+  if (!echoSourceLine) {
+    return;
+  }
+  llvm::StringRef line{source->GetLine(pos.trueLineNumber)};
+  std::size_t column{std::min<std::size_t>(pos.column - 1, line.size())};
+  o << "  " << line << "\n  ";
+  EmitPadding(o, line.take_front(column));
+  o << '^';
+  if (range->size() > 1) {
+    // Underline the rest of the range if it is on this line.
+    std::size_t end{column + range->size()};
+    if (end <= line.size()) {
+      llvm::StringRef rest{line.slice(column, end)};
+      int width{llvm::sys::unicode::columnWidthUTF8(rest)};
+      if (width < 0) {
+        width = static_cast<int>(rest.size());
+      }
+      for (int j{1}; j < width; ++j) {
+        o << '^';
+      }
+    }
+  }
+  o << '\n';
 }
 
 std::optional<SourcePosition> AllSources::GetSourcePosition(
     Provenance prov) const {
   const Origin &origin{MapToOrigin(prov)};
-  return common::visit(
-      common::visitors{
-          [&](const Inclusion &inc) -> std::optional<SourcePosition> {
-            std::size_t offset{origin.covers.MemberOffset(prov)};
-            return inc.source.GetSourcePosition(offset);
-          },
-          [](const CompilerInsertion &) -> std::optional<SourcePosition> {
-            return std::nullopt;
-          },
-      },
-      origin.u);
-}
-
-std::optional<ProvenanceRange> AllSources::GetFirstFileProvenance() const {
-  for (const auto &origin : origin_) {
-    if (std::holds_alternative<Inclusion>(origin.u)) {
-      return origin.covers;
-    }
+  if (!origin.source) {
+    return std::nullopt;
   }
-  return std::nullopt;
-}
-
-std::string AllSources::GetPath(Provenance at) const {
-  std::size_t offset{0};
-  const SourceFile *source{GetSourceFile(at, &offset)};
-  return source ? *source->GetSourcePosition(offset).path : ""s;
-}
-
-int AllSources::GetLineNumber(Provenance at) const {
-  std::size_t offset{0};
-  const SourceFile *source{GetSourceFile(at, &offset)};
-  return source ? source->GetSourcePosition(offset).line : 0;
-}
-
-Provenance AllSources::CompilerInsertionProvenance(char ch) {
-  auto iter{compilerInsertionProvenance_.find(ch)};
-  if (iter != compilerInsertionProvenance_.end()) {
-    return iter->second;
-  }
-  ProvenanceRange newCharRange{AddCompilerInsertion(std::string{ch})};
-  Provenance newCharProvenance{newCharRange.start()};
-  compilerInsertionProvenance_.insert(std::make_pair(ch, newCharProvenance));
-  return newCharProvenance;
+  return origin.source->GetSourcePosition(origin.covers.MemberOffset(prov));
 }
 
 std::optional<ProvenanceRange> AllSources::GetProvenanceRange(
@@ -276,7 +150,7 @@ std::optional<ProvenanceRange> AllSources::GetProvenanceRange(
   }
   --iter;
   const Origin &origin{origin_[iter->second]};
-  llvm::StringRef content{std::get<Inclusion>(origin.u).source.content()};
+  llvm::StringRef content{origin.source->content()};
   if (block.end() > content.end()) {
     return std::nullopt;
   }
@@ -285,44 +159,6 @@ std::optional<ProvenanceRange> AllSources::GetProvenanceRange(
   return ProvenanceRange{origin.covers.start() +
           static_cast<std::size_t>(block.begin() - content.begin()),
       std::max<std::size_t>(block.size(), 1)};
-}
-
-std::optional<CharBlock> AllSources::GetCharBlock(ProvenanceRange range) const {
-  if (!IsValid(range.start())) {
-    return std::nullopt;
-  }
-  const Origin &origin{MapToOrigin(range.start())};
-  const auto *inc{std::get_if<Inclusion>(&origin.u)};
-  if (!inc) {
-    return std::nullopt;
-  }
-  llvm::StringRef content{inc->source.content()};
-  std::size_t offset{origin.covers.MemberOffset(range.start())};
-  if (offset + range.size() > content.size()) {
-    return std::nullopt;
-  }
-  return CharBlock{content.data() + offset, range.size()};
-}
-
-AllSources::Origin::Origin(ProvenanceRange r, const SourceFile &source)
-    : u{Inclusion{source}}, covers{r} {}
-AllSources::Origin::Origin(ProvenanceRange r, const std::string &text)
-    : u{CompilerInsertion{text}}, covers{r} {}
-
-const char &AllSources::Origin::operator[](std::size_t n) const {
-  // The provenance after a file's last byte stands for its end.
-  static const char endOfFile{'\0'};
-  return common::visit(common::visitors{
-                           [n](const Inclusion &inc) -> const char & {
-                             llvm::StringRef content{inc.source.content()};
-                             return n < content.size() ? content.data()[n]
-                                                       : endOfFile;
-                           },
-                           [n](const CompilerInsertion &ins) -> const char & {
-                             return ins.text[n];
-                           },
-                       },
-      u);
 }
 
 const AllSources::Origin &AllSources::MapToOrigin(Provenance at) const {
@@ -355,21 +191,12 @@ llvm::raw_ostream &AllSources::Dump(llvm::raw_ostream &o) const {
     o << "   ";
     DumpRange(o, m.covers);
     o << " -> ";
-    common::visit(common::visitors{
-                      [&](const Inclusion &inc) {
-                        o << "file " << inc.source.path();
-                        sources.push_back(&inc.source);
-                      },
-                      [&](const CompilerInsertion &ins) {
-                        o << "compiler '" << ins.text << '\'';
-                        if (ins.text.length() == 1) {
-                          int ch = ins.text[0];
-                          o << "(0x";
-                          o.write_hex(ch & 0xff) << ")";
-                        }
-                      },
-                  },
-        m.u);
+    if (m.source) {
+      o << "file " << m.source->path();
+      sources.push_back(m.source);
+    } else {
+      o << "reserved";
+    }
     o << '\n';
   }
   for (const SourceFile *sf : sources) {

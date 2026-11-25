@@ -27,7 +27,6 @@
 #include "provenance.h"
 #include "merkurius/Common/idioms.h"
 #include "merkurius/Common/reference-counted.h"
-#include "merkurius/Common/restorer.h"
 #include "llvm/ADT/StringRef.h"
 #include <cstddef>
 #include <forward_list>
@@ -45,8 +44,7 @@ namespace merkurius::parser {
 enum class Severity {
   Error, // fatal error that prevents code and interface file generation
   Warning, // likely problem
-  Because, // for AttachTo(), explanatory attachment to support another message
-  Context, // (internal): attachment from SetContext()
+  Because, // an explanatory attachment to support another message
   Todo, // a feature that's not yet implemented, a fatal error
   None // everything else, common for attachments with source locations
 };
@@ -152,9 +150,6 @@ private:
   const char *Convert(char *s) { return s; }
   const char *Convert(const std::string &);
   const char *Convert(std::string &&);
-  const char *Convert(const std::string_view &);
-  const char *Convert(std::string_view &&);
-  const char *Convert(CharBlock);
   const char *Convert(llvm::StringRef);
   std::intmax_t Convert(std::int64_t x) { return x; }
   std::uintmax_t Convert(std::uint64_t x) { return x; }
@@ -192,14 +187,7 @@ public:
       : location_{r}, text_{MessageFormattedText{
                           t, std::forward<A>(x), std::forward<As>(xs)...}} {}
 
-  Reference attachment() const { return attachment_; }
-
-  void SetContext(Message *c) {
-    attachment_ = c;
-    attachmentIsContext_ = true;
-  }
   Message &Attach(Message *);
-  Message &Attach(std::unique_ptr<Message> &&);
   template <typename... A> Message &Attach(A &&...args) {
     return Attach(new Message{std::forward<A>(args)...}); // reference-counted
   }
@@ -207,7 +195,6 @@ public:
   bool SortBefore(const Message &that) const;
   bool IsFatal() const;
   Severity severity() const;
-  Message &set_severity(Severity);
   std::string ToString() const;
   std::optional<ProvenanceRange> GetProvenanceRange(const AllSources &) const;
   // The location, when it is still a CharBlock.
@@ -217,10 +204,6 @@ public:
   void Emit(llvm::raw_ostream &, const AllSources &,
       bool echoSourceLine = true) const;
 
-  // If this Message or any of its attachments locates itself via a CharBlock,
-  // replace its location with the corresponding ProvenanceRange.
-  void ResolveProvenances(const AllSources &);
-
   bool operator==(const Message &that) const;
   bool operator!=(const Message &that) const { return !(*this == that); }
   bool AtSameLocation(const Message &) const;
@@ -228,7 +211,6 @@ public:
 private:
   std::variant<ProvenanceRange, CharBlock> location_;
   std::variant<MessageFixedText, MessageFormattedText> text_;
-  bool attachmentIsContext_{false};
   Reference attachment_;
 };
 
@@ -254,92 +236,14 @@ public:
     messages_.splice(messages_.end(), that.messages_);
   }
 
-  void Copy(const Messages &);
-  void ResolveProvenances(const AllSources &);
   void Emit(llvm::raw_ostream &, const AllSources &,
       bool echoSourceLines = true, std::size_t maxErrorsToEmit = 0,
       bool warningsAreErrors = false) const;
-  void AttachTo(Message &, std::optional<Severity> = std::nullopt);
   bool AnyFatalError(bool warningsAreErrors = false) const;
 
 private:
   std::list<Message> messages_;
 };
 
-class ContextualMessages {
-public:
-  ContextualMessages() = default;
-  ContextualMessages(CharBlock at, Messages *m) : at_{at}, messages_{m} {}
-  explicit ContextualMessages(Messages *m) : messages_{m} {}
-  ContextualMessages(const ContextualMessages &that)
-      : at_{that.at_}, messages_{that.messages_} {}
-
-  CharBlock at() const { return at_; }
-  Messages *messages() const { return messages_; }
-  Message::Reference contextMessage() const { return contextMessage_; }
-  bool empty() const { return !messages_ || messages_->empty(); }
-
-  // Set CharBlock for messages; restore when the returned value is deleted
-  common::Restorer<CharBlock> SetLocation(CharBlock at) {
-    if (at.empty()) {
-      at = at_;
-    }
-    return common::ScopedSet(at_, std::move(at));
-  }
-
-  common::Restorer<Message::Reference> SetContext(Message *m) {
-    if (!m) {
-      m = contextMessage_.get();
-    }
-    return common::ScopedSet(contextMessage_, m);
-  }
-
-  // Diverts messages to another buffer; restored when the returned
-  // value is deleted.
-  common::Restorer<Messages *> SetMessages(Messages &buffer) {
-    return common::ScopedSet(messages_, &buffer);
-  }
-  // Discard future messages until the returned value is deleted.
-  common::Restorer<Messages *> DiscardMessages() {
-    return common::ScopedSet(messages_, nullptr);
-  }
-
-  template <typename... A> Message *Say(A &&...args) {
-    return Say(at_, std::forward<A>(args)...);
-  }
-
-  template <typename... A> Message *Say(CharBlock at, A &&...args) {
-    if (messages_ != nullptr) {
-      auto &msg{messages_->Say(at, std::forward<A>(args)...)};
-      if (contextMessage_) {
-        msg.SetContext(contextMessage_.get());
-      }
-      return &msg;
-    } else {
-      return nullptr;
-    }
-  }
-
-  template <typename... A>
-  Message *Say(std::optional<CharBlock> at, A &&...args) {
-    return Say(at.value_or(at_), std::forward<A>(args)...);
-  }
-
-  Message *Say(Message &&msg) {
-    if (messages_ != nullptr) {
-      if (contextMessage_) {
-        msg.SetContext(contextMessage_.get());
-      }
-      return &messages_->Say(std::move(msg));
-    } else {
-      return nullptr;
-    }
-  }
-
-private:
-  CharBlock at_;
-  Messages *messages_{nullptr};
-  Message::Reference contextMessage_;
-};
 } // namespace merkurius::parser
 #endif // MERKURIUS_PARSER_MESSAGE_H_

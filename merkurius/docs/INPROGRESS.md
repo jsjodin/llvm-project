@@ -9129,8 +9129,11 @@ tested shows.
    NotYet reports, but for a must-match deconstruction in a body that
    common subexpression elimination changed, which no program found
    reaches, as a loop's body is checked as a procedure of its own.
-   Flang's code that merkc does not use, in `provenance.cpp`,
-   `message.cpp` and the headers copied with them, is removed next.
+   Flang's code that merkc did not use, which made most of
+   `provenance.cpp`'s and `message.cpp`'s unreached lines, was removed
+   (2026-11-25): compiler insertions, a search-path open, colours,
+   contextual messages and their attachments, unused lookups and
+   conversions, `restorer.h`, and `char-block.h`'s blank helpers.
 
 ### Nested submodules
 
