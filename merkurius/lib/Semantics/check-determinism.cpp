@@ -3279,6 +3279,51 @@ static void CheckInitialisers(const parser::TokenSequence &tokens,
   }
 }
 
+// A type's comparison predicate must be det (reference manual,
+// "User-defined equality and comparison"): compare/3 at the type is det and
+// calls its procedure that gives the result and takes the values in, so
+// that procedure may be det or erroneous, but must not fail or have more
+// solutions. An equality predicate, with no outputs, may be nondet, as mmc
+// accepts (see the register). A procedure whose determinism is inferred
+// rather than declared is not checked here.
+static void CheckComparisonDeterminism(TypeChecking &types, ModeChecking &modes,
+    parser::Messages &messages, const NameResolution &resolution) {
+  InstOps &ops{modes.ops()};
+  for (const Symbol *type : resolution.module().symbols()) {
+    const UserEquality *user{
+        type->kind == SymbolKind::Type ? types.UserEqualityOf(*type) : nullptr};
+    if (!user || !user->comparison ||
+        user->comparison->module != resolution.module().name()) {
+      continue;
+    }
+    for (const Procedure *procedure : modes.ProceduresOf(*user->comparison)) {
+      if (procedure->modes.size() != 3 || !procedure->determinism) {
+        continue;
+      }
+      bool fits{true};
+      for (auto [i, mode] : llvm::enumerate(procedure->modes)) {
+        bool output{ops.IsFree(mode.initial) && !ops.IsFree(mode.final)};
+        fits = fits &&
+            (i == 0 ? output
+                    : !ops.IsFree(mode.initial) && !ops.IsFree(mode.final));
+      }
+      if (!fits) {
+        continue;
+      }
+      if (!Within(ComponentsOf(*procedure->determinism),
+              ComponentsOf(parser::Determinism::Det))) {
+        // mmc: "In `__Compare__'(uo, in, in): error: implicit determinism
+        // declaration not satisfied. Declared `det', inferred `multi'."
+        messages.Say(type->source,
+            "the comparison predicate of type %s/%u must be det, but %s is %s"_err_en_US,
+            type->name.str(), type->arity, ProcedureToString(*procedure),
+            DeterminismName(*procedure->determinism));
+      }
+      break;
+    }
+  }
+}
+
 // A procedure of the module with neither clauses nor a foreign_proc for C,
 // where its predicate or function has them for another mode. The manual
 // says it is an error ("pragma foreign_proc"); mmc gives it no solutions,
@@ -3330,6 +3375,7 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
   auto result{std::make_unique<DeterminismChecking>()};
   if (tree && resolution && analyse) {
     CheckInitialisers(tokens, types, modes, messages, *tree, *resolution);
+    CheckComparisonDeterminism(types, modes, messages, *resolution);
   }
   result->modes_ = &modes;
   if (tree && resolution) {
