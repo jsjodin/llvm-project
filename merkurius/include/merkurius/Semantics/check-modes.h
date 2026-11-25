@@ -41,6 +41,7 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace merkurius::semantics {
@@ -254,6 +255,11 @@ struct ModeCheckOptions {
   // reported, as the library's modules have those that code generation
   // builds in or that are not written yet. It goes with the option.
   bool stubUnimplemented{false};
+  // The arguments, by predicate and position, whose modes are inferred
+  // shared where the call's are unique: uniqueness checking found that
+  // the unique mode first inferred was wrong for them (see
+  // CheckUniqueness).
+  std::set<std::pair<const Symbol *, unsigned>> sharedArguments;
 };
 
 std::unique_ptr<ModeChecking> CheckModes(const parser::ParseTree &,

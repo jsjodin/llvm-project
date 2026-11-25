@@ -1803,7 +1803,7 @@ private:
 
   Result CheckClause(const ClauseTypes &, const Procedure &, ClauseModes &);
   void RunPass();
-  std::vector<ArgMode> InferredModes(
+  std::vector<ArgMode> InferredModes(const Symbol &callee,
       llvm::ArrayRef<VarId> arguments, const InstMap &, const Live &);
   const Procedure *Infer(const Symbol &, llvm::ArrayRef<ArgMode>);
   std::string RejectedText(const Procedure &);
@@ -4077,7 +4077,7 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
   if (inferable && !chosen) {
     // A call whose insts, normalised, are those of a rejected mode is a
     // call of it, as in mmc.
-    std::vector<ArgMode> inferred{InferredModes(arguments, map, live)};
+    std::vector<ArgMode> inferred{InferredModes(callee, arguments, map, live)};
     if (auto rejected{llvm::find_if(procedures,
             [&](const Procedure *p) {
               return rejections_.count(p) &&
@@ -4176,13 +4176,20 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
 // (Overton, 3.4.2): its initial insts are the arguments', normalised, and
 // its final insts not_reached until its clauses are checked, but for a
 // unique argument not used after, which it clobbers, as mmc does, so di.
-std::vector<ArgMode> ProcedureChecker::InferredModes(
+// An argument that uniqueness checking found must not be unique is shared
+// instead, so in.
+std::vector<ArgMode> ProcedureChecker::InferredModes(const Symbol &callee,
     llvm::ArrayRef<VarId> arguments, const InstMap &map, const Live &live) {
   std::vector<ArgMode> modes;
-  for (VarId var : arguments) {
+  for (unsigned i{0}; i < arguments.size(); ++i) {
+    VarId var{arguments[i]};
     const Inst *initial{ops_.Normalise(map[var], TypeOf(var))};
     const Inst *final{insts_.NotReached()};
-    if (!live[var] && initial->kind == InstKind::Ground) {
+    if (initial->kind == InstKind::Ground &&
+        initial->uniqueness < Uniqueness::Shared &&
+        options_.sharedArguments.count({&callee, i})) {
+      initial = insts_.Ground(Uniqueness::Shared);
+    } else if (!live[var] && initial->kind == InstKind::Ground) {
       if (initial->uniqueness == Uniqueness::Unique) {
         final = insts_.Ground(Uniqueness::Clobbered);
       } else if (initial->uniqueness == Uniqueness::MostlyUnique) {

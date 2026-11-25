@@ -57,8 +57,17 @@ namespace merkurius::semantics {
 
 // With `mmc`, as mmc does, which misses some values an if-then-else needs
 // (see the design document's register).
-void CheckUniqueness(const parser::TokenSequence &, ModeChecking &,
-    const DeterminismChecking &, parser::Messages &, bool mmc = false);
+//
+// Each error at an argument of a call to an inferred procedure, mostly
+// unique where the procedure's mode first inferred wants it unique, also
+// gives that argument, by predicate and position. Mode checking again with
+// those inferred shared (ModeCheckOptions::sharedArguments) can accept the
+// module: a loop's predicate inferred from a call with a literal list is
+// first inferred (di, uo), which a body that leaves a choice point does
+// not allow.
+std::set<std::pair<const Symbol *, unsigned>> CheckUniqueness(
+    const parser::TokenSequence &, ModeChecking &, const DeterminismChecking &,
+    parser::Messages &, bool mmc = false);
 
 } // namespace merkurius::semantics
 #endif // MERKURIUS_SEMANTICS_CHECK_UNIQUENESS_H_

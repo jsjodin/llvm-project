@@ -66,6 +66,10 @@ public:
 
   // The first error in the body, if any: where, and its text.
   std::optional<std::pair<parser::CharBlock, std::string>> Check();
+  // The argument of an inferred procedure that the error is at, if any.
+  std::optional<std::pair<const Symbol *, unsigned>> shared() const {
+    return shared_;
+  }
 
 private:
   parser::CharBlock Source(TokenRange range) const {
@@ -116,9 +120,11 @@ private:
   void Closure(const Body *);
   void Leaf(const Body *);
   // That argument i of a call, `var`, is mostly_unique where its mode
-  // wants it unique.
+  // wants it unique; `callee` is the procedure called, if not a
+  // higher-order call.
   void CheckArgument(const Body *, const ArgMode &, BodyVar var,
-      const std::string &where);
+      const std::string &where, const Procedure *callee = nullptr,
+      unsigned i = 0);
   // Whether a final inst clobbers the value, so that it is not used after.
   bool Clobbers(const Inst *final) const;
   // That the head variables `head`, with the final insts `finals`, made
@@ -138,6 +144,8 @@ private:
   const ProcedureBody &body_;
   // Whether to miss what mmc misses.
   bool mmc_;
+  // The argument of an inferred procedure that the error is at, if any.
+  std::optional<std::pair<const Symbol *, unsigned>> shared_;
   std::map<const Body *, Vars> uses_;
   // The variables bound, and those that are mostly_unique, at the point
   // being checked; whether only its first solution is wanted.
@@ -630,7 +638,8 @@ void UniquenessChecker::Leaf(const Body *goal) {
         CheckArgument(goal, callee->modes[i], arguments[i],
             (result ? std::string{"the result"}
                     : "argument " + std::to_string(i + 1)) +
-                " of the call to " + what);
+                " of the call to " + what,
+            callee, i);
       }
     }
   } else if (goal->kind == BodyKind::HOCall && goal->modes) {
@@ -752,7 +761,8 @@ const Inst *UniquenessChecker::Apply(const Inst *inst, const Parts &mark) {
 }
 
 void UniquenessChecker::CheckArgument(const Body *goal, const ArgMode &mode,
-    BodyVar var, const std::string &where) {
+    BodyVar var, const std::string &where, const Procedure *callee,
+    unsigned i) {
   const Parts *mark{MarkOf(var)};
   if (!mark) {
     return;
@@ -773,6 +783,9 @@ void UniquenessChecker::CheckArgument(const Body *goal, const ArgMode &mode,
       InClause() + ": mode error in " + where + ": " + Name(var) +
           " has inst " + InstToString(*inst) + ", but " +
           InstToString(*mode.initial) + " is expected"};
+  if (callee && callee->inferred) {
+    shared_ = {callee->symbol, i};
+  }
 }
 
 bool UniquenessChecker::Clobbers(const Inst *final) const {
@@ -854,9 +867,11 @@ UniquenessChecker::Check() {
 
 } // namespace
 
-void CheckUniqueness(const parser::TokenSequence &tokens, ModeChecking &modes,
+std::set<std::pair<const Symbol *, unsigned>> CheckUniqueness(
+    const parser::TokenSequence &tokens, ModeChecking &modes,
     const DeterminismChecking &determinism, parser::Messages &messages,
     bool mmc) {
+  std::set<std::pair<const Symbol *, unsigned>> shared;
   for (const ProcedureBody &body : determinism.bodies()) {
     // Only bodies whose determinisms were inferred, so that it is known
     // where backtracking can happen.
@@ -866,8 +881,12 @@ void CheckUniqueness(const parser::TokenSequence &tokens, ModeChecking &modes,
     UniquenessChecker checker{tokens, modes, body, mmc};
     if (auto error{checker.Check()}) {
       messages.Say(error->first, "%s"_err_en_US, error->second);
+      if (checker.shared()) {
+        shared.insert(*checker.shared());
+      }
     }
   }
+  return shared;
 }
 
 } // namespace merkurius::semantics

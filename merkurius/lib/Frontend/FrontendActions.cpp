@@ -47,6 +47,8 @@
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Parser/Parser.h"
+#include <list>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -753,6 +755,45 @@ struct Analysed {
   semantics::LoopTranslation loops;
 };
 
+// The passes from mode checking to uniqueness checking, run once with
+// `options`: their results, their messages, and what uniqueness checking
+// finds must be inferred shared.
+struct ModeRun {
+  std::unique_ptr<semantics::ModeChecking> modes;
+  std::unique_ptr<semantics::DeterminismChecking> determinism;
+  parser::Messages messages;
+  std::size_t errors{0};
+  std::set<std::pair<const semantics::Symbol *, unsigned>> shared;
+};
+
+ModeRun CheckModesOnce(CompilerInstance &ci, Resolved &r,
+    semantics::TypeChecking &types, const semantics::ModeCheckOptions &options,
+    bool earlier) {
+  const FrontendOptions &frontend{ci.getFrontendOpts()};
+  ModeRun run;
+  std::size_t before{r.messages.messages().size()};
+  run.modes = semantics::CheckModes(
+      *r.tree, r.tokens, *r.form, *r.resolution, types, r.messages, options);
+  if (frontend.warnUnselectedMessage) {
+    semantics::CheckReceives(
+        r.tokens, types, run.modes->constructors(), r.messages);
+  }
+  run.determinism = semantics::CheckDeterminism(r.tokens, types, *run.modes,
+      r.messages, !earlier, r.tree, r.resolution.get());
+  semantics::CheckForeign(*r.tree, r.tokens, *r.resolution, *run.modes,
+      *run.determinism, r.messages);
+  semantics::CheckPragmas(
+      *r.tree, r.tokens, *r.resolution, *run.modes, r.messages);
+  run.shared = semantics::CheckUniqueness(r.tokens, *run.modes,
+      *run.determinism, r.messages, frontend.mmcUniqueness);
+  std::list<parser::Message> &list{r.messages.messages()};
+  run.messages.messages().splice(run.messages.messages().end(), list,
+      std::next(list.begin(), before), list.end());
+  run.errors = llvm::count_if(run.messages.messages(),
+      [](const parser::Message &m) { return m.IsFatal(); });
+  return run;
+}
+
 Analysed Analyse(CompilerInstance &ci, Resolved &r) {
   const FrontendOptions &frontend{ci.getFrontendOpts()};
   semantics::TypeCheckOptions typeOptions;
@@ -772,20 +813,28 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
   options.mmcUniqueness = frontend.mmcUniqueness;
   options.stubUnimplemented = frontend.stubUnimplemented;
   bool earlier{r.messages.AnyFatalError()};
-  std::unique_ptr<semantics::ModeChecking> modes{semantics::CheckModes(*r.tree,
-      r.tokens, *r.form, *r.resolution, *types, r.messages, options)};
-  if (frontend.warnUnselectedMessage) {
-    semantics::CheckReceives(r.tokens, *types, modes->constructors(), r.messages);
+  // Mode, determinism and uniqueness checking run again while uniqueness
+  // checking finds arguments of inferred procedures that must be inferred
+  // shared, not unique, and the new run has fewer errors; the messages are
+  // those of the run kept.
+  ModeRun kept{CheckModesOnce(ci, r, *types, options, earlier)};
+  while (!kept.shared.empty()) {
+    std::size_t count{options.sharedArguments.size()};
+    options.sharedArguments.insert(kept.shared.begin(), kept.shared.end());
+    if (options.sharedArguments.size() == count) {
+      break;
+    }
+    ModeRun again{CheckModesOnce(ci, r, *types, options, earlier)};
+    if (again.errors >= kept.errors) {
+      break;
+    }
+    kept = std::move(again);
   }
+  r.messages.messages().splice(
+      r.messages.messages().end(), kept.messages.messages());
+  std::unique_ptr<semantics::ModeChecking> modes{std::move(kept.modes)};
   std::unique_ptr<semantics::DeterminismChecking> determinism{
-      semantics::CheckDeterminism(
-          r.tokens, *types, *modes, r.messages, !earlier, r.tree,
-          r.resolution.get())};
-  semantics::CheckForeign(
-      *r.tree, r.tokens, *r.resolution, *modes, *determinism, r.messages);
-  semantics::CheckPragmas(*r.tree, r.tokens, *r.resolution, *modes, r.messages);
-  semantics::CheckUniqueness(
-      r.tokens, *modes, *determinism, r.messages, frontend.mmcUniqueness);
+      std::move(kept.determinism)};
   semantics::CheckGpuCode(*r.tree, r.tokens, *modes, *determinism,
       modes->constructors(), types->types(), r.messages);
   return {std::move(types), std::move(modes), std::move(determinism),
