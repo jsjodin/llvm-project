@@ -1332,8 +1332,11 @@ void Resolver::Run(const parser::ParseTree &tree,
     } else if (const auto *end{
                    std::get_if<const parser::EndModuleDecl *>(&item)}) {
       // mmc: "Error: this `:- end_module' declaration for `other' is not
-      // for the module at whose end it appears, which is `m'."
-      if (FullName(*(*end)->name) != name) {
+      // for the module at whose end it appears, which is `m'." The name
+      // need not be fully qualified (reference manual, "Nested
+      // submodules"): it may be the module's last components.
+      std::string ended{FullName(*(*end)->name)};
+      if (ended != name && !llvm::StringRef{name}.ends_with("." + ended)) {
         messages_.Say(NameSource(tokens, *(*end)->name),
             "this end_module declaration names %s, but it ends module %s"_err_en_US,
             FullName(*(*end)->name), name);
