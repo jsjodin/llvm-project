@@ -46,7 +46,9 @@ end of the header. Other header lines are the author's:
                                   the test, for an extension mmc does not
                                   have: a loop's translation written by hand
                                   as plain Mercury, whose output the test's
-                                  must be
+                                  must be; or Inputs/translation.pl, a
+                                  program that SWI-Prolog runs, main/0 in
+                                  the file's directory, for open terms
   % ORACLE: none                  expectations written by hand, which the
                                   script leaves as they are, for a test of an
                                   extension that has no translation, as an
@@ -218,7 +220,15 @@ class Test:
 
 def mmc_run(test, mmc):
     """mmc's program's output, standard error after standard output as
-    they are written, and its exit status."""
+    they are written, and its exit status; or, for a translation into
+    Prolog, swipl's, which runs its main/0 in the translation's directory,
+    where the helpers it loads are."""
+    if test.mmc_program and test.mmc_program.endswith(".pl"):
+        program = os.path.join(os.path.dirname(test.path), test.mmc_program)
+        status, out, _ = run(["swipl", "-q", "-g", "main", "-t", "halt",
+                              os.path.basename(program)],
+                             os.path.dirname(program), merge=True)
+        return status, out
     with tempfile.TemporaryDirectory() as tmp:
         module = test.copy_to(tmp)
         status, out, err = run([mmc] + test.mmc_flags + ["--make", module],
