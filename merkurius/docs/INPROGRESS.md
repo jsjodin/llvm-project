@@ -8854,6 +8854,23 @@ tested shows.
    type_info), fact tables, and trailing, which needs choice points that
    record a trail mark.
 
+   *Coverage run and Syntax, tests written (2026-11-24):* the coverage
+   run (`utils/conformance/coverage.sh`) measured 89.4% of lines, 91.1% of
+   functions and 82.2% of branches. Besides the GPU runtime, which it does
+   not run, the largest gaps were in the parser, since the Syntax chapter
+   had no conformance tests. It now has 58, and `Parser/convert/` has
+   tests of malformed pragmas, goals and declarations, each error on a line
+   where mmc reports one. Bugs found and fixed, each with its test:
+   a catch arm's goal numbers depended on the C++ compiler; `uppercase`
+   given twice in `foreign_export_enum` and a negative `size_limit` were
+   rejected; a DCG `if C then T` without an else, which mmc reads with
+   `[]` as the else, was rejected; `with_type(Term, Type)` was undefined;
+   closures of `unify` and the comparisons lacked their type_info; and a
+   declaration qualified by another module's name was accepted.
+   provenance.cpp's misses are Flang's search paths, compiler insertions
+   and colours, which merkc does not use. Still to measure: the codegen
+   gaps a host program can reach, at the next coverage run.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
