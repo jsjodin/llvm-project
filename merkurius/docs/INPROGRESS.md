@@ -8994,8 +8994,28 @@ tested shows.
    rule. `run-gpu-team-loops.m` runs teams distribute and parallel do
    loops in a GPU process, with reductions, a loop of no iterations, and
    an array of two million elements, checked at the host on four threads
-   and without -fopenmp, and on the GPU both ways. Still to do: flat
-   records' own tests, distribution.
+   and without -fopenmp, and on the GPU both ways.
+
+   *Flat records, begun (2026-11-25):* `extensions/flat-records/`. A
+   program means what it means in Mercury, so mmc is the oracle.
+   `run-record-arrays.m` puts records and arrays of them where a word
+   or a cell is wanted: lists, pairs, closures, the library's
+   polymorphic array code (foldl, map, sort, binary search, foldr,
+   append), unification, comparison, io.write, resizing and copying,
+   and narrow fields of every size. On the GPU,
+   `gpu-processes/run-gpu-record-arrays.m` sends arrays of padded
+   records to GPU processes, alone and as a message's last field, and
+   from one GPU process to another, which make, set, fill and resize
+   them; its translation is in Erlang, as the other GPU tests' are.
+   Found and fixed: two collector bugs, both seen at -O2 with a
+   collection at every allocation. A call's argument that LLVM uses
+   after it in place of the call's result (a `returned` parameter) was
+   not updated (`CodeGen/gc-returned-argument.m`). An array's elements
+   pointer, which the statepoint pass listed in a bundle, was paired
+   with itself by the rewrite, which takes what a bundle lists to be a
+   base (`CodeGen/gc-interior-pointer.m`). The oracle's collection run
+   is at -O0, which found them only in the library's code, built at -O2.
+   Still to do: distribution.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.
