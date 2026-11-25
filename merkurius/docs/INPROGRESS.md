@@ -8443,8 +8443,7 @@ tested shows.
   `trace-goals/`, `pragmas/`, `implementation-dependent/`; for example
   `types/field-access/`, `modes/different-clauses/`,
   `determinism/committed-choice/`. Beside them `library/`, with a
-  directory for each library module; `interactions/`, below; and
-  `generated/`, the random programs, below.
+  directory for each library module; and `interactions/`, below.
 - *Merkurius's own extensions* are a part of the suite as large as a
   chapter, in `extensions/`, whose definition is the design document's
   sections, which their `MANUAL:` lines name instead (`% DESIGN:
@@ -8551,12 +8550,19 @@ tested shows.
   reproduces and the expectation is reviewed; the generator is rerun when
   a list grows. A GPU context's tests are `-gpu.test` files, which host
   lit leaves out, and which run one at a time as the other GPU tests do.
-- *Random programs:* `utils/codegen-oracle`'s generators, of layouts,
-  arithmetic and type classes, move under the suite as
-  `generated/`, their seeds checked in as `CodeGen/oracle/*.test` are now,
-  and grow towards the features they leave out (disjunctions, strings,
-  higher-order code, modes other than in and out). They find what nobody
-  thought to write; the hand-written tests say what each rule means.
+- *Random programs* are not a part of the suite (decided 2026-11-25).
+  The plan was to move `utils/codegen-oracle`'s generators, of layouts,
+  arithmetic and type classes, under the suite as `generated/` and to
+  grow them towards disjunctions, strings, higher-order code and other
+  modes. They found three bugs once, when code generation was new
+  (2026-11-04: calls in implied modes, a condition that cannot succeed,
+  the reverse modes of `+`, `-` and `xor`), and nothing since, when the
+  bugs came from the interaction tests and the runs under collection. A
+  generator of Mercury programs that pass the type, mode, determinism and
+  uniqueness checks and are rich enough to reach what the targeted tests
+  miss would be a large piece of work, for what coverage finds more
+  cheaply. The generators and their four seeds,
+  `CodeGen/oracle/*.test`, stay where they are, unchanged.
 - *Existing tests stay where they are.* They test bugs and the compiler's
   parts, not the manual; they get `MANUAL:` lines where they fit, so that
   the map counts them, but are not moved.
@@ -9100,8 +9106,10 @@ tested shows.
    writes a greedy cover of every pair of the three: 108, as many as
    features times outer contexts, which is the least. All pass, 234 host
    tests in all and 6 on the GPU; the interactions found one bug.
-5. The random generators moved under `generated/` and extended, with
-   coverage telling which features they should reach next.
+5. One coverage run of all of Merkurius's tests (`coverage.sh`), and a
+   batch of tests for what it shows unreached, or an explanation:
+   unreachable, a defensive check, or a feature not done. (It replaced
+   the random generators; see "Random programs" above.)
 
 ### Nested submodules
 
