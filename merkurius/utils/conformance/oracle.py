@@ -37,6 +37,16 @@ end of the header. Other header lines are the author's:
   % FLAGS-FOR-MMC: ...            more flags for mmc, as for --trace-flag
   % DIFFERS: <mmc-bug|manual|implementation>: <why>
   % KNOWN-BUG: <what merkc gets wrong, and where it is recorded>
+  % TRANSLATION: Inputs/translation.m
+                                  the module mmc builds and runs in place of
+                                  the test, for an extension mmc does not
+                                  have: a loop's translation written by hand
+                                  as plain Mercury, whose output the test's
+                                  must be
+  % ORACLE: none                  expectations written by hand, which the
+                                  script leaves as they are, for a test of an
+                                  extension that has no translation, as an
+                                  error only merkc reports, or a warn- test
 
 By default it checks that each test's lines are what it would write, and
 exits with 1 if any are not; with --update it writes them. With --triage it
@@ -88,11 +98,14 @@ class Test:
         self.path = os.path.abspath(path)
         self.name = os.path.basename(path)
         self.kind = self.name.split("-", 1)[0]
-        if self.kind not in CLASSES:
-            raise TestError("the name starts with none of " +
-                            ", ".join(c + "-" for c in CLASSES))
         with open(path, encoding="utf-8") as f:
             self.lines = f.read().split("\n")
+        # A test whose expectations are written by hand, such as a warn-
+        # test of an extension, may be of a class the script does not know.
+        if self.kind not in CLASSES and not any(
+                re.match(r"% ORACLE:\s*none\s*$", l) for l in self.lines):
+            raise TestError("the name starts with none of " +
+                            ", ".join(c + "-" for c in CLASSES))
         self.header_end = 0
         while (self.header_end < len(self.lines) and
                self.lines[self.header_end].startswith("%")):
@@ -117,6 +130,8 @@ class Test:
         self.mmc_flags = []
         self.differs = None
         self.known_bug = None
+        self.mmc_program = None
+        self.no_oracle = False
         for line in self.authored:
             m = re.match(r"% MODULES:(.*)", line)
             if m:
@@ -136,12 +151,19 @@ class Test:
             m = re.match(r"% KNOWN-BUG:\s*(\S.*)", line)
             if m:
                 self.known_bug = m.group(1)
+            m = re.match(r"% TRANSLATION:\s*(\S+)", line)
+            if m:
+                self.mmc_program = m.group(1)
+            if re.match(r"% ORACLE:\s*none\s*$", line):
+                self.no_oracle = True
         if not any(l.startswith(("% MANUAL:", "% DESIGN:"))
                    for l in self.authored):
             raise TestError("no `% MANUAL:' or `% DESIGN:' line")
         if self.kind == "differs" and self.differs not in DIFFERS_KINDS:
             raise TestError("a differs- test needs `% DIFFERS: KIND: why', "
                             "KIND one of " + ", ".join(DIFFERS_KINDS))
+        if self.mmc_program and self.kind not in ("run", "nyi"):
+            raise TestError("only a run- or nyi- test has a TRANSLATION")
         if self.known_bug and self.kind not in ("run", "reject"):
             raise TestError("only a run- or reject- test has a known bug; "
                             "a %s- test says what merkc does" % self.kind)
@@ -151,12 +173,26 @@ class Test:
         return [os.path.join(here, m) for m in self.modules]
 
     def copy_to(self, directory):
-        """The program's modules in a directory, as mmc --make wants them."""
-        shutil.copy(self.path, os.path.join(directory, self.module + ".m"))
+        """The program's modules in a directory, as mmc --make wants them,
+        and the module to make: the test's, or its TRANSLATION's."""
         here = os.path.dirname(self.path)
+        module = self.module
+        if self.mmc_program:
+            program = os.path.join(here, self.mmc_program)
+            with open(program, encoding="utf-8") as f:
+                m = re.search(r"^:- module ([a-z][A-Za-z0-9_]*)\.", f.read(),
+                              re.M)
+            if not m:
+                raise TestError("no `:- module' declaration in " +
+                                self.mmc_program)
+            module = m.group(1)
+            shutil.copy(program, os.path.join(directory, module + ".m"))
+        else:
+            shutil.copy(self.path, os.path.join(directory, self.module + ".m"))
         for path in self.module_paths() + [os.path.join(here, f)
                                            for f in self.files]:
             shutil.copy(path, directory)
+        return module
 
     def marked_lines(self, generated):
         """The lines marked `% ERROR`, numbered as in the file with the
@@ -173,12 +209,12 @@ def mmc_run(test, mmc):
     """mmc's program's output, standard error after standard output as
     they are written, and its exit status."""
     with tempfile.TemporaryDirectory() as tmp:
-        test.copy_to(tmp)
-        status, out, err = run([mmc] + test.mmc_flags + ["--make", test.module],
+        module = test.copy_to(tmp)
+        status, out, err = run([mmc] + test.mmc_flags + ["--make", module],
                                tmp, timeout=600)
         if status != 0:
             raise TestError("mmc cannot compile it:\n" + out + err)
-        status, out, _ = run(["./" + test.module], tmp, merge=True)
+        status, out, _ = run(["./" + module], tmp, merge=True)
         return status, out
 
 
@@ -385,6 +421,8 @@ def triage(test, merkc, mmc_status, mmc_out):
 def process(path, args):
     try:
         test = Test(path)
+        if test.no_oracle:
+            return path, "ok", []
         generated, notes = generate(test, args)
         if test.known_bug:
             generated.insert(0, "% XFAIL: *")

@@ -8922,6 +8922,17 @@ tested shows.
    of the code written since 2026-11 is theirs: processes and monitors,
    do loops and OpenMP, GPU processes, open types, flat records,
    distribution.
+
+   *Do loops, begun (2026-11-25):* `extensions/do-loops/`, by the
+   design document's sections. A run- test's oracle is its loop's
+   translation written by hand (`% TRANSLATION:`); an error or warning
+   that only merkc reports has hand-written expectations
+   (`% ORACLE: none`). Writing them found two bugs, each fixed: lists of
+   different lengths failed instead of throwing, and a loop over a
+   literal list with a body of several solutions was a uniqueness error.
+   Still to do: the messages for a local variable used after a loop and
+   a shared variable bound in its body, which the design promises and
+   merkc gives as plain mode errors; then OpenMP, the other extensions.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.
