@@ -26,6 +26,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Frontend/OpenMP/OMP.h"
 #include "llvm/Support/raw_ostream.h"
+#include <cstdint>
 #include <optional>
 #include <type_traits>
 #include <variant>
@@ -1898,7 +1899,7 @@ struct TablingAttributes {
   bool fastLoose;
   std::optional<llvm::ArrayRef<TabledArg>> specified;
   std::optional<HiddenArg> hiddenArg;
-  std::optional<unsigned> sizeLimit;
+  std::optional<std::int64_t> sizeLimit;
   template <typename F> void ForEachField(F &&f) const {
     f("allowReset", allowReset);
     f("statistics", statistics);

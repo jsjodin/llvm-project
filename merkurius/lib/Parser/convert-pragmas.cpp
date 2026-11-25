@@ -383,14 +383,16 @@ std::optional<const TablingAttributes *> ConvertTablingAttributes(
       duplicate = attributes.sizeLimit.has_value();
       const Term &limit{StripParentheses(*c->arguments()[0])};
       const auto *integer{llvm::dyn_cast<IntegerTerm>(&limit)};
-      if (!integer || integer->negative() ||
-          integer->size() != IntegerSize::Default ||
-          integer->magnitude().getActiveBits() > 32) {
+      // Any int, as mmc accepts: it does not document the attribute, and
+      // takes a negative limit too.
+      if (!integer || integer->size() != IntegerSize::Default ||
+          integer->magnitude().getActiveBits() > 63) {
         SayExpected(state, limit, "a size limit");
         ok = false;
       } else {
-        attributes.sizeLimit =
-            static_cast<unsigned>(integer->magnitude().getZExtValue());
+        auto magnitude{
+            static_cast<std::int64_t>(integer->magnitude().getZExtValue())};
+        attributes.sizeLimit = integer->negative() ? -magnitude : magnitude;
       }
     } else {
       SayExpected(state, a,
