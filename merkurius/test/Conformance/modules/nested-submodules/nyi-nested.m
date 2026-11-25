@@ -7,7 +7,7 @@
 % qualified.
 %
 % RUN: not merkc %s -o %t 2>&1 | FileCheck %s --check-prefix=NYI
-% NYI: {{.*}}: error: not yet implemented: nested submodules
+% NYI: {{.*}}: error: not yet implemented: nested submodules; nyi_nested.shapes can be a separate submodule, in a file of its own, nyi_nested.shapes.m, which the interface section of nyi_nested includes with `:- include_module shapes.`
 
 :- module nyi_nested.
 :- interface.

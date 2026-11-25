@@ -5,7 +5,7 @@
 % disagree").
 %
 % RUN: not merkc %s -o %t 2>&1 | FileCheck %s --check-prefix=NYI
-% NYI: {{.*}}: error: not yet implemented: nested submodules
+% NYI: {{.*}}: error: not yet implemented: nested submodules; nyi_no_end_module.child can be a separate submodule, in a file of its own, nyi_no_end_module.child.m, which the implementation section of nyi_no_end_module includes with `:- include_module child.`
 
 :- module nyi_no_end_module.
 :- interface.

@@ -334,8 +334,10 @@ void Resolve(CompilerInstance &ci, parser::SourceFile &file,
   options.openMP = ci.getLangOpts().openMP;
   r.tokens = parser::Lex(file, options, r.messages);
   r.tree = &semantics::ExpandProcesses(
-      parser::ConvertFile(r.tokens, r.arena, r.messages,
-          parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci)),
+      semantics::DropNestedSubmodules(
+          parser::ConvertFile(r.tokens, r.arena, r.messages,
+              parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci)),
+          r.tokens, r.arena, r.messages),
       r.tokens, r.arena, r.messages);
   r.form = &semantics::Desugar(*r.tree, r.tokens, r.semanticArena, r.messages);
   r.loader = std::make_unique<semantics::ModuleLoader>(ci.getAllSources(),

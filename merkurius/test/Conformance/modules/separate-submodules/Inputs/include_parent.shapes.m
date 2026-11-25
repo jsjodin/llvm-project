@@ -1,4 +1,4 @@
-:- module run_include_module.shapes.
+:- module include_parent.shapes.
 :- interface.
 :- type shape
     --->    square(int)

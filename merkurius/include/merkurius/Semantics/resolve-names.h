@@ -99,12 +99,16 @@ public:
     return hidden_.lookup(&symbol);
   }
   bool HasHiddenEquivalences() const { return !hidden_.empty(); }
+  // Whether the module has submodules, which see all its declarations and
+  // call its procedures from their own objects.
+  bool hasSubmodules() const { return hasSubmodules_; }
 
 private:
   friend class Resolver;
   common::Arena arena_;
   std::unique_ptr<ModuleSymbols> primitive_;
   std::unique_ptr<ModuleSymbols> module_;
+  bool hasSubmodules_{false};
   llvm::DenseMap<const ModuleInterface *, std::unique_ptr<ModuleSymbols>>
       imported_;
   std::vector<ResolvedName> names_;

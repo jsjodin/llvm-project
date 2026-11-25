@@ -1257,7 +1257,7 @@ void MerkGenerator::GenerateForeign(
   if (!proc) {
     return;
   }
-  if (procedure.symbol->exported) {
+  if (SeenOutside(*procedure.symbol)) {
     proc.setPublic();
   }
   // The foreign_proc's variables: its arguments', then a function's
@@ -1426,7 +1426,7 @@ void MerkGenerator::GenerateUnchecked(const Procedure &procedure) {
   if (!proc || !proc.isExternal()) {
     return;
   }
-  if (procedure.symbol->exported) {
+  if (SeenOutside(*procedure.symbol)) {
     proc.setPublic();
   }
   notYet_ = "code generation for " + what;
@@ -1452,7 +1452,7 @@ void MerkGenerator::GenerateEmpty(const Procedure &procedure) {
   if (!proc || !proc.isExternal()) {
     return;
   }
-  if (procedure.symbol->exported) {
+  if (SeenOutside(*procedure.symbol)) {
     proc.setPublic();
   }
   mlir::OpBuilder::InsertionGuard guard{builder_};
@@ -1501,7 +1501,7 @@ void MerkGenerator::GenerateAggregate(const Procedure &procedure) {
   if (!proc || !proc.isExternal()) {
     return;
   }
-  if (procedure.symbol->exported) {
+  if (SeenOutside(*procedure.symbol)) {
     proc.setPublic();
   }
   bool stops{procedure.symbol->name == "do_while"};
@@ -1597,7 +1597,7 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
   if (!proc) {
     return;
   }
-  if (procedure.symbol->exported && !body.method && !words) {
+  if (SeenOutside(*procedure.symbol) && !body.method && !words) {
     proc.setPublic();
   }
   values_.clear();
@@ -1851,13 +1851,14 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
   }
   GenerateInstances();
   // An exported type's descriptor is here, for the modules that import it,
-  // which may not see its constructors. One that cannot be made yet is left
+  // which may not see its constructors, and so is every type's of a module
+  // with submodules. One that cannot be made yet is left
   // to those that use it, which fail to link.
   for (const semantics::Symbol *symbol : resolution_.module().symbols()) {
     // open(T), the open module's abstract type, which no module defines, is
     // its module's too (runtime/open.h).
     bool open{types_.types().open() == symbol};
-    if (symbol->kind != semantics::SymbolKind::Type || !symbol->exported ||
+    if (symbol->kind != semantics::SymbolKind::Type || !SeenOutside(*symbol) ||
         (!open &&
             !std::holds_alternative<const parser::DuTypeDefn *>(
                 symbol->declaration))) {

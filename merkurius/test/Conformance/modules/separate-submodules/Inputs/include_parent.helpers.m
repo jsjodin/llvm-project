@@ -1,6 +1,6 @@
-:- module run_include_module.helpers.
+:- module include_parent.helpers.
 :- interface.
-:- import_module list, run_include_module.shapes.
+:- import_module list, include_parent.shapes.
 :- func total(list(shape)) = int.
 :- implementation.
 :- import_module int.

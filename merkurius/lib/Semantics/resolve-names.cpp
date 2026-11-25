@@ -169,8 +169,24 @@ private:
   // kind that `scope` sees, which is remote spawn.
   bool IsRemoteSpawn(const parser::SymName &, NameUse, unsigned arity,
       const Visibility &scope) const;
+  // Reports an import of the submodule `module` by the module `importer`
+  // that the reference manual forbids ("Visibility rules"): without
+  // importing all its ancestors, which `imported` has; or of a submodule its
+  // parent's implementation section declares, by a module outside the
+  // parent.
+  void CheckImportedSubmodule(llvm::StringRef module, llvm::StringRef importer,
+      const llvm::StringSet<> &imported, parser::CharBlock where);
   // The scope of an imported module's interface.
   Visibility InterfaceScope(const ModuleInterface &);
+  // The scope of an ancestor's implementation section, for its
+  // declarations that its descendants see.
+  Visibility ImplementationScope(const ModuleInterface &);
+  // Adds to `scope` what the descendants of the ancestors of the module
+  // named `name` see of them (reference manual, "Visibility rules"): all
+  // their symbols, and the interfaces of the modules they import and use.
+  void AddAncestors(Visibility &scope, llvm::StringRef name);
+  // The module's own implementation scope, which its own children see.
+  const Visibility *ownImplementation_{nullptr};
   // Resolves the names of the equivalences an imported module hides behind
   // abstract types, in the scope of its implementation section.
   void ResolveHidden(const ModuleInterface &);
@@ -649,6 +665,21 @@ bool Resolver::IncompatibleSolver(const Symbol &symbol,
   return true;
 }
 
+namespace {
+// Adds a module to a scope; one already visible there is visible the less
+// restricted way of the two.
+void AddVisible(Visibility &scope, const Visible &visible) {
+  for (Visible &v : scope) {
+    if (v.symbols == visible.symbols) {
+      v.qualifiedOnly &= visible.qualifiedOnly;
+      v.exportedOnly &= visible.exportedOnly;
+      return;
+    }
+  }
+  scope.push_back(visible);
+}
+} // namespace
+
 ModuleSymbols &Resolver::Symbols(const ModuleInterface &module) {
   // A module that imports the module compiled sees its own symbols.
   if (&module == loader_.Self()) {
@@ -664,7 +695,14 @@ ModuleSymbols &Resolver::Symbols(const ModuleInterface &module) {
   for (const parser::Item &item : module.items) {
     Declare(symbols, item, true, *module.tokens);
   }
-  DeclareWithTypes(symbols, InterfaceScope(module));
+  // An ancestor's implementation declarations, which only its descendants
+  // see: an abstract type's definition is the symbol's declaration, as in
+  // the module's own compile.
+  for (const parser::Item &item : module.implementationItems) {
+    Declare(symbols, item, false, *module.tokens);
+  }
+  DeclareWithTypes(symbols,
+      module.ancestor ? ImplementationScope(module) : InterfaceScope(module));
   return symbols;
 }
 
@@ -783,12 +821,90 @@ void Resolver::ResolveHidden(const ModuleInterface &module) {
 Visibility Resolver::InterfaceScope(const ModuleInterface &module) {
   Visibility scope{{&Symbols(module), false, true}};
   for (const ModuleInterface *imported : module.imports) {
-    scope.push_back({&Symbols(*imported), false, true});
+    AddVisible(scope, {&Symbols(*imported), false, true});
   }
   for (const ModuleInterface *used : module.uses) {
-    scope.push_back({&Symbols(*used), true, true});
+    AddVisible(scope, {&Symbols(*used), true, true});
+  }
+  AddAncestors(scope, module.name);
+  return scope;
+}
+
+Visibility Resolver::ImplementationScope(const ModuleInterface &module) {
+  Visibility scope{InterfaceScope(module)};
+  scope.front().exportedOnly = false;
+  for (const ModuleInterface *imported : module.implementationImports) {
+    AddVisible(scope, {&Symbols(*imported), false, true});
+  }
+  for (const ModuleInterface *used : module.implementationUses) {
+    AddVisible(scope, {&Symbols(*used), true, true});
   }
   return scope;
+}
+
+// Whether the module named `module` is `ancestor` or one of its
+// descendants.
+static bool WithinModule(llvm::StringRef module, llvm::StringRef ancestor) {
+  return module == ancestor ||
+      (module.starts_with(ancestor) && module[ancestor.size()] == '.');
+}
+
+void Resolver::CheckImportedSubmodule(llvm::StringRef module,
+    llvm::StringRef importer, const llvm::StringSet<> &imported,
+    parser::CharBlock where) {
+  std::vector<std::string> ancestors{AncestorNames(module)};
+  for (const std::string &ancestor : ancestors) {
+    // A module's own ancestors are visible to it without an import.
+    if (!WithinModule(importer, ancestor) && !imported.contains(ancestor)) {
+      messages_.Say(where,
+          "module %s is imported without its parent module %s, which must be imported too"_err_en_US,
+          module.str(), ancestor);
+      return;
+    }
+  }
+  if (ancestors.empty()) {
+    return;
+  }
+  const std::string &parent{ancestors.back()};
+  const ModuleInterface *loaded{loader_.Find(parent)};
+  if (loaded && loaded != loader_.Self() &&
+      loaded->implementationChildren.contains(module) &&
+      !WithinModule(importer, parent)) {
+    messages_.Say(where,
+        "module %s is declared in the implementation section of module %s, so only %s and its submodules may import it"_err_en_US,
+        module.str(), parent, parent);
+  }
+}
+
+void Resolver::AddAncestors(Visibility &scope, llvm::StringRef name) {
+  std::vector<std::string> ancestors{AncestorNames(name)};
+  for (auto it{ancestors.rbegin()}; it != ancestors.rend(); ++it) {
+    const ModuleInterface *ancestor{loader_.Find(*it)};
+    if (!ancestor) {
+      continue;
+    }
+    if (ancestor == loader_.Self()) {
+      // The module compiled, which is complete once its own scopes are.
+      if (ownImplementation_) {
+        for (const Visible &visible : *ownImplementation_) {
+          AddVisible(scope, visible);
+        }
+      }
+      continue;
+    }
+    AddVisible(scope, {&Symbols(*ancestor), false, false});
+    for (const auto *list :
+        {&ancestor->imports, &ancestor->implementationImports}) {
+      for (const ModuleInterface *imported : *list) {
+        AddVisible(scope, {&Symbols(*imported), false, true});
+      }
+    }
+    for (const auto *list : {&ancestor->uses, &ancestor->implementationUses}) {
+      for (const ModuleInterface *used : *list) {
+        AddVisible(scope, {&Symbols(*used), true, true});
+      }
+    }
+  }
 }
 
 namespace {
@@ -1290,18 +1406,6 @@ void Resolver::ResolveGoal(const Goal &goal, const Visibility &scope) {
       goal);
 }
 
-namespace {
-// Adds a module to a scope unless it is already visible there the same way.
-void AddVisible(Visibility &scope, const Visible &visible) {
-  if (llvm::none_of(scope, [&](const Visible &v) {
-        return v.symbols == visible.symbols &&
-            v.qualifiedOnly == visible.qualifiedOnly;
-      })) {
-    scope.push_back(visible);
-  }
-}
-} // namespace
-
 void Resolver::Run(const parser::ParseTree &tree,
     const parser::TokenSequence &tokens, const SemanticForm &form) {
   implicit_.insert(form.implicitNames.begin(), form.implicitNames.end());
@@ -1322,14 +1426,25 @@ void Resolver::Run(const parser::ParseTree &tree,
   ModuleSymbols &own{*result_.module_};
   own_ = &own;
   Visibility interface{{&own, false, true}}, implementation{{&own, false, false}};
+  ownImplementation_ = &implementation;
+  // The modules the module imports or uses, in either section, for the
+  // checks of imported submodules.
+  llvm::StringSet<> imported;
+  for (const parser::Item &item : tree.items) {
+    if (const auto *decl{std::get_if<const parser::ImportDecl *>(&item)};
+        decl && (*decl)->kind != parser::ImportKind::IncludeModule) {
+      for (const parser::SymName *module : (*decl)->modules) {
+        imported.insert(FullName(*module));
+      }
+    }
+  }
   bool inInterface{false}, named{false};
   for (const parser::Item &item : tree.items) {
     if (const auto *module{std::get_if<const parser::ModuleDecl *>(&item)}) {
       if (named) {
-        // Temporary (nested submodules, docs/INPROGRESS.md): their items
-        // would otherwise be read as the parent's.
-        messages_.Say(NameSource(tokens, *(*module)->name),
-            "%s"_todo_en_US, "nested submodules");
+        // Its items would otherwise be read as the parent's.
+        ReportNestedSubmodule(messages_, NameSource(tokens, *(*module)->name),
+            name, *(*module)->name, inInterface);
         break;
       }
       named = true;
@@ -1361,10 +1476,13 @@ void Resolver::Run(const parser::ParseTree &tree,
     } else if (const auto *decl{
                    std::get_if<const parser::ImportDecl *>(&item)}) {
       if ((*decl)->kind == parser::ImportKind::IncludeModule) {
+        result_.hasSubmodules_ = true;
         continue;
       }
       bool use{(*decl)->kind == parser::ImportKind::UseModule};
       for (const parser::SymName *module : (*decl)->modules) {
+        CheckImportedSubmodule(
+            FullName(*module), name, imported, NameSource(tokens, *module));
         if (const ModuleInterface * loaded{loader_.Find(FullName(*module))}) {
           Visible visible{&Symbols(*loaded), use, true};
           AddVisible(implementation, visible);
@@ -1400,6 +1518,9 @@ void Resolver::Run(const parser::ParseTree &tree,
       AddVisible(interface, visible);
     }
   }
+  // A submodule sees its ancestors in both its sections.
+  AddAncestors(implementation, name);
+  AddAncestors(interface, name);
   DeclareWithTypes(own, implementation);
   // A clause for a predicate or function without a declaration declares
   // it, local to the module, since types are inferred for it.
@@ -1420,7 +1541,8 @@ void Resolver::Run(const parser::ParseTree &tree,
           false);
     }
   }
-  // The imported interfaces' names, each in its own scope.
+  // The imported interfaces' names, each in its own scope, and those of
+  // the ancestors' implementation declarations.
   for (const ModuleInterface *module : loader_.modules()) {
     result_.interfaces_.push_back(module);
     Visibility scope{InterfaceScope(*module)};
@@ -1429,6 +1551,16 @@ void Resolver::Run(const parser::ParseTree &tree,
       ResolveItem(item, scope, nullptr, false, *module->tokens);
       if (const auto *decl{std::get_if<const parser::InstanceDecl *>(&item)}) {
         result_.instances_.push_back({*decl, module->tokens, false, true});
+      }
+    }
+    if (module->ancestor) {
+      Visibility implementationScope{ImplementationScope(*module)};
+      for (const parser::Item &item : module->implementationItems) {
+        ResolveItem(item, implementationScope, nullptr, false, *module->tokens);
+        if (const auto *decl{
+                std::get_if<const parser::InstanceDecl *>(&item)}) {
+          result_.instances_.push_back({*decl, module->tokens, false, true});
+        }
       }
     }
   }

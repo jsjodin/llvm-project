@@ -211,7 +211,7 @@ bool MerkGenerator::EnsureDescriptor(
     } else if (module == "array" && name == "array") {
       kind = "array";
     } else if (module == moduleName_) {
-      linkage = type.constructor->exported ? "external" : "internal";
+      linkage = SeenOutside(*type.constructor) ? "external" : "internal";
       // The state of the world, an abstract type that io does not define, is
       // a dummy whose linkonce descriptor each module using it makes, as
       // below.
@@ -655,9 +655,10 @@ void MerkGenerator::GenerateInstances() {
       GenerateDispatch(head, *procedure, *found, name);
       table.push_back(mlir::FlatSymbolRefAttr::get(&context_, name));
     }
-    // An instance declared in the interface is for other modules. An abstract
+    // An instance declared in the interface is for other modules, as is any
+    // of a module with submodules. An abstract
     // declaration has no head of its own, so any of the type class's counts.
-    bool exported{head.item->exported};
+    bool exported{head.item->exported || resolution_.hasSubmodules()};
     for (const semantics::InstanceItem &item : resolution_.instances()) {
       exported = exported || (item.local && item.exported && item.decl->abstract);
     }

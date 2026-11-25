@@ -9135,27 +9135,65 @@ tested shows.
    contextual messages and their attachments, unused lookups and
    conversions, `restorer.h`, and `char-block.h`'s blank helpers.
 
-### Nested submodules
+### Nested submodules: later
 
-Not yet implemented. Six reject tests of nested submodules have
-`KNOWN-BUG` lines, and four run tests are `nyi-` tests. merkc reports a
-second `:- module` in a file, in the module compiled or in one it imports.
-Separate submodules compile as modules of their own, so what is missing
-there is the parent's side:
-- a child does not see its parent's declarations
-  (`modules/separate-submodules/run-include-module.m`, a `KNOWN-BUG`);
-- nothing stops a module that is not the parent or a sibling from
-  importing a child declared in the parent's implementation section.
+Separate submodules work (step 1, built 2026-11-25). Nested submodules,
+step 2, wait: decided 2026-11-25, as real programs use separate submodules
+(mmc's own package hierarchy, the library's thread.mvar) and nested ones
+are rare, mostly in small examples; the manual itself recommends separate
+submodules, which parallel builds handle better. Until then each nested
+submodule is a not-yet-implemented error that says how to write it as a
+separate submodule, its file and the parent's `include_module`, and the
+file is analysed no further (`DropNestedSubmodules`), so that those are
+its only errors.
+The manual defines a separate submodule as a nested one moved to its own
+file ("Separate submodules"), so both kinds are built on one model: a
+module is a submodule item sequence, wherever it is, and a child sees its
+ancestors.
 
-What it needs:
-- a scope per submodule, holding the parent's declarations, its
-  implementation's too, and the parent's imports;
-- symbols qualified by the child's full name;
-- interfaces of nested children that importing modules can load from the
-  parent's file;
-- the checks of "Nested submodules": declared or defined twice, defined
-  without being declared, defined in the parent's interface, and an
-  implicit empty implementation.
+**Step 1: a child sees its ancestors.** For separate submodules. Built
+2026-11-25.
+- *The loader's ancestor view.* `ModuleLoader::LoadAncestors(name)` adds to
+  a module's interface the declarations of its implementation section, each
+  marked as not exported, and the modules that section imports and uses.
+  It is loaded only for the ancestors of the module compiled and of the
+  children it imports, since loading every module's implementation imports
+  would load much of the library. A module that imports the module
+  compiled finds the loader's stand-in for it, `ModuleLoader::Self()`,
+  whose symbols are the module's own.
+- *Scopes.* The module compiled, `a.b.c`, sees all the symbols of `a.b`
+  and `a`, and the interfaces of the modules each imports and uses, but
+  not itself through them. An imported child's interface is resolved in a
+  scope with its ancestors' too. A module's symbols are one table for its
+  importers and its children: importers see only the exported ones
+  (`Visible::exportedOnly`), children all of them. When an ancestor is the
+  module compiled, its table is the module's own.
+- *Code generation.* A module with submodules makes every procedure and
+  every type's descriptor public, as its children call and use them from
+  their own objects. Only such modules pay for it.
+- *Checks* ("Visibility rules"): importing a module without importing all
+  its parents; importing a child declared only in its parent's
+  implementation section, from a module that is neither the parent nor
+  one of its descendants.
+
+**Step 2: nested submodules.** Later, as above.
+- *Splitting.* `SplitModules` (Semantics/submodules.cpp) splits a file's
+  items into its modules: each one's declaration, interface items,
+  implementation items, and where its parent declares and defines it. It
+  makes the checks of "Nested submodules": declared twice, defined twice,
+  defined without being declared, defined in the parent's interface, an
+  implicit empty implementation that must not be empty, and a missing
+  `end_module` (mmc accepts one missing at the end of the file: follow
+  mmc and record it).
+- *Loading.* A module with no file of its own is looked for in its
+  parent's file, as a nested submodule, after `a.b.m`, as mmc does.
+- *Compiling.* `-fc1` runs the whole pipeline once per module of the file,
+  each with its own scopes, as if it were a file of its own, and links
+  their LLVM modules into one (`llvm::Linker`), so a file is still one
+  object for the driver. The debug dumps dump each module in turn; an
+  output that is not LLVM IR, assembly or an object (merk, MLIR, merk
+  bytecode for the GPU's device library) of a file with several modules
+  is not yet implemented.
 
 ## Spawning from a GPU process: later
 

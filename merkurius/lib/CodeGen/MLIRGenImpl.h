@@ -679,6 +679,12 @@ private:
   // Open terms (MLIRGenOpen.cpp; design document, Language extensions,
   // "Open terms"). open(T) and closed(T), by their constructors.
   bool IsOpenType(const semantics::Type *);
+  // Whether other modules' objects use the module's symbol: an exported
+  // one, or any of a module with submodules, which see all its
+  // declarations (reference manual, "Visibility rules").
+  bool SeenOutside(const semantics::Symbol &symbol) const {
+    return symbol.exported || resolution_.hasSubmodules();
+  }
   bool IsClosedType(const semantics::Type *);
   bool MentionsOpenType(const semantics::Type *);
   // The term type of open(T)'s cells, `open.open(T)`, whose type_def is

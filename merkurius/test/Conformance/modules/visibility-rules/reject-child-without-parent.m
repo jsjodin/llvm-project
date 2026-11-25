@@ -1,9 +1,9 @@
 % MANUAL: Visibility rules
 % It is an error to import a module without importing all of its
 % parents.
-% MODULES: Inputs/vis_parent.m
+% MODULES: Inputs/vis_parent.m Inputs/vis_parent.public.m Inputs/vis_parent.private.m
 %
-% RUN: not merkc -I %S/Inputs %s %S/Inputs/vis_parent.m -o %t 2>&1 | FileCheck %s --check-prefix=ERRORS --implicit-check-not=error:
+% RUN: not merkc -I %S/Inputs %s %S/Inputs/vis_parent.m %S/Inputs/vis_parent.public.m %S/Inputs/vis_parent.private.m -o %t 2>&1 | FileCheck %s --check-prefix=ERRORS --implicit-check-not=error:
 % ERRORS-DAG: {{.*}}:14:{{[0-9]+}}: error:
 
 :- module reject_child_without_parent.

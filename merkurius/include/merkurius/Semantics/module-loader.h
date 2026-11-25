@@ -64,7 +64,43 @@ struct ModuleInterface {
   std::vector<const parser::EquivalenceTypeDefn *> hidden;
   std::vector<const ModuleInterface *> hiddenImports;
   llvm::StringSet<> implementationTypes;
+  // The submodules that the module's interface and implementation sections
+  // include, by their full names.
+  llvm::StringSet<> interfaceChildren, implementationChildren;
+  // What the module's descendants see besides its interface (reference
+  // manual, "Visibility rules"), loaded only for the ancestors of the module
+  // compiled and of the modules it imports (ModuleLoader::LoadAncestors):
+  // the declarations of its implementation section, and the modules that
+  // section imports and uses.
+  bool ancestor{false};
+  std::vector<parser::Item> implementationItems;
+  std::vector<const ModuleInterface *> implementationImports;
+  std::vector<const ModuleInterface *> implementationUses;
+  const parser::ParseTree *tree{nullptr};
 };
+
+// The ancestors of the module named `name`, the nearest last: a, a.b for
+// a.b.c.
+std::vector<std::string> AncestorNames(llvm::StringRef name);
+
+// The full name of the submodule `child` of the module `parent`: a
+// submodule's name need not be fully qualified (reference manual, "Nested
+// submodules", "Separate submodules").
+std::string SubmoduleName(llvm::StringRef parent, const parser::SymName &child);
+
+// Reports a nested submodule, the second module declaration of a file,
+// which is not yet implemented, with how to write it as a separate
+// submodule. `inInterface` is the section of `parent` it is in.
+void ReportNestedSubmodule(parser::Messages &, parser::CharBlock where,
+    llvm::StringRef parent, const parser::SymName &child, bool inInterface);
+
+// Reports each nested submodule of the file `tree`, each in the module
+// whose item sequence it is in, and, if there is any, returns the file's
+// first module declaration alone, as all of the file that is compiled
+// further, so that only these errors are reported; otherwise `tree`.
+const parser::ParseTree &DropNestedSubmodules(const parser::ParseTree &tree,
+    const parser::TokenSequence &, parser::ParseTreeArena &,
+    parser::Messages &);
 
 // How ModuleInterface::defined names a predicate or function: its kind,
 // name and arity, a function's without its result, as a Symbol's is.
@@ -120,6 +156,10 @@ public:
 
 private:
   struct File;
+  // Loads what the descendants of the ancestors of the module named
+  // `name` see of them.
+  void LoadAncestors(
+      llvm::StringRef name, parser::CharBlock where, llvm::StringRef directory);
   void Collect(const parser::ParseTree &, const parser::TokenSequence &,
       llvm::StringRef directory, bool interfaceOnly, Imports &);
 

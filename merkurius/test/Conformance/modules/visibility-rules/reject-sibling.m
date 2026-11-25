@@ -2,10 +2,11 @@
 % A child's declarations are not visible in its siblings unless they
 % import it.
 % KNOWN-BUG: nested submodules are not yet implemented (docs/INPROGRESS.md, "Nested submodules").
+% The rule for separate submodules: test/Semantics/modules/submodule-sibling.m.
 %
 % XFAIL: *
 % RUN: not merkc %s -o %t 2>&1 | FileCheck %s --check-prefix=ERRORS --implicit-check-not=error:
-% ERRORS-DAG: {{.*}}:29:{{[0-9]+}}: error:
+% ERRORS-DAG: {{.*}}:30:{{[0-9]+}}: error:
 
 :- module reject_sibling.
 :- interface.

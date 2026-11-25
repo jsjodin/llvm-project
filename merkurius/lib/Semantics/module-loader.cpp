@@ -43,6 +43,86 @@ parser::CharBlock Source(
       tokens.tokens[range.last].spelling.end()};
 }
 
+} // namespace
+
+std::string SubmoduleName(
+    llvm::StringRef parent, const parser::SymName &child) {
+  std::string name{FullName(child)};
+  if (llvm::StringRef{name}.starts_with((parent + ".").str())) {
+    return name;
+  }
+  // A partly qualified name, b.c for a.b.c, overlaps the parent's last
+  // components.
+  llvm::StringRef rest{parent};
+  while (!rest.empty()) {
+    if (llvm::StringRef{name}.starts_with((rest + ".").str()) || name == rest) {
+      return (parent.drop_back(rest.size()) + name).str();
+    }
+    auto dot{rest.find('.')};
+    rest = dot == llvm::StringRef::npos ? "" : rest.drop_front(dot + 1);
+  }
+  return (parent + "." + name).str();
+}
+
+void ReportNestedSubmodule(parser::Messages &messages, parser::CharBlock where,
+    llvm::StringRef parent, const parser::SymName &child, bool inInterface) {
+  std::string name{SubmoduleName(parent, child)};
+  // Temporary (nested submodules, docs/INPROGRESS.md): a separate
+  // submodule is the same module (reference manual, "Separate
+  // submodules").
+  messages.Say(where,
+      "nested submodules; %s can be a separate submodule, in a file of its own, %s.m, which the %s section of %s includes with `:- include_module %s.`"_todo_en_US,
+      name, name, inInterface ? "interface" : "implementation", parent.str(),
+      child.name.str());
+}
+
+const parser::ParseTree &DropNestedSubmodules(const parser::ParseTree &tree,
+    const parser::TokenSequence &tokens, parser::ParseTreeArena &arena,
+    parser::Messages &messages) {
+  // The modules whose item sequences enclose the item, the innermost last,
+  // and the section of each that the item is in.
+  std::vector<std::pair<std::string, bool>> enclosing;
+  std::optional<std::size_t> first;
+  // A submodule declared in one section and defined in another is
+  // reported once, where it is declared, as that is where include_module
+  // would be (reference manual, "Separate submodules").
+  llvm::StringSet<> reported;
+  for (std::size_t i{0}; i < tree.items.size(); ++i) {
+    const parser::Item &item{tree.items[i]};
+    if (const auto *module{std::get_if<const parser::ModuleDecl *>(&item)}) {
+      std::string name{FullName(*(*module)->name)};
+      if (enclosing.empty()) {
+        first = first.value_or(i);
+      } else {
+        auto &[parent, inInterface]{enclosing.back()};
+        name = SubmoduleName(parent, *(*module)->name);
+        if (reported.insert(name).second) {
+          ReportNestedSubmodule(messages,
+              Source((*module)->name->tokens, tokens), parent, *(*module)->name,
+              inInterface);
+        }
+      }
+      enclosing.emplace_back(name, false);
+    } else if (std::holds_alternative<const parser::EndModuleDecl *>(item)) {
+      if (enclosing.size() > 1) {
+        enclosing.pop_back();
+      }
+    } else if (const auto *section{
+                   std::get_if<const parser::SectionDecl *>(&item)};
+        section && !enclosing.empty()) {
+      enclosing.back().second =
+          (*section)->section == parser::Section::Interface;
+    }
+  }
+  if (reported.empty()) {
+    return tree;
+  }
+  return *arena.Make<parser::ParseTree>(
+      tree.tokens, tree.items.slice(*first, 1));
+}
+
+namespace {
+
 std::string Directory(const parser::SourceFile &file) {
   llvm::StringRef parent{llvm::sys::path::parent_path(file.path())};
   return parent.empty() ? "." : parent.str();
@@ -171,6 +251,7 @@ const ModuleInterface *ModuleLoader::Load(
       ExpandProcesses(parser::ConvertFile(file.tokens, file.arena, messages_,
                           parser::TermReader::defaultMaxDepth, readerOptions_),
           file.tokens, file.arena, messages_, false)};
+  interface.tree = &tree;
   // The file must be the module's, and its interface section is the items
   // from :- interface to :- implementation.
   bool inInterface{false}, named{false};
@@ -212,10 +293,10 @@ const ModuleInterface *ModuleLoader::Load(
     }
     if (const auto *module{std::get_if<const parser::ModuleDecl *>(&item)}) {
       if (named) {
-        // Temporary (nested submodules, docs/INPROGRESS.md): their items
-        // would otherwise be read as the parent's.
-        messages_.Say(Source((*module)->name->tokens, file.tokens),
-            "%s"_todo_en_US, "nested submodules");
+        // Its items would otherwise be read as the parent's.
+        ReportNestedSubmodule(messages_,
+            Source((*module)->name->tokens, file.tokens), name,
+            *(*module)->name, inInterface);
         break;
       }
       named = true;
@@ -227,8 +308,16 @@ const ModuleInterface *ModuleLoader::Load(
     } else if (const auto *section{
                    std::get_if<const parser::SectionDecl *>(&item)}) {
       inInterface = (*section)->section == parser::Section::Interface;
-    } else if (inInterface &&
-        !std::holds_alternative<const parser::ImportDecl *>(item)) {
+    } else if (const auto *decl{
+                   std::get_if<const parser::ImportDecl *>(&item)}) {
+      if (named && (*decl)->kind == parser::ImportKind::IncludeModule) {
+        for (const parser::SymName *child : (*decl)->modules) {
+          (inInterface ? interface.interfaceChildren
+                       : interface.implementationChildren)
+              .insert(SubmoduleName(name, *child));
+        }
+      }
+    } else if (inInterface) {
       interface.items.push_back(item);
     }
     AddDefinition(item, interface.defined);
@@ -262,7 +351,52 @@ const ModuleInterface *ModuleLoader::Load(
       }
     }
   }
+  // A child's interface may name its ancestors' declarations.
+  LoadAncestors(name, where, directory);
   return &interface;
+}
+
+std::vector<std::string> AncestorNames(llvm::StringRef name) {
+  std::vector<std::string> names;
+  for (std::size_t dot{name.find('.')}; dot != llvm::StringRef::npos;
+      dot = name.find('.', dot + 1)) {
+    names.push_back(name.take_front(dot).str());
+  }
+  return names;
+}
+
+void ModuleLoader::LoadAncestors(
+    llvm::StringRef name, parser::CharBlock where, llvm::StringRef directory) {
+  for (const std::string &ancestorName : AncestorNames(name)) {
+    const ModuleInterface *loaded{Load(ancestorName, where, directory)};
+    // The module compiled is its own descendants' ancestor.
+    if (!loaded || loaded == &self_ || loaded->ancestor || !loaded->tree) {
+      continue;
+    }
+    auto &ancestor{const_cast<ModuleInterface &>(*loaded)};
+    ancestor.ancestor = true;
+    bool inInterface{false}, named{false};
+    for (const parser::Item &item : ancestor.tree->items) {
+      if (std::holds_alternative<const parser::ModuleDecl *>(item)) {
+        if (named) {
+          break;
+        }
+        named = true;
+      } else if (const auto *section{
+                     std::get_if<const parser::SectionDecl *>(&item)}) {
+        inInterface = (*section)->section == parser::Section::Interface;
+      } else if (named && !inInterface &&
+          !std::holds_alternative<const parser::ImportDecl *>(item) &&
+          !std::holds_alternative<const parser::EndModuleDecl *>(item)) {
+        ancestor.implementationItems.push_back(item);
+      }
+    }
+    Imports imports;
+    Collect(*ancestor.tree, *ancestor.tokens, Directory(*ancestor.file), false,
+        imports);
+    ancestor.implementationImports = std::move(imports.imports);
+    ancestor.implementationUses = std::move(imports.uses);
+  }
 }
 
 std::string TypeKey(const parser::SymName &name, unsigned arity) {
@@ -280,7 +414,10 @@ ModuleLoader::Imports ModuleLoader::LoadImports(const parser::ParseTree &tree,
     if (const auto *module{std::get_if<const parser::ModuleDecl *>(&item)}) {
       self_.name = FullName(*(*module)->name);
       self_.tokens = &tokens;
+      self_.tree = &tree;
       loaded_.try_emplace(self_.name, &self_);
+      LoadAncestors(
+          self_.name, Source((*module)->name->tokens, tokens), directory);
       break;
     }
   }
