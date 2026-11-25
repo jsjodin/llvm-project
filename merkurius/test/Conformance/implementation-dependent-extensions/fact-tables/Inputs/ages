@@ -1,0 +1,3 @@
+age("alice", 30).
+age("bob", 41).
+age("carol", 25).

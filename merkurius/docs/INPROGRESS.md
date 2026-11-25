@@ -8840,6 +8840,20 @@ tested shows.
    because the oracle compares outputs and error lines only. Also fixed:
    foreign C code now sees the standard headers that mmc's sees.
 
+   *Implementation-dependent extensions, tests written (2026-11-24):*
+   merkc parsed every pragma of the chapter and then ignored it: a `memo`
+   function ran without its table and a `loop_check` predicate looped. Now
+   the pragmas are checked as mmc checks them, and tabling, fact tables,
+   trailing and the `memo`, `trailing` and `parallel_conj` features are
+   reported as not yet implemented. Conflicting termination pragmas are
+   errors, as in mmc. mmc's installed grade, hlc.gc, has no trailing and no
+   minimal model tabling, so the Trailing sections have no conformance
+   tests; merkc's behaviour there is in plain lit tests. The oracle gained
+   `% FILES:` for a fact table's file. Still to do, when wanted: tabling
+   (memo and loop_check first, needing a hash of any value through its
+   type_info), fact tables, and trailing, which needs choice points that
+   record a trail mark.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
