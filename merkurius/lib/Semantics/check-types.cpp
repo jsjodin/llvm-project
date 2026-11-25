@@ -176,6 +176,14 @@ struct TypeVarNames {
     if (closed) {
       return std::nullopt;
     }
+    if (name == "_") {
+      // Anonymous: each occurrence is a variable of its own, as in a term,
+      // so it is not recorded under its name.
+      if (names.size() <= next) {
+        names.resize(next + 1);
+      }
+      return next++;
+    }
     Add(name);
     return next - 1;
   }
