@@ -239,6 +239,8 @@ void DumpClauseModes(llvm::raw_ostream &, const ClauseModes &,
 // f(in) = out.
 std::string ProcedureToString(const Procedure &);
 
+struct LoopTranslation;
+
 struct ModeCheckOptions {
   // Infer the modes of predicates without mode declarations, rather than
   // report each (mmc's --infer-modes).
@@ -260,6 +262,10 @@ struct ModeCheckOptions {
   // the unique mode first inferred was wrong for them (see
   // CheckUniqueness).
   std::set<std::pair<const Symbol *, unsigned>> sharedArguments;
+  // The loops' translation, if any, so that an error in a loop's
+  // predicates names the loop and the user's variables (design document,
+  // "Loops", Errors).
+  const LoopTranslation *loops{nullptr};
 };
 
 std::unique_ptr<ModeChecking> CheckModes(const parser::ParseTree &,

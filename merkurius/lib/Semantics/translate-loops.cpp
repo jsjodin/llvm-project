@@ -301,7 +301,10 @@ private:
   const Call *TripCount(const LoopIterator &, VarId trip, std::vector<Goal> &);
 
   // The new predicate's symbol, p__kind_Line_Column.
+  // A loop's line and column, counted from the start of the file.
+  std::pair<unsigned, unsigned> Position(const Loop &);
   const Symbol &NewPredicate(llvm::StringRef kind, const Loop &, unsigned arity);
+  void Namesakes(std::size_t first);
   const parser::SymName *NameOf(const Symbol &);
   const parser::Literal *IntLiteral(TokenRange, llvm::StringRef text);
   // A function or predicate of int.
@@ -477,9 +480,7 @@ VarId LoopTranslator::Apply(TokenRange range, llvm::StringRef f, VarId x,
   return result;
 }
 
-const Symbol &LoopTranslator::NewPredicate(
-    llvm::StringRef kind, const Loop &loop, unsigned arity) {
-  // The loop's line and column, counted from the start of the file.
+std::pair<unsigned, unsigned> LoopTranslator::Position(const Loop &loop) {
   const parser::Token &first{tokens_.tokens.front()};
   const char *start{first.trivia.empty() ? first.spelling.begin()
                                          : first.trivia.begin()};
@@ -493,6 +494,12 @@ const Symbol &LoopTranslator::NewPredicate(
       ++column;
     }
   }
+  return {line, column};
+}
+
+const Symbol &LoopTranslator::NewPredicate(
+    llvm::StringRef kind, const Loop &loop, unsigned arity) {
+  auto [line, column]{Position(loop)};
   std::string name{(clause_->clause->name->name + "__" + kind + "_" +
       llvm::Twine{line} + "_" + llvm::Twine{column})
           .str()};
@@ -589,6 +596,7 @@ LoopTranslation LoopTranslator::Run() {
   }
   for (const TranslatedLoop &loop : result_.loops) {
     result_.byPredicate[loop.loopPredicate] = &loop;
+    result_.byBody[loop.bodyPredicate] = &loop;
   }
   return std::move(result_);
 }
@@ -668,8 +676,10 @@ void LoopTranslator::TranslateClause(std::size_t index) {
       }
     }
   }
+  std::size_t firstLoop{result_.loops.size()};
   Goal body{Rebuild(form.body)};
   ClauseTypes outer{*clause_};
+  Namesakes(firstLoop);
 
   // The tables of the clause and its loops' predicates' clauses.
   llvm::ArrayRef<VarInfo> vars{Save(llvm::ArrayRef<VarInfo>{vars_})};
@@ -720,6 +730,29 @@ void LoopTranslator::TranslateClause(std::size_t index) {
         ConstraintsOf(clause, false, outer.constraints, form.goals, symbols)};
     types_.clauses_.push_back(types);
     clause_ = &types_.clauses_[index];
+  }
+}
+
+// Each local variable of a loop of the clause, those from `first` on, that
+// has the name of a different variable of another of its loops.
+void LoopTranslator::Namesakes(std::size_t first) {
+  for (std::size_t i{first}; i < result_.loops.size(); ++i) {
+    TranslatedLoop &loop{result_.loops[i]};
+    for (VarId var : loop.locals) {
+      llvm::StringRef name{vars_[var].name};
+      if (name.empty() || name.starts_with("_")) {
+        continue;
+      }
+      for (std::size_t j{first}; j < result_.loops.size(); ++j) {
+        const TranslatedLoop &other{result_.loops[j]};
+        if (j != i && llvm::any_of(other.bodyVars, [&](VarId v) {
+              return v != var && vars_[v].name == name;
+            })) {
+          loop.namesakes.push_back({var, other.line});
+          break;
+        }
+      }
+    }
   }
 }
 
@@ -1058,9 +1091,45 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
         clause_->clause->vars[state.after].name});
     ends.push_back(UnifyVars(range, state.after, state.in));
   }
+  // The iterators' outer arguments and the state variables' versions
+  // around the loop may be free before it; the other shared variables
+  // may not.
+  llvm::DenseSet<VarId> outer;
+  for (const LoopIterator &iterator : loop.iterators) {
+    llvm::ArrayRef<VarId> a{iterator.arguments};
+    switch (iterator.kind) {
+    case LoopIteratorKind::For:
+    case LoopIteratorKind::Count:
+      outer.insert(a[1]);
+      outer.insert(a[2]);
+      break;
+    case LoopIteratorKind::Foreach:
+      outer.insert(a[1]);
+      break;
+    case LoopIteratorKind::Fromto:
+      outer.insert(a[0]);
+      outer.insert(a[3]);
+      break;
+    }
+  }
+  for (const LoopState &state : loop.states) {
+    outer.insert(state.before);
+    outer.insert(state.after);
+  }
   for (VarId var : bodyHead) {
     if (!own.count(var)) {
+      bool fresh{!head.seen.count(var)};
       head.PassThrough(var);
+      if (fresh && !outer.count(var)) {
+        translated.shared.push_back(head.PositionOf(var));
+      }
+    }
+  }
+  translated.line = Position(loop).first;
+  for (unsigned var : occurring.set_bits()) {
+    translated.bodyVars.push_back(var);
+    if (!inBodyHead.count(var)) {
+      translated.locals.push_back(var);
     }
   }
   const Symbol &loopSymbol{NewPredicate("loop", loop, head.vars.size())};

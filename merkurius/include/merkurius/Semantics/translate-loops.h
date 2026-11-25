@@ -47,6 +47,20 @@ struct TranslatedLoop {
   const Loop *loop;
   const Symbol *loopPredicate;
   const Symbol *bodyPredicate;
+  // The loop's line, which errors name it by.
+  unsigned line{0};
+  // The positions in the loop predicate's arguments of the shared
+  // variables that the body uses, those of the goal around the loop other
+  // than the iterators' outer arguments, which must be bound before it.
+  std::vector<unsigned> shared;
+  // The variables of the body predicate's clause, and of those the ones
+  // local to each iteration, which its head does not have.
+  std::vector<VarId> bodyVars, locals;
+  // Each local variable that has the name of a variable of another loop
+  // of the clause, a different one, and that loop's line: a local
+  // variable unbound in the body was most likely meant to be given out
+  // of that loop.
+  std::vector<std::pair<VarId, unsigned>> namesakes;
   // For a loop with a for: its step, and the goal number in the clause of
   // the test that its trip count's computation starts with, Big < Small,
   // whose arguments are its bounds, Hi and Lo, or Lo and Hi for a negative
@@ -77,10 +91,13 @@ struct LoopTranslation {
   // its body.
   std::vector<std::size_t> clauses;
   std::deque<TranslatedLoop> loops;
-  // By loop predicate.
-  llvm::DenseMap<const Symbol *, const TranslatedLoop *> byPredicate;
+  // By loop predicate, and by body predicate.
+  llvm::DenseMap<const Symbol *, const TranslatedLoop *> byPredicate, byBody;
   const TranslatedLoop *Of(const Symbol &loopPredicate) const {
     return byPredicate.lookup(&loopPredicate);
+  }
+  const TranslatedLoop *OfBody(const Symbol &bodyPredicate) const {
+    return byBody.lookup(&bodyPredicate);
   }
 };
 

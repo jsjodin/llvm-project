@@ -680,13 +680,14 @@ bool DebugDumpModesAction::executeAction() {
   semantics::LoopPurities loops;
   semantics::CheckPurity(
       *r.tree, r.tokens, *r.form, *r.resolution, *types, r.messages, &loops);
-  semantics::TranslateLoops(
-      *r.resolution, *types, loops, r.tokens, r.semanticArena, r.messages);
+  semantics::LoopTranslation translation{semantics::TranslateLoops(
+      *r.resolution, *types, loops, r.tokens, r.semanticArena, r.messages)};
   semantics::ModeCheckOptions options;
   options.inferModes = frontend.inferModes;
   options.inferenceIterationLimit = frontend.modeInferenceIterationLimit;
   options.mmcUniqueness = frontend.mmcUniqueness;
   options.stubUnimplemented = frontend.stubUnimplemented;
+  options.loops = &translation;
   std::unique_ptr<semantics::ModeChecking> modes{semantics::CheckModes(*r.tree,
       r.tokens, *r.form, *r.resolution, *types, r.messages, options)};
   r.messages.Emit(llvm::errs(), ci.getAllSources());
@@ -812,6 +813,7 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
   options.inferenceIterationLimit = frontend.modeInferenceIterationLimit;
   options.mmcUniqueness = frontend.mmcUniqueness;
   options.stubUnimplemented = frontend.stubUnimplemented;
+  options.loops = &translation;
   bool earlier{r.messages.AnyFatalError()};
   // Mode, determinism and uniqueness checking run again while uniqueness
   // checking finds arguments of inferred procedures that must be inferred

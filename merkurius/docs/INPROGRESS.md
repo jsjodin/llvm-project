@@ -8930,9 +8930,10 @@ tested shows.
    (`% ORACLE: none`). Writing them found two bugs, each fixed: lists of
    different lengths failed instead of throwing, and a loop over a
    literal list with a body of several solutions was a uniqueness error.
-   Still to do: the messages for a local variable used after a loop and
-   a shared variable bound in its body, which the design promises and
-   merkc gives as plain mode errors; then OpenMP, the other extensions.
+   The messages for a local variable unbound in a loop and a shared
+   variable bound in its body, which the design promised and merkc gave
+   as plain mode errors naming the translation's predicates, are built
+   too. Still to do: OpenMP, then the other extensions.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.

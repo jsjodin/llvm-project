@@ -8,6 +8,7 @@
 
 #include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Common/idioms.h"
+#include "merkurius/Semantics/translate-loops.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -1807,6 +1808,8 @@ private:
       llvm::ArrayRef<VarId> arguments, const InstMap &, const Live &);
   const Procedure *Infer(const Symbol &, llvm::ArrayRef<ArgMode>);
   std::string RejectedText(const Procedure &);
+  std::optional<std::string> LocalError(
+      const TranslatedLoop &, llvm::ArrayRef<VarId> waits);
   Result RejectedCall(const Goal &, const Symbol &callee,
       const Procedure &rejected, llvm::ArrayRef<VarId> arguments,
       const InstMap &);
@@ -2037,9 +2040,21 @@ private:
   llvm::DenseMap<const Procedure *, Outcome> outcomes_;
   std::vector<const Inst *> inferredFinal_;
   // The error of each rejected inferred procedure, reported with that of a
-  // call that no other mode can run.
-  llvm::DenseMap<const Procedure *, std::pair<parser::CharBlock, std::string>>
-      rejections_;
+  // call that no other mode can run: where, its text as a note gives it,
+  // and the error alone, which a call of a loop's predicate gives instead.
+  struct Rejection {
+    parser::CharBlock where;
+    std::string text;
+    std::string error;
+  };
+  llvm::DenseMap<const Procedure *, Rejection> rejections_;
+  // The loop whose loop predicate, or body predicate, a symbol is.
+  const TranslatedLoop *LoopOf(const Symbol &symbol) const {
+    return options_.loops ? options_.loops->Of(symbol) : nullptr;
+  }
+  const TranslatedLoop *BodyOf(const Symbol &symbol) const {
+    return options_.loops ? options_.loops->OfBody(symbol) : nullptr;
+  }
 
   // The clause being checked, and for which procedure.
   const ClauseTypes *clause_{nullptr};
@@ -2281,11 +2296,19 @@ ProcedureChecker::Result ProcedureChecker::CheckProcedure(
     // --verbose-error-messages), and reports its error, at the
     // predicate's first clause, or one in a lambda expression at it, only
     // for a call that no other mode can run.
-    llvm::StringRef error{r.text};
-    error.consume_front(InClause() + ": ");
-    rejections_[&procedure] = {r.lambda ? r.where : Start(own.front()->clause->tokens),
+    llvm::StringRef text{r.text};
+    text.consume_front(InClause() + ": ");
+    std::string error{text.str()};
+    if (const TranslatedLoop *loop{BodyOf(*procedure.symbol)}) {
+      error = LocalError(*loop, r.waits).value_or(error);
+    }
+    // One in a loop's predicates is where it is in the loop's body.
+    bool loop{LoopOf(*procedure.symbol) || BodyOf(*procedure.symbol)};
+    rejections_[&procedure] = {
+        r.lambda || loop ? r.where : Start(own.front()->clause->tokens),
         "in the clause for the inferred mode " + RejectedText(procedure) +
-            ": " + error.str()};
+            ": " + error,
+        error};
   } else if (r.outcome == Outcome::Error) {
     // Only the first mode error of a procedure, as in mmc.
     auto &message{messages_.Say(r.where, "%s"_err_en_US, r.text)};
@@ -4017,6 +4040,22 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
     // Unreachable: no procedure is made for it.
     return Ok();
   }
+  if (const TranslatedLoop *loop{LoopOf(callee)}) {
+    // A shared variable of a loop must be bound before it (design
+    // document, "Loops", Variables).
+    for (unsigned i : loop->shared) {
+      if (i < arguments.size() && ops_.IsFree(map[arguments[i]])) {
+        VarId var{arguments[i]};
+        return Error(goal,
+            Name(var) + " is shared by the iterations of the loop at line " +
+                std::to_string(loop->line) +
+                ", since it occurs around it, so it must be bound before " +
+                "the loop; to give a value out of a loop, use fromto(First, " +
+                "In, Out, " + Name(var) + ") or a state variable",
+            {var});
+      }
+    }
+  }
   llvm::ArrayRef<const Procedure *> procedures{ProceduresFor(callee)};
   if (procedures.empty() && !inferable) {
     // Its missing mode declaration was reported.
@@ -4241,8 +4280,38 @@ ProcedureChecker::Result ProcedureChecker::RejectedCall(const Goal &goal,
           " none of its valid modes, because its inferred mode " +
           RejectedText(rejected) + " has a mode error",
       std::move(waits))};
-  r.notes.push_back(rejections_.find(&rejected)->second);
+  const Rejection &rejection{rejections_.find(&rejected)->second};
+  if (const TranslatedLoop *loop{LoopOf(callee)}) {
+    // The error in the loop, where it is, not its translation's.
+    r.where = rejection.where;
+    r.text = InClause() + ": in the loop at line " +
+        std::to_string(loop->line) + ": " + rejection.error;
+  } else if (BodyOf(callee)) {
+    r.where = rejection.where;
+    r.text = InClause() + ": " + rejection.error;
+  } else {
+    r.notes.push_back({rejection.where, rejection.text});
+  }
   return r;
+}
+
+// The error for a local variable of a loop's body that a body predicate's
+// error waits for, and that has the name of a variable of another loop,
+// whose value it was most likely meant to be (design document, "Loops",
+// Errors).
+std::optional<std::string> ProcedureChecker::LocalError(
+    const TranslatedLoop &loop, llvm::ArrayRef<VarId> waits) {
+  for (VarId var : waits) {
+    for (const auto &[local, line] : loop.namesakes) {
+      if (local == var) {
+        return Name(var) + " is local to each iteration of the loop at line " +
+            std::to_string(line) +
+            "; to give a value out of a loop, use fromto(First, In, Out, " +
+            Name(var) + ") or a state variable";
+      }
+    }
+  }
+  return std::nullopt;
 }
 
 // mmc: "in argument 2 of call to predicate `io.write_int'/3: unique-mode
