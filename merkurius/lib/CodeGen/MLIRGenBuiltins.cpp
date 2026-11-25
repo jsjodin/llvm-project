@@ -350,6 +350,55 @@ bool MerkGenerator::LibraryCallNotYet(
 
 // A division checks for a zero divisor; one of the least value by -1, whose
 // quotient overflows, wraps, as mmc's constant folding does.
+// The int fits the type if converting it back gives the same int: extended
+// by its sign for a signed type, by zeros for an unsigned one, which so
+// also rejects a negative int; an unsigned type of the int's width takes
+// the ints that are not negative, and int64 takes them all.
+bool MerkGenerator::FromInt(const Body &goal, const semantics::Symbol &symbol,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body,
+    llvm::StringRef module, bool function) {
+  namespace arith = mlir::arith;
+  mlir::Value value{ValueOf(arguments[0])};
+  std::optional<Represented> represented{
+      Represent(body.vars[arguments[1]].type)};
+  auto type{represented
+          ? mlir::dyn_cast_or_null<mlir::IntegerType>(represented->type)
+          : mlir::IntegerType{}};
+  if (!value || !type) {
+    return NotBuiltIn(goal, symbol);
+  }
+  mlir::Location loc{Location(goal.tokens)};
+  bool isUnsigned{module.starts_with("uint")};
+  auto from{mlir::cast<mlir::IntegerType>(value.getType())};
+  mlir::Value result{value};
+  // Whether the int is outside the type's range, or, for from_int, inside.
+  mlir::Value test;
+  if (type.getWidth() < from.getWidth()) {
+    result = arith::TruncIOp::create(builder_, loc, type, value);
+    mlir::Value back{isUnsigned
+            ? mlir::Value{arith::ExtUIOp::create(builder_, loc, from, result)}
+            : mlir::Value{arith::ExtSIOp::create(builder_, loc, from, result)}};
+    test = arith::CmpIOp::create(builder_, loc,
+        function ? arith::CmpIPredicate::ne : arith::CmpIPredicate::eq, back,
+        value);
+  } else if (isUnsigned) {
+    test = arith::CmpIOp::create(builder_, loc,
+        function ? arith::CmpIPredicate::slt : arith::CmpIPredicate::sge, value,
+        IntegerConstant(from, 0, loc));
+  }
+  if (test && function) {
+    // mmc: "function `int8.det_from_int'/1: cannot convert int to int8".
+    merk::ThrowIfOp::create(builder_, loc, test,
+        ("Software Error: function `" + module +
+            ".det_from_int'/1: cannot convert int to " + module)
+            .str());
+  } else if (test) {
+    merk::GuardOp::create(builder_, loc, test);
+  }
+  values_[arguments[1]] = result;
+  return true;
+}
+
 mlir::Value MerkGenerator::IntegerDivide(mlir::Value a, mlir::Value b,
     llvm::StringRef module, llvm::StringRef what, bool floor, bool remainder,
     mlir::Location loc) {
@@ -623,6 +672,11 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     return false;
   }
   bool function{symbol.kind == semantics::SymbolKind::Function};
+  if (isInteger && module != "int" && arguments.size() == 2 &&
+      (function ? symbol.name == "det_from_int" : symbol.name == "from_int") &&
+      !IsOutput(callee.modes[0]) && IsOutput(callee.modes[1])) {
+    return FromInt(goal, symbol, arguments, body, module, function);
+  }
   if (function && isInteger && arguments.size() == 3 &&
       llvm::is_contained({"+", "-", "xor"}, symbol.name) &&
       !IsOutput(callee.modes[2]) &&

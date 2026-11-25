@@ -321,6 +321,11 @@ private:
   // Whether a call of an integer or float module that is not built in has been
   // dealt with, which it has only if it was reported.
   bool NotBuiltIn(const Body &, const semantics::Symbol &);
+  // A sized integer module's from_int, which fails, or det_from_int, which
+  // throws, for an int outside the type's range.
+  bool FromInt(const Body &, const semantics::Symbol &,
+      llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &,
+      llvm::StringRef module, bool function);
   mlir::Value IntegerDivide(mlir::Value a, mlir::Value b, llvm::StringRef module,
       llvm::StringRef what, bool floor, bool remainder, mlir::Location);
   mlir::Value IntegerShift(mlir::Value value, mlir::Value amount,
