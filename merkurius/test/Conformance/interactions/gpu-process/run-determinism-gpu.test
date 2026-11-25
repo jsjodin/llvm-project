@@ -1,0 +1,7 @@
+run-determinism.m's GPU process on the machine's GPU, which prints what it
+prints at the host, the output the oracle checked. Written by
+utils/conformance/generate-interactions.py.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/run-determinism.m -o %t2
+RUN: %gpu-env timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %S/run-determinism.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

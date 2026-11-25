@@ -42,6 +42,7 @@ OUT = os.path.join(HERE, "..", "..", "test", "Conformance", "interactions")
 class Feature:
     def __init__(self, name, manual, imports, interface, implementation,
                  summary, interface_imports=()):
+        self.gpu = None
         self.name = name
         self.manual = manual
         self.imports = set(imports) | set(interface_imports)
@@ -56,7 +57,7 @@ class Feature:
 
 class Context:
     def __init__(self, name, manual, imports, code, summary, flags=(),
-                 plain=None, io=False):
+                 plain=None, io=False, gpu=False):
         self.name = name
         self.manual = manual
         self.imports = set(imports)
@@ -71,6 +72,8 @@ class Context:
         # same, as the context must not change what the feature computes.
         self.plain = plain.strip("\n") if plain else None
         self.io = io
+        # Whether the context also runs on the GPU, in a -gpu.test.
+        self.gpu = gpu
 
 
 FEATURES = [
@@ -429,6 +432,195 @@ risky(N, R) :-
         "a try goal that catches a thrown string"),
 ]
 
+# The features that a GPU process may have, as flat values: each feature's
+# variant for the GPU, whose use is an int, a digest of the value, as a GPU
+# process makes no strings. (imports, interface, implementation) Closures,
+# existential types, user-defined equality over lists and try goals make
+# values that are not flat; type classes wait for a GPU process's method
+# calls ("dispatches on a type class, which cannot be done in a GPU process
+# yet").
+GPU_VARIANTS = {
+    "layouts": (["int", "float"], """
+    % More functors with arguments than a pointer has tags, and constants,
+    % of fixed size: a flat union.
+:- type fdata
+    --->    c0
+    ;       c1
+    ;       one(int)
+    ;       two(int, int)
+    ;       three(float, int)
+    ;       four(int, int, int, int)
+    ;       five(float)
+    ;       six(int)
+    ;       seven(int, float, int).
+
+:- func make(int) = fdata.
+:- func use(fdata) = int.
+""", """
+make(N) = D :-
+    K = N mod 9,
+    ( if K = 0 then D = c0
+    else if K = 1 then D = one(N)
+    else if K = 2 then D = two(N, -N)
+    else if K = 3 then D = three(float(N) / 2.0, N)
+    else if K = 4 then D = four(N, 1, 2, 3)
+    else if K = 5 then D = five(float(N) * 4.0)
+    else if K = 6 then D = six(N * N)
+    else if K = 7 then D = seven(N, 0.5, N)
+    else D = c1
+    ).
+
+use(c0) = 1000.
+use(c1) = 2000.
+use(one(I)) = I.
+use(two(I, J)) = I * 10 + J.
+use(three(F, I)) = truncate_to_int(F * 10.0) + I.
+use(four(A, B, C, D)) = A * 1000 + B * 100 + C * 10 + D.
+use(five(F)) = truncate_to_int(F).
+use(six(I)) = I + 7.
+use(seven(A, F, B)) = A + truncate_to_int(F * 100.0) + B.
+"""),
+    "flat-values": (["int", "int8", "uint16", "float"], """
+:- type colour
+    --->    red
+    ;       green
+    ;       blue.
+
+:- type wrapped
+    --->    wrapped(int).
+
+    % A record of one functor of numbers, an enumeration and a notag.
+:- type fdata
+    --->    fdata(colour, wrapped, int8, uint16, float).
+
+:- func make(int) = fdata.
+:- func use(fdata) = int.
+""", """
+make(N) = fdata(
+    ( if N mod 3 = 0 then red else if N mod 3 = 1 then green else blue ),
+    wrapped(N * 100), int8.det_from_int(-N), uint16.det_from_int(N * 1000),
+    float(N) * 0.25).
+
+use(fdata(C, wrapped(W), I, U, F)) =
+    colour_code(C) + W + int8.to_int(I) + uint16.to_int(U) +
+    truncate_to_int(F * 100.0).
+
+:- func colour_code(colour) = int.
+
+colour_code(red) = 1.
+colour_code(green) = 2.
+colour_code(blue) = 3.
+"""),
+    "equivalence-types": (["int"], """
+:- type point
+    --->    point(int, int).
+:- type distance == int.
+:- type fdata == point.
+
+:- func make(int) = fdata.
+:- func use(fdata) = distance.
+""", """
+make(N) = point(N, N * 2).
+
+use(point(X, Y)) = X * X + Y * Y.
+"""),
+    "field-access": (["int"], """
+:- type fdata
+    --->    account(
+                id :: int,
+                balance :: int,
+                limit :: int
+            ).
+
+:- func make(int) = fdata.
+:- func use(fdata) = int.
+""", """
+make(N) = account(N, N * 10, 50).
+
+use(A0) = A ^ id * 10000 + A ^ balance * 10 + A ^ limit :-
+    A1 = A0 ^ balance := A0 ^ balance + 5,
+    A = A1 ^ limit := A1 ^ limit - A0 ^ id.
+"""),
+    "determinism": (["int"], """
+:- type fdata
+    --->    range(int, int).
+
+:- func make(int) = fdata.
+:- func use(fdata) = int.
+""", """
+make(N) = range(1, N + 2).
+
+    % The first number over 2 in the range, by a semidet search, and how
+    % many are even, by a nondet one, aggregated.
+use(range(Lo, Hi)) = First * 100 + Evens :-
+    ( if first_over(Lo, Hi, 2, F) then First = F else First = 0 ),
+    Evens = count_evens(Lo, Hi, 0).
+
+:- pred first_over(int::in, int::in, int::in, int::out) is semidet.
+
+first_over(I, Hi, Limit, F) :-
+    I =< Hi,
+    ( if I > Limit then
+        F = I
+    else
+        first_over(I + 1, Hi, Limit, F)
+    ).
+
+:- pred even_in(int::in, int::in, int::out) is nondet.
+
+even_in(Lo, Hi, X) :-
+    in_range(Lo, Hi, X),
+    X mod 2 = 0.
+
+:- pred in_range(int::in, int::in, int::out) is nondet.
+
+in_range(Lo, Hi, X) :-
+    Lo =< Hi,
+    ( X = Lo
+    ; in_range(Lo + 1, Hi, X)
+    ).
+
+:- func count_evens(int, int, int) = int.
+
+count_evens(Lo, Hi, N0) = N :-
+    promise_equivalent_solutions [N] (
+        ( if even_in(Lo, Hi, X), X > N0 then
+            N = 1 + count_evens(X + 1, Hi, N0)
+        else
+            N = 0
+        )
+    ).
+"""),
+    "unique-modes": (["int", "array"], """
+:- type fdata == int.
+
+:- func make(int) = fdata.
+:- func use(fdata) = int.
+""", """
+make(N) = N + 3.
+
+use(Size) = sum(0, squares(0, A0), 0) :-
+    array.init(Size, 0, A0).
+
+    % Updates the array in place, as its modes allow.
+:- func squares(int, array(int)) = array(int).
+:- mode squares(in, array_di) = array_uo is det.
+
+squares(I, A0) = A :-
+    ( if I < array.size(A0) then
+        array.set(I, I * I, A0, A1),
+        A = squares(I + 1, A1)
+    else
+        A = A0
+    ).
+
+:- func sum(int, array(int), int) = int.
+
+sum(I, A, S) =
+    ( if I < array.size(A) then sum(I + 1, A, S + A ^ elem(I)) else S ).
+"""),
+}
+
 CONTEXTS = [
     Context(
         "closure", "Creating higher-order terms", ["int", "list", "string"],
@@ -732,6 +924,61 @@ back(Back, S, !IO) :-
 
 run(N, use(make(N)) ++ " | " ++ use(make(N + 1)), !IO).
 """, io=True),
+    Context(
+        "gpu-process", "GPU processes",
+        ["int", "list", "string", "process"],
+        """
+    % A process kind on gpu, which makes and uses the values where it runs:
+    % at the host, or on the GPU when the program's argument is gpu
+    % (run-*-gpu.test).
+:- type request
+    --->    request(int, mailbox(int))
+    ;       stop.
+
+:- process worker receives request on gpu.
+
+worker(Self, !IO) :-
+    receive(Self, any, infinity, R, !IO),
+    (
+        R = message(request(K, Reply)),
+        send(Reply, use(make(K)), !IO),
+        worker(Self, !IO)
+    ;
+        R = message(stop)
+    ;
+        R = timeout
+    ).
+
+:- pred run(int::in, string::out, io::di, io::uo) is det.
+
+run(N, S, !IO) :-
+    io.command_line_arguments(Args, !IO),
+    Place = ( if Args = ["gpu"] then gpu(0) else host ),
+    new_mailbox(Replies, !IO),
+    spawn(Place, worker, Worker, !IO),
+    send(Worker, request(N, Replies), !IO),
+    send(Worker, request(N + 1, Replies), !IO),
+    send(Worker, stop, !IO),
+    reply(Replies, S1, !IO),
+    reply(Replies, S2, !IO),
+    S = S1 ++ " | " ++ S2.
+
+:- pred reply(mailbox(int)::in, string::out, io::di, io::uo) is det.
+
+reply(Replies, S, !IO) :-
+    receive(Replies, any, infinity, R, !IO),
+    ( R = message(K), S = string.int_to_string(K)
+    ; R = timeout, S = "timeout"
+    ).
+""",
+        "a GPU process, which makes and uses the values",
+        flags=["-fprocess-declarations"],
+        plain="""
+:- pred run(int::in, string::out, io::di, io::uo) is det.
+
+run(N, string.int_to_string(use(make(N))) ++ " | " ++
+    string.int_to_string(use(make(N + 1))), !IO).
+""", io=True, gpu=True),
 ]
 
 CONTEXTS += EXTENSION_CONTEXTS
@@ -809,6 +1056,23 @@ def test_text(feature, context):
     return text, others
 
 
+def gpu_test(feature, context):
+    """The test that runs a GPU context's test on the GPU."""
+    test = "run-%s.m" % feature.name
+    flags = " ".join(context.flags)
+    return "\n".join([
+        "%s's GPU process on the machine's GPU, which prints what it" % test,
+        "prints at the host, the output the oracle checked. Written by",
+        "utils/conformance/generate-interactions.py.",
+        "REQUIRES: amdgpu-gpu",
+        "",
+        "RUN: merkc -O2 %s --offload-arch=%%offload-arch %%libomp-flags "
+        "%%S/%s -o %%t2" % (flags, test),
+        "RUN: %%gpu-env timeout -k 1 60 %%t2 gpu 2>&1 | FileCheck %%S/%s "
+        "--check-prefix=OUTPUT --match-full-lines --strict-whitespace" % test,
+        ""])
+
+
 def program(module, imports, feature, code, io):
     """A test's module, from the feature's code and the context's."""
     lines = [
@@ -851,12 +1115,23 @@ def main():
     for context in CONTEXTS:
         directory = os.path.join(args.out, context.name)
         for feature in FEATURES:
+            if context.gpu:
+                if feature.name not in GPU_VARIANTS:
+                    continue
+                imports, interface, implementation = GPU_VARIANTS[
+                    feature.name]
+                feature = Feature(feature.name, feature.manual, imports,
+                                  interface, implementation, feature.summary)
             text, others = test_text(feature, context)
             files = [(os.path.join(directory, "run-%s.m" % feature.name),
                       text)]
             for name, other in others:
                 files.append((os.path.join(directory, "Inputs",
                                            name + ".m"), other))
+            if context.gpu:
+                files.append((os.path.join(
+                    directory, "run-%s-gpu.test" % feature.name),
+                    gpu_test(feature, context)))
             for path, content in files:
                 old = None
                 if os.path.exists(path):

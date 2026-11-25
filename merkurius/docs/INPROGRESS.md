@@ -9064,9 +9064,19 @@ tested shows.
    computes. The 110 tests pass at -O0 and -O2, with and without a
    collection at every allocation, the parallel ones also sequentially.
    They found one bug: a closure of a nondet procedure in a parallel loop
-   did not compile (fixed 2026-11-25). Still to do: a GPU process, whose
-   features are those it allows (flat values, no closures), open types
-   as a feature, and triples of the contexts that nest.
+   did not compile (fixed 2026-11-25).
+
+   A GPU process context has the features a GPU process allows, as
+   variants of them whose values are flat and whose `use` is an int, a
+   digest, as a GPU process makes no strings: layouts of a flat union,
+   the record of numbers, an equivalence type, field access, semidet and
+   nondet code, and an array in unique modes. The process kind runs at
+   the host, which the oracle checks against the plain translation, and
+   on the GPU in `run-*-gpu.test`, which checks the same output. Type
+   classes wait for method calls in a GPU process; closures, existential
+   types, user-defined equality over lists and try goals make values
+   that are not flat. Still to do: open types as a feature, and triples
+   of the contexts that nest.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.
 
