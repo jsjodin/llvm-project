@@ -31,7 +31,7 @@ SourceFile::~SourceFile() { Close(); }
 // up to and including the end of the file has a position. A newline that
 // ends the file does not start another line.
 void SourceFile::RecordLineStarts() {
-  origins_.emplace(1, SourcePositionOrigin{path_, 1});
+  origins_.emplace(1, SourcePositionOrigin{&path_, 1});
   llvm::StringRef text{content()};
   std::size_t at{0};
   do { // "at" is always at the beginning of a source line
@@ -134,7 +134,7 @@ SourcePosition SourceFile::GetSourcePosition(std::size_t at) const {
     const SourcePositionOrigin &origin{ub->second};
     auto lineNumber{
         trueLineNumber - ub->first + static_cast<std::size_t>(origin.line)};
-    return {*this, origin.path, static_cast<int>(lineNumber), column,
+    return {*this, *origin.path, static_cast<int>(lineNumber), column,
         static_cast<int>(trueLineNumber)};
   }
 }
@@ -157,7 +157,17 @@ void SourceFile::LineDirective(
     int trueLineNumber, const std::string &path, int lineNumber) {
   // A later directive for the same line replaces an earlier one.
   origins_.erase(trueLineNumber);
-  origins_.emplace(trueLineNumber, SourcePositionOrigin{path, lineNumber});
+  origins_.emplace(trueLineNumber, SourcePositionOrigin{&path, lineNumber});
+}
+
+void SourceFile::SourceFileDirective(int trueLineNumber, std::string path) {
+  int lineNumber{GetSourcePosition(GetLineStartOffset(trueLineNumber)).line};
+  const std::string &saved{SavePath(std::move(path))};
+  LineDirective(trueLineNumber, saved, lineNumber);
+  for (auto it{origins_.upper_bound(trueLineNumber)}; it != origins_.end();
+      ++it) {
+    it->second.path = &saved;
+  }
 }
 
 llvm::raw_ostream &SourceFile::Dump(llvm::raw_ostream &o) const {
@@ -165,7 +175,8 @@ llvm::raw_ostream &SourceFile::Dump(llvm::raw_ostream &o) const {
     << (lines() == 1 ? " line" : " lines")
     << (hasByteOrderMark() ? ", byte order mark" : "") << '\n';
   for (const auto &[at, spo] : origins_) {
-    o << "  origin_[" << at << "] -> '" << spo.path << "' " << spo.line << '\n';
+    o << "  origin_[" << at << "] -> '" << *spo.path << "' " << spo.line
+      << '\n';
   }
   return o;
 }

@@ -82,11 +82,16 @@ public:
   // path, counting up from there. Used for '#' line number directives and
   // pragma source_file.
   void LineDirective(int trueLineNumber, const std::string &, int lineNumber);
+  // From line trueLineNumber on, positions are reported in path, with their
+  // line numbers as they were, and so are those of the line number
+  // directives after it (reference manual, "Source file name"). A later
+  // pragma, applied after this one, renames its own lines in turn.
+  void SourceFileDirective(int trueLineNumber, std::string path);
   llvm::raw_ostream &Dump(llvm::raw_ostream &) const;
 
 private:
   struct SourcePositionOrigin {
-    const std::string &path;
+    const std::string *path;
     int line;
   };
 

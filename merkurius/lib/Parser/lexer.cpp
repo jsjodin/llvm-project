@@ -564,6 +564,7 @@ void Lexer::SkipEscape() {
 TokenSequence Lex(
     SourceFile &file, const LexerOptions &options, Messages &messages) {
   TokenSequence result;
+  result.file = &file;
   llvm::StringRef text{file.content()};
   Lexer lexer{
       text.begin(), text.end(), text.begin(), &file, options.openMP, messages};

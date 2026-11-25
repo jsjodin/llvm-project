@@ -65,6 +65,9 @@ struct Token {
 struct TokenSequence {
   std::vector<Token> tokens; // ends with an eof token
   std::vector<Token> directiveTokens;
+  // The file lexed, whose positions a source_file pragma renames, if the
+  // tokens are a file's.
+  SourceFile *file{nullptr};
 };
 
 // The tokens of the directive at `directive`, which ends with an eof token,

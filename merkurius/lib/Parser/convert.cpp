@@ -9,6 +9,7 @@
 #include "merkurius/Parser/convert.h"
 #include "convert-rules.h"
 #include "merkurius/Parser/message.h"
+#include "merkurius/Parser/source.h"
 #include "merkurius/Parser/term-combinators.h"
 #include "merkurius/Parser/term-reader.h"
 #include "llvm/ADT/STLExtras.h"
@@ -1361,6 +1362,18 @@ std::optional<Item> ConvertItem(const Term &term, ConvertState &state) {
   return std::nullopt;
 }
 
+// The lines after a source_file pragma are in the file it names (reference
+// manual, "Source file name").
+static void RenameSourceFile(
+    const SourceFilePragma &pragma, SourceFile &file, const Token &last) {
+  auto end{
+      static_cast<std::size_t>(last.spelling.end() - file.content().begin())};
+  int next{file.GetSourcePosition(end).trueLineNumber + 1};
+  if (static_cast<std::size_t>(next) <= file.lines()) {
+    file.SourceFileDirective(next, pragma.name.str());
+  }
+}
+
 const ParseTree &ConvertFile(const TokenSequence &tokens,
     ParseTreeArena &arena, Messages &messages, unsigned maxDepth,
     const ReaderOptions &options) {
@@ -1392,6 +1405,11 @@ const ParseTree &ConvertFile(const TokenSequence &tokens,
         if (const auto *module{std::get_if<const ModuleDecl *>(&*converted)};
             module && !state.module) {
           state.module = (*module)->name;
+        }
+        if (const auto *pragma{
+                std::get_if<const SourceFilePragma *>(&*converted)};
+            pragma && tokens.file) {
+          RenameSourceFile(**pragma, *tokens.file, last);
         }
         items.push_back(*converted);
       }
