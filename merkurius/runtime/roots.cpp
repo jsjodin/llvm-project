@@ -639,6 +639,9 @@ public:
   void Root(Word *slot, std::int64_t type, const Safepoint &safepoint,
       const Word *infos, std::int64_t count);
   void UpdateOnly(Word *slot);
+  // Marks the cell that `address` is in or points at, if it is in
+  // from-space, as one copied with its binding.
+  void KeepCell(Word address);
   void UpdateTrail();
   void Drain();
   void Finish();
@@ -652,9 +655,11 @@ private:
     char *end;
     std::uint64_t *marks;
     bool large;
-    // Which words are variable cells whose bindings are on the trail; null
-    // if none are.
-    std::uint64_t *trailed;
+    // Which words are variable cells that are copied with their bindings,
+    // rather than a reference to them replaced by the binding: those whose
+    // bindings are on the trail, and those that an update-only root points
+    // at (KeepCell); null if none are.
+    std::uint64_t *kept;
   };
   // What is left to do of a cell in to-space: its fields, each of its type in
   // `types`, or all of `single`'s for an array.
@@ -690,7 +695,7 @@ private:
       Word *slot, Word type, const Environment *environment, bool open = false);
   void ForwardValue(Word *slot, const Type &type);
   void ForwardOpen(Word *slot, Type type);
-  bool Trailed(const FromChunk *chunk, const Word *cell) const;
+  bool Kept(const FromChunk *chunk, const Word *cell) const;
   Word *CopyBox(Word *slot);
   void ForwardCell(Word *slot, const Type &type);
   bool LoopsOnLast(const Functor *functor, const Type &type);
@@ -747,33 +752,37 @@ void Collector::Prepare() {
   // The collection runs in its process, whose trail merk_trail is.
   MerkTrail *trail{merk_trail};
   for (std::uint64_t k{0}; trail && k < trail->top; ++k) {
-    Word *cell{trail->entries[k].address};
-    FromChunk *from{FindFrom(reinterpret_cast<Word>(cell))};
-    if (!from) {
-      continue;
-    }
-    if (!from->trailed) {
-      from->trailed = static_cast<std::uint64_t *>(std::calloc(
-          (from->end - from->begin) / 512 + 1, sizeof(std::uint64_t)));
-      if (!from->trailed) {
-        Bad("no memory for a collection's trail marks", trail->top);
-      }
-    }
-    std::size_t index{
-        static_cast<std::size_t>(reinterpret_cast<char *>(cell) - from->begin) /
-        sizeof(Word)};
-    from->trailed[index / 64] |= std::uint64_t{1} << (index % 64);
+    KeepCell(reinterpret_cast<Word>(trail->entries[k].address));
   }
 }
 
-bool Collector::Trailed(const FromChunk *chunk, const Word *cell) const {
-  if (!chunk->trailed) {
+void Collector::KeepCell(Word address) {
+  Word cellAddress{address & ~kTagMask};
+  FromChunk *from{FindFrom(cellAddress)};
+  if (!from) {
+    return;
+  }
+  if (!from->kept) {
+    from->kept = static_cast<std::uint64_t *>(std::calloc(
+        (from->end - from->begin) / 512 + 1, sizeof(std::uint64_t)));
+    if (!from->kept) {
+      Bad("no memory for a collection's marks of kept cells", address);
+    }
+  }
+  std::size_t index{static_cast<std::size_t>(
+                        reinterpret_cast<char *>(cellAddress) - from->begin) /
+      sizeof(Word)};
+  from->kept[index / 64] |= std::uint64_t{1} << (index % 64);
+}
+
+bool Collector::Kept(const FromChunk *chunk, const Word *cell) const {
+  if (!chunk->kept) {
     return false;
   }
   std::size_t index{static_cast<std::size_t>(
                         reinterpret_cast<const char *>(cell) - chunk->begin) /
       sizeof(Word)};
-  return (chunk->trailed[index / 64] >> (index % 64) & 1) != 0;
+  return (chunk->kept[index / 64] >> (index % 64) & 1) != 0;
 }
 
 Collector::FromChunk *Collector::FindFrom(Word address) {
@@ -1259,7 +1268,7 @@ void Collector::ForwardOpen(Word *slot, Type type) {
         return;
       }
       Word binding{*cell};
-      if (binding != value && !Trailed(chunk, cell)) {
+      if (binding != value && !Kept(chunk, cell)) {
         *slot = binding; // The chain is one cell shorter.
         continue;
       }
@@ -1519,7 +1528,7 @@ void Collector::Finish() {
   process_->chunks = kept;
   for (std::size_t i{0}; i < chunkCount_; ++i) {
     std::free(chunks_[i].marks);
-    std::free(chunks_[i].trailed);
+    std::free(chunks_[i].kept);
   }
   std::free(chunks_);
   std::free(pending_);
@@ -1627,6 +1636,22 @@ bool CollectIfDue(void *frame) {
     return false;
   }
   Collector collector{process};
+  // A variable cell that an update-only root points at, such as the untagged
+  // cell that statepoint lowering keeps as the base of the tagged variable
+  // reference, must be forwarded for the root to follow it: so it is copied
+  // with its binding, as a trailed one is, rather than skipped by a typed
+  // root that reaches it through a reference.
+  VisitFrames(frame, [&](const Safepoint &safepoint, char *stack) {
+    VisitFrame(safepoint, stack,
+        [&](Word *slot, std::int64_t type, const Word *, std::int64_t) {
+          if (type == kUpdateOnly ||
+              (type >= 0 && safepoint.table->entries[type].kind == RootRef)) {
+            collector.KeepCell(*slot);
+          }
+        });
+    VisitLoneBases(
+        safepoint, stack, [&](Word *slot) { collector.KeepCell(*slot); });
+  });
   // An interior pointer holds its offset from its base while the base moves.
   VisitFrames(frame, [&](const Safepoint &safepoint, char *stack) {
     VisitInterior(
