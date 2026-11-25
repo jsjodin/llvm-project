@@ -614,7 +614,7 @@ Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
             }
             return Make<Unify>(unify->tokens, unify->number,
                 MapVar(unify->left), unify->isVar, MapVar(unify->var), functor,
-                SaveMapped(unify->arguments));
+                SaveMapped(unify->arguments), unify->mustMatch);
           },
           [&](const Call *call) -> Goal {
             Qualifications(call->tokens);

@@ -28,6 +28,10 @@
 //       ).
 //   p__body(I, X, In, Out, ...) :- Body.
 //
+// A list's unifications in Ends and Steps must match: tested, of a list
+// bound before the loop, they throw "mismatched list lengths" where they
+// would fail, so lists in lockstep keep the loop det.
+//
 // Without a for it is the disjunction ( Ends ; Steps, ... ), which mode
 // analysis makes a switch on a list bound before the loop, or on a fromto
 // whose Last has no variables, by Last's functor against In's pattern,
@@ -309,9 +313,10 @@ private:
   Goal Conjunction(TokenRange, llvm::ArrayRef<Goal>);
   Goal UnifyVars(TokenRange, VarId left, VarId right);
   Goal UnifyLiteral(TokenRange, VarId left, const parser::Literal *);
-  // X = f(Y1, ..., Yn) for a constructor or a function f.
+  // X = f(Y1, ..., Yn) for a constructor or a function f; one that must
+  // match throws where it would fail (Unify::mustMatch).
   Goal UnifyFunctor(TokenRange, VarId left, FunctorKind, const Symbol &,
-      llvm::ArrayRef<VarId> arguments);
+      llvm::ArrayRef<VarId> arguments, bool mustMatch = false);
   Goal CallOf(TokenRange, const Symbol &, llvm::ArrayRef<VarId> arguments);
   // A new int variable that holds `text`, by a goal added to `goals`.
   VarId Constant(TokenRange, llvm::StringRef text, std::vector<Goal> &goals);
@@ -443,10 +448,11 @@ Goal LoopTranslator::UnifyLiteral(
 }
 
 Goal LoopTranslator::UnifyFunctor(TokenRange range, VarId left,
-    FunctorKind kind, const Symbol &symbol, llvm::ArrayRef<VarId> arguments) {
+    FunctorKind kind, const Symbol &symbol, llvm::ArrayRef<VarId> arguments,
+    bool mustMatch) {
   const parser::SymName *name{NameOf(symbol)};
   return Make<Unify>(range, NewNumber(&symbol, name), left, false, VarId{0},
-      Functor{kind, name, nullptr, nullptr}, Save(arguments));
+      Functor{kind, name, nullptr, nullptr}, Save(arguments), mustMatch);
 }
 
 Goal LoopTranslator::CallOf(
@@ -777,7 +783,7 @@ Goal LoopTranslator::Rebuild(const Goal &goal) {
                 lambda->any, lambda->purity, lambda->arguments, lambda->modes,
                 lambda->determinism, body, lambda->receive);
             return Make<Unify>(x->tokens, x->number, x->left, x->isVar, x->var,
-                functor, x->arguments);
+                functor, x->arguments, x->mustMatch);
           },
           [&](const Call *x) -> Goal { return x; },
           [&](const HOCall *x) -> Goal { return x; },
@@ -999,10 +1005,14 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
       const Type *type{varTypes_[a[1]]};
       VarId list{NewVar(type, at)}, tail{NewVar(type, at)};
       AddLoopArgument(head, list, a[1], tail, unifications, range);
-      ends.push_back(UnifyFunctor(
-          at, list, FunctorKind::Nil, *ListConstructor("[]", 0), {}));
+      // A list bound before the loop is tested, and one at its end too
+      // early or too late is a software error, so that a loop over lists
+      // in lockstep is det when its body is; one the loop builds is
+      // constructed.
+      ends.push_back(UnifyFunctor(at, list, FunctorKind::Nil,
+          *ListConstructor("[]", 0), {}, /*mustMatch=*/true));
       steps.push_back(UnifyFunctor(at, list, FunctorKind::Cons,
-          *ListConstructor("[|]", 2), {a[0], tail}));
+          *ListConstructor("[|]", 2), {a[0], tail}, /*mustMatch=*/true));
       break;
     }
     case LoopIteratorKind::Fromto: {

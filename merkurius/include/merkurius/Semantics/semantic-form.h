@@ -135,6 +135,11 @@ struct Unify {
   VarId var; // Y
   Functor functor; // f
   llvm::ArrayRef<VarId> arguments; // Y1, ..., Yn
+  // A test that must succeed: where it would fail, a software error,
+  // "mismatched list lengths", is thrown instead, so it cannot fail. A
+  // loop's translation tests its lists in lockstep so (design document,
+  // "Loops", Meaning); as a construction it is an ordinary one.
+  bool mustMatch{false};
 };
 
 // pred(X1::M1, ...) is Det :- Body, or func(...) = (Y::M) is Det :- Body,

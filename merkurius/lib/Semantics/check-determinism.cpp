@@ -2195,6 +2195,15 @@ private:
       Lambda(goal, bound);
       return {det};
     }
+    // A test that must match throws where it would fail (Unify::mustMatch).
+    if (goal->source && goal->source->mustMatch &&
+        (goal->unify == UnifyKind::Test ||
+            goal->unify == UnifyKind::Deconstruct)) {
+      if (goal->unify == UnifyKind::Deconstruct && body_.rechecked) {
+        known_[goal->left] = goal->functor;
+      }
+      return {det};
+    }
     switch (goal->unify) {
     case UnifyKind::Call: {
       Inferred r{Implied(Callee(*goal->modes->callee), *goal->modes),

@@ -1,9 +1,9 @@
 % The modes and determinism of loops' predicates are inferred from their
 % translation: a loop with a for ends when its trip count does, and one
 % without is a switch on a list bound before it or on a fromto whose Last
-% has no variables. Two lists bound before the loop, in lockstep, make it
-% semidet for now: the design document's software error for lists of
-% different lengths is not implemented yet. A loop with nothing to end it
+% has no variables. Lists bound before the loop, in lockstep with each
+% other or with a for, keep it det: a list at its end too early or too late
+% is a software error rather than a failure. A loop with nothing to end it
 % is multi.
 %
 % RUN: not merkc -fc1 -fdo-loops -fdebug-dump-determinism %s 2>&1 \
@@ -13,7 +13,8 @@
 :- interface.
 :- import_module list.
 :- pred squares(int::in, list(int)::out) is det.
-:- pred zip_sum(list(int)::in, list(int)::in, int::out) is semidet.
+:- pred zip_sum(list(int)::in, list(int)::in, int::out) is det.
+:- pred scaled(list(int)::in, list(int)::out) is det.
 :- pred copy(list(int)::in, list(int)::out) is det.
 :- pred last(list(int)::in, int::out) is semidet.
 :- pred endless(list(int)::out) is det.
@@ -29,7 +30,11 @@ zip_sum(Xs, Ys, S) :-
     ( foreach(X, Xs), foreach(Y, Ys), fromto(0, S0, S1, S) do
         S1 = S0 + X * Y
     ).
-% CHECK: [[@LINE-3]]:7 pred determinism.zip_sum__loop_[[@LINE-3]]_7/4 inferred mode 0: zip_sum__loop_[[@LINE-3]]_7(in, in, di, uo), inferred semidet
+% CHECK: [[@LINE-3]]:7 pred determinism.zip_sum__loop_[[@LINE-3]]_7/4 inferred mode 0: zip_sum__loop_[[@LINE-3]]_7(in, in, di, uo), inferred det
+
+scaled(Xs, Ys) :-
+    ( for(I, 1, 3), foreach(X, Xs), foreach(Y, Ys) do Y = I * X ).
+% CHECK: [[@LINE-1]]:7 pred determinism.scaled__loop_[[@LINE-1]]_7/4 inferred mode 0: scaled__loop_[[@LINE-1]]_7(in, di, in, uo), inferred det
 
 copy(Xs, Ys) :-
     ( foreach(X, Xs), foreach(X, Ys) do true ).

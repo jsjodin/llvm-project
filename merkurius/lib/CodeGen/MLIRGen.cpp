@@ -883,6 +883,49 @@ bool MerkGenerator::NoteRoot(mlir::Value value, const semantics::Type *type) {
   return true;
 }
 
+// A unification that must match is generated as any, and then each test
+// of it that would fail throws "mismatched list lengths" instead, naming
+// where the loop's iterator is: its guards become throws of their
+// negations.
+void MerkGenerator::MustMatch(const Body &goal, const ProcedureBody &body) {
+  mlir::Block *block{builder_.getInsertionBlock()};
+  mlir::Block::iterator point{builder_.getInsertionPoint()};
+  mlir::Operation *before{
+      point == block->begin() ? nullptr : &*std::prev(point)};
+  mustMatching_ = true;
+  Goal(goal, body);
+  mustMatching_ = false;
+  if (builder_.getInsertionBlock() != block) {
+    NotYet(Where(goal.tokens), "this unification of a loop's list");
+    failed_ = true;
+    return;
+  }
+  std::string where{"a loop"};
+  if (auto at{mlir::dyn_cast<mlir::FileLineColLoc>(Location(goal.tokens))}) {
+    where = ("the loop at " + llvm::sys::path::filename(at.getFilename()) +
+        ":" + llvm::Twine(at.getLine()))
+                .str();
+  }
+  std::string exception{"Software Error: mismatched list lengths in " + where};
+  llvm::SmallVector<merk::GuardOp> guards;
+  for (mlir::Block::iterator it{
+           before ? std::next(before->getIterator()) : block->begin()};
+      it != builder_.getInsertionPoint(); ++it) {
+    it->walk([&](merk::GuardOp guard) { guards.push_back(guard); });
+  }
+  mlir::OpBuilder::InsertionGuard saved{builder_};
+  for (merk::GuardOp guard : guards) {
+    builder_.setInsertionPoint(guard);
+    mlir::Location loc{guard.getLoc()};
+    mlir::Value failed{
+        mlir::arith::XOrIOp::create(builder_, loc, guard.getCondition(),
+            mlir::arith::ConstantIntOp::create(
+                builder_, loc, builder_.getI1Type(), 1))};
+    merk::ThrowIfOp::create(builder_, loc, failed, exception);
+    guard.erase();
+  }
+}
+
 void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
   // Before as well, as a goal that ends the body leaves no place after it.
   AnnotateRoots(body);
@@ -951,6 +994,10 @@ void MerkGenerator::GoalBody(const Body &goal, const ProcedureBody &body) {
     HigherOrderCall(goal, body);
     return;
   case BodyKind::Unify:
+    if (goal.source && goal.source->mustMatch && !mustMatching_) {
+      MustMatch(goal, body);
+      return;
+    }
     if (goal.switchTest) {
       // The switch's case has tested it; a constructor with arguments is
       // taken apart.

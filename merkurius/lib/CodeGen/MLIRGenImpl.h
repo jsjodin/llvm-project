@@ -432,6 +432,9 @@ private:
   // around the foreign_proc's code, which is added to foreignCode_.
   void GenerateForeign(const Procedure &, const parser::ForeignProcPragma &);
   void Goal(const Body &, const ProcedureBody &);
+  // A unification that must match (semantics::Unify::mustMatch), whose
+  // tests throw a software error instead of failing.
+  void MustMatch(const Body &, const ProcedureBody &);
   void GoalBody(const Body &, const ProcedureBody &);
   // Says which type_infos describe the polymorphic values bound so far.
   void AnnotateRoots(const ProcedureBody &);
@@ -1158,6 +1161,8 @@ private:
   void NoteGivenTypes(const semantics::Dictionary &);
   const semantics::ProcedurePolymorphism *current_{nullptr};
   bool failed_{false};
+  // While a unification that must match is generated (MustMatch).
+  bool mustMatching_{false};
   // Temporary (chunk 1 step 6, docs/INPROGRESS.md): -fstub-unimplemented,
   // for the library's procedures in modes code generation cannot make yet,
   // such as nondet ones; it goes when code generation makes them all.
