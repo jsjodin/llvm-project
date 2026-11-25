@@ -47,10 +47,10 @@ use(point(X, Y)) = X * X + Y * Y.
 :- process worker receives request on gpu.
 
 worker(Self, !IO) :-
-    receive(Self, any, infinity, R, !IO),
+    process.receive(Self, any, infinity, R, !IO),
     (
         R = message(request(K, Reply)),
-        send(Reply, use(make(K)), !IO),
+        process.send(Reply, use(make(K)), !IO),
         worker(Self, !IO)
     ;
         R = message(stop)
@@ -65,9 +65,9 @@ run(N, S, !IO) :-
     Place = ( if Args = ["gpu"] then gpu(0) else host ),
     new_mailbox(Replies, !IO),
     spawn(Place, worker, Worker, !IO),
-    send(Worker, request(N, Replies), !IO),
-    send(Worker, request(N + 1, Replies), !IO),
-    send(Worker, stop, !IO),
+    process.send(Worker, request(N, Replies), !IO),
+    process.send(Worker, request(N + 1, Replies), !IO),
+    process.send(Worker, stop, !IO),
     reply(Replies, S1, !IO),
     reply(Replies, S2, !IO),
     S = S1 ++ " | " ++ S2.
@@ -75,7 +75,7 @@ run(N, S, !IO) :-
 :- pred reply(mailbox(int)::in, string::out, io::di, io::uo) is det.
 
 reply(Replies, S, !IO) :-
-    receive(Replies, any, infinity, R, !IO),
+    process.receive(Replies, any, infinity, R, !IO),
     ( R = message(K), S = string.int_to_string(K)
     ; R = timeout, S = "timeout"
     ).

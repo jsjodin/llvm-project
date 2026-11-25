@@ -9075,8 +9075,19 @@ tested shows.
    on the GPU in `run-*-gpu.test`, which checks the same output. Type
    classes wait for method calls in a GPU process; closures, existential
    types, user-defined equality over lists and try goals make values
-   that are not flat. Still to do: open types as a feature, and triples
-   of the contexts that nest.
+   that are not flat.
+
+   Open types are a feature of every host context: a list built as a
+   difference list and closed, and taken apart by unifying it with an
+   open pattern. Its type and functions are ground, so the contexts are
+   unchanged, and its translation for mmc is a plain implementation of
+   `make` and `use` that computes the same, in the context's plain form
+   if it has one; in another module, the plain module is a `% FILES:`
+   input, which only mmc builds. The process contexts call
+   `process.send` and `process.receive`, as `open` exports a `send` of
+   the same types, which makes an unqualified call ambiguous. The 126
+   host tests and 6 GPU tests pass. Still to do: triples of the contexts
+   that nest.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.
 

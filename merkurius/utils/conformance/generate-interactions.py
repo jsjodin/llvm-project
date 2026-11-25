@@ -41,13 +41,21 @@ OUT = os.path.join(HERE, "..", "..", "test", "Conformance", "interactions")
 
 class Feature:
     def __init__(self, name, manual, imports, interface, implementation,
-                 summary, interface_imports=()):
-        self.gpu = None
+                 summary, interface_imports=(), flags=(), plain=None,
+                 plain_imports=None):
         self.name = name
+        # merkc's flags, for an extension of Merkurius's.
+        self.flags = list(flags)
+        # For an extension, which mmc does not have, an implementation of
+        # make and use in plain Mercury, which computes the same, for the
+        # translation that mmc runs, and its imports.
+        self.plain = plain.strip("\n") if plain else None
         self.manual = manual
         self.imports = set(imports) | set(interface_imports)
         # What the interface's types need, when it is another module's.
         self.interface_imports = set(interface_imports)
+        self.plain_imports = (set(plain_imports) | self.interface_imports
+                              if plain_imports is not None else self.imports)
         # What another module exports: the type, make and use, and any
         # instance; the rest is its implementation.
         self.interface = interface.strip("\n")
@@ -430,6 +438,79 @@ risky(N, R) :-
     ).
 """,
         "a try goal that catches a thrown string"),
+    Feature(
+        "open-types", "Open terms (Prolog-style variables)",
+        ["int", "open", "string"],
+        """
+:- type fdata == list(int).
+
+:- func make(int) = fdata.
+:- func use(fdata) = string.
+""",
+        """
+    % Built as a difference list, whose hole is closed with a ground tail.
+make(N) = L :-
+    make_open(1 .. N, Front, Hole),
+    promise_pure (
+        if close(Front, Hole, [N * 10], L0) then
+            L = L0
+        else
+            L = []
+    ).
+
+:- pred make_open(list(int)::in,
+    open(list(int))::oa, open(list(int))::oa) is det.
+
+make_open([], T, T).
+make_open([X | Xs], [X | R], T) :-
+    make_open(Xs, R, T).
+
+:- pred close(open(list(int))::ia, open(list(int))::ia,
+    list(int)::in, list(int)::out) is semidet.
+:- pragma promise_pure(close/4).
+
+close(Front, Hole, Tail, List) :-
+    Hole = to_open(Tail),
+    impure from_open(Front, List).
+
+    % Taken apart by unifying it with an open pattern, whose holes the
+    % unification binds; then the hole of a second pattern is bound to the
+    % first's rest, and closed.
+use(L) = S :-
+    ( if take_apart(L, A, B, Rest) then
+        S = string.int_to_string(A) ++ " " ++ string.int_to_string(B) ++
+            " rest " ++ string.join_list(",",
+                list.map(string.int_to_string, Rest))
+    else
+        S = "short"
+    ).
+
+:- pred take_apart(list(int)::in, int::out, int::out, list(int)::out)
+    is semidet.
+:- pragma promise_pure(take_apart/4).
+
+take_apart(L, A, B, Rest) :-
+    P = [OA, OB | ORest],
+    P = to_open(L),
+    impure from_open(OA, A),
+    impure from_open(OB, B),
+    impure from_open(ORest, Rest).
+""",
+        "a list built as a difference list and taken apart by unifying "
+        "open terms",
+        ["list"], flags=["-fopen-types"],
+        plain="""
+make(N) = (1 .. N) ++ [N * 10].
+
+use(L) =
+    ( if L = [A, B | Rest] then
+        string.int_to_string(A) ++ " " ++ string.int_to_string(B) ++
+            " rest " ++ string.join_list(",",
+                list.map(string.int_to_string, Rest))
+    else
+        "short"
+    ).
+""", plain_imports=["int", "string"]),
 ]
 
 # The features that a GPU process may have, as flat values: each feature's
@@ -842,13 +923,13 @@ run(N) = string.join_list(" | ",
     is det.
 
 worker(Replies, Self, !IO) :-
-    receive(Self, any, infinity, R, !IO),
+    process.receive(Self, any, infinity, R, !IO),
     (
         R = message(K),
         ( if K < 0 then
             true
         else
-            send(Replies, use(make(K)), !IO),
+            process.send(Replies, use(make(K)), !IO),
             worker(Replies, Self, !IO)
         )
     ;
@@ -860,9 +941,9 @@ worker(Replies, Self, !IO) :-
 run(N, S, !IO) :-
     new_mailbox(Replies, !IO),
     spawn(worker(Replies), Worker, !IO),
-    send(Worker, N, !IO),
-    send(Worker, N + 1, !IO),
-    send(Worker, -1, !IO),
+    process.send(Worker, N, !IO),
+    process.send(Worker, N + 1, !IO),
+    process.send(Worker, -1, !IO),
     reply(Replies, S1, !IO),
     reply(Replies, S2, !IO),
     S = S1 ++ " | " ++ S2.
@@ -870,7 +951,7 @@ run(N, S, !IO) :-
 :- pred reply(mailbox(string)::in, string::out, io::di, io::uo) is det.
 
 reply(Replies, S, !IO) :-
-    receive(Replies, any, infinity, R, !IO),
+    process.receive(Replies, any, infinity, R, !IO),
     ( R = message(S) ; R = timeout, S = "timeout" ).
 """,
         "another process, which makes and uses the values",
@@ -891,10 +972,10 @@ echo(Left, Back, Self, !IO) :-
     ( if Left = 0 then
         true
     else
-        receive(Self, any, infinity, R, !IO),
+        process.receive(Self, any, infinity, R, !IO),
         (
             R = message(V),
-            send(Back, V, !IO),
+            process.send(Back, V, !IO),
             echo(Left - 1, Back, Self, !IO)
         ;
             R = timeout
@@ -906,8 +987,8 @@ echo(Left, Back, Self, !IO) :-
 run(N, S, !IO) :-
     new_mailbox(Back, !IO),
     spawn(echo(2, Back), Echo, !IO),
-    send(Echo, make(N), !IO),
-    send(Echo, make(N + 1), !IO),
+    process.send(Echo, make(N), !IO),
+    process.send(Echo, make(N + 1), !IO),
     back(Back, S1, !IO),
     back(Back, S2, !IO),
     S = S1 ++ " | " ++ S2.
@@ -915,7 +996,7 @@ run(N, S, !IO) :-
 :- pred back(mailbox(fdata)::in, string::out, io::di, io::uo) is det.
 
 back(Back, S, !IO) :-
-    receive(Back, any, infinity, R, !IO),
+    process.receive(Back, any, infinity, R, !IO),
     ( R = message(V), S = use(V) ; R = timeout, S = "timeout" ).
 """,
         "messages sent to another process and back",
@@ -938,10 +1019,10 @@ run(N, use(make(N)) ++ " | " ++ use(make(N + 1)), !IO).
 :- process worker receives request on gpu.
 
 worker(Self, !IO) :-
-    receive(Self, any, infinity, R, !IO),
+    process.receive(Self, any, infinity, R, !IO),
     (
         R = message(request(K, Reply)),
-        send(Reply, use(make(K)), !IO),
+        process.send(Reply, use(make(K)), !IO),
         worker(Self, !IO)
     ;
         R = message(stop)
@@ -956,9 +1037,9 @@ run(N, S, !IO) :-
     Place = ( if Args = ["gpu"] then gpu(0) else host ),
     new_mailbox(Replies, !IO),
     spawn(Place, worker, Worker, !IO),
-    send(Worker, request(N, Replies), !IO),
-    send(Worker, request(N + 1, Replies), !IO),
-    send(Worker, stop, !IO),
+    process.send(Worker, request(N, Replies), !IO),
+    process.send(Worker, request(N + 1, Replies), !IO),
+    process.send(Worker, stop, !IO),
     reply(Replies, S1, !IO),
     reply(Replies, S2, !IO),
     S = S1 ++ " | " ++ S2.
@@ -966,7 +1047,7 @@ run(N, S, !IO) :-
 :- pred reply(mailbox(int)::in, string::out, io::di, io::uo) is det.
 
 reply(Replies, S, !IO) :-
-    receive(Replies, any, infinity, R, !IO),
+    process.receive(Replies, any, infinity, R, !IO),
     ( R = message(K), S = string.int_to_string(K)
     ; R = timeout, S = "timeout"
     ).
@@ -993,10 +1074,11 @@ def imports_line(names):
 
 
 def test_text(feature, context):
-    """The test's text, and its other module's, if it has one."""
+    """The test's text, and its other modules', as (name, text) pairs."""
     module = mercury_name(context.name, feature.name)
     header = [
-        "% MANUAL: " + feature.manual,
+        "% MANUAL: " + feature.manual if not feature.plain else
+        "% DESIGN: " + feature.manual,
     ]
     if context.plain:
         header.append("% DESIGN: " + context.manual)
@@ -1009,51 +1091,75 @@ def test_text(feature, context):
         "% Written by utils/conformance/generate-interactions.py; change",
         "% the generator rather than this file.",
     ]
-    main_imports = {"io", "int", "list", "string"} | context.imports
-    if context.flags:
-        header.append("% MERKC-FLAGS: " + " ".join(context.flags))
+    flags = context.flags + [f for f in feature.flags
+                             if f not in context.flags]
+    if flags:
+        header.append("% MERKC-FLAGS: " + " ".join(flags))
+    # mmc runs a translation instead of the test when either the context or
+    # the feature is Merkurius's own: the plain form of each.
     translation = None
-    if context.plain:
+    if context.plain or feature.plain:
         translation = module + "_translation"
         header.append("%% TRANSLATION: Inputs/%s.m" % translation)
-    lib = None
+    others = []
+    main_imports = {"io", "int", "list", "string"} | context.imports
+    plain_imports = main_imports - {"process"}
+    implementation = feature.implementation
+    plain_implementation = feature.plain or feature.implementation
     if context.name == "another-module":
         library = module + "_lib"
         header.append("%% MODULES: Inputs/%s.m" % library)
         main_imports.add(library)
-        lib_text = "\n".join([
-            "%% The feature of run-%s.m, as another module." % feature.name,
-            ":- module %s." % library,
-            ":- interface.",
-        ] + ([imports_line(feature.interface_imports)]
-             if feature.interface_imports else []) + [
-            "",
-            feature.interface,
-            "",
-            ":- implementation.",
-        ] + ([imports_line(feature.imports - feature.interface_imports)]
-             if feature.imports - feature.interface_imports else []) + [
-            "",
-            feature.implementation,
-            ""])
-        lib = (library, lib_text)
-        body_feature = ""
+        others.append((library, library_text(
+            library, feature, feature.imports, implementation,
+            "%% The feature of run-%s.m, as another module." % feature.name)))
+        body_feature = plain_feature = ""
+        if feature.plain:
+            plain_library = library + "_translation"
+            plain_imports.add(plain_library)
+            # For mmc only, which builds the translation.
+            header.append("%% FILES: Inputs/%s.m" % plain_library)
+            others.append((plain_library, library_text(
+                plain_library, feature, feature.plain_imports,
+                plain_implementation,
+                "%% The translation of Inputs/%s.m for mmc." % library)))
+        else:
+            plain_imports.add(library)
     else:
         main_imports |= feature.imports
-        body_feature = "\n".join([feature.interface, "",
-                                  feature.implementation, ""])
+        plain_imports |= feature.plain_imports
+        body_feature = "\n".join([feature.interface, "", implementation, ""])
+        plain_feature = "\n".join([feature.interface, "",
+                                    plain_implementation, ""])
     text = "\n".join(header + program(module, main_imports, body_feature,
                                       context.code, context.io))
-    others = [lib] if lib else []
     if translation:
-        # mmc has no process module: the translation needs none.
         others.append((translation, "\n".join(
             ["%% The translation of run-%s.m in %s for mmc: the same"
              % (feature.name, context.name),
-             "% feature in plain Mercury, which must print the same."] +
-            program(translation, main_imports - {"process"}, body_feature,
-                    context.plain, context.io))))
+             "% program in plain Mercury, which must print the same."] +
+            program(translation, plain_imports, plain_feature,
+                    context.plain or context.code, context.io))))
     return text, others
+
+
+def library_text(library, feature, imports, implementation, comment):
+    """The feature as another module."""
+    rest = imports - feature.interface_imports
+    return "\n".join([
+        comment,
+        ":- module %s." % library,
+        ":- interface.",
+    ] + ([imports_line(feature.interface_imports)]
+         if feature.interface_imports else []) + [
+        "",
+        feature.interface,
+        "",
+        ":- implementation.",
+    ] + ([imports_line(rest)] if rest else []) + [
+        "",
+        implementation,
+        ""])
 
 
 def gpu_test(feature, context):

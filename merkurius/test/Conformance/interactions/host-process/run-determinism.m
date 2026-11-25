@@ -62,13 +62,13 @@ first_over([X | Xs], Limit, F) :-
     is det.
 
 worker(Replies, Self, !IO) :-
-    receive(Self, any, infinity, R, !IO),
+    process.receive(Self, any, infinity, R, !IO),
     (
         R = message(K),
         ( if K < 0 then
             true
         else
-            send(Replies, use(make(K)), !IO),
+            process.send(Replies, use(make(K)), !IO),
             worker(Replies, Self, !IO)
         )
     ;
@@ -80,9 +80,9 @@ worker(Replies, Self, !IO) :-
 run(N, S, !IO) :-
     new_mailbox(Replies, !IO),
     spawn(worker(Replies), Worker, !IO),
-    send(Worker, N, !IO),
-    send(Worker, N + 1, !IO),
-    send(Worker, -1, !IO),
+    process.send(Worker, N, !IO),
+    process.send(Worker, N + 1, !IO),
+    process.send(Worker, -1, !IO),
     reply(Replies, S1, !IO),
     reply(Replies, S2, !IO),
     S = S1 ++ " | " ++ S2.
@@ -90,7 +90,7 @@ run(N, S, !IO) :-
 :- pred reply(mailbox(string)::in, string::out, io::di, io::uo) is det.
 
 reply(Replies, S, !IO) :-
-    receive(Replies, any, infinity, R, !IO),
+    process.receive(Replies, any, infinity, R, !IO),
     ( R = message(S) ; R = timeout, S = "timeout" ).
 
 main(!IO) :-

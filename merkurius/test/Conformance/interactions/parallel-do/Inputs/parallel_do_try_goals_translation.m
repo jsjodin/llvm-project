@@ -1,5 +1,5 @@
 % The translation of run-try-goals.m in parallel-do for mmc: the same
-% feature in plain Mercury, which must print the same.
+% program in plain Mercury, which must print the same.
 :- module parallel_do_try_goals_translation.
 :- interface.
 :- import_module io.

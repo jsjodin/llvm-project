@@ -1,5 +1,5 @@
 % The translation of run-equivalence-types.m in gpu-process for mmc: the same
-% feature in plain Mercury, which must print the same.
+% program in plain Mercury, which must print the same.
 :- module gpu_process_equivalence_types_translation.
 :- interface.
 :- import_module io.

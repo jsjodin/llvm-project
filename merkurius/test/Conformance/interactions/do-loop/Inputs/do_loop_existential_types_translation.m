@@ -1,5 +1,5 @@
 % The translation of run-existential-types.m in do-loop for mmc: the same
-% feature in plain Mercury, which must print the same.
+% program in plain Mercury, which must print the same.
 :- module do_loop_existential_types_translation.
 :- interface.
 :- import_module io.

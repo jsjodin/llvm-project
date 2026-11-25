@@ -1,5 +1,5 @@
 % The translation of run-unique-modes.m in parallel-do for mmc: the same
-% feature in plain Mercury, which must print the same.
+% program in plain Mercury, which must print the same.
 :- module parallel_do_unique_modes_translation.
 :- interface.
 :- import_module io.

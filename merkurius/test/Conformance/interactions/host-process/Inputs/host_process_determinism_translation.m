@@ -1,5 +1,5 @@
 % The translation of run-determinism.m in host-process for mmc: the same
-% feature in plain Mercury, which must print the same.
+% program in plain Mercury, which must print the same.
 :- module host_process_determinism_translation.
 :- interface.
 :- import_module io.

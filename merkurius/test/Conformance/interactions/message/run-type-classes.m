@@ -65,10 +65,10 @@ echo(Left, Back, Self, !IO) :-
     ( if Left = 0 then
         true
     else
-        receive(Self, any, infinity, R, !IO),
+        process.receive(Self, any, infinity, R, !IO),
         (
             R = message(V),
-            send(Back, V, !IO),
+            process.send(Back, V, !IO),
             echo(Left - 1, Back, Self, !IO)
         ;
             R = timeout
@@ -80,8 +80,8 @@ echo(Left, Back, Self, !IO) :-
 run(N, S, !IO) :-
     new_mailbox(Back, !IO),
     spawn(echo(2, Back), Echo, !IO),
-    send(Echo, make(N), !IO),
-    send(Echo, make(N + 1), !IO),
+    process.send(Echo, make(N), !IO),
+    process.send(Echo, make(N + 1), !IO),
     back(Back, S1, !IO),
     back(Back, S2, !IO),
     S = S1 ++ " | " ++ S2.
@@ -89,7 +89,7 @@ run(N, S, !IO) :-
 :- pred back(mailbox(fdata)::in, string::out, io::di, io::uo) is det.
 
 back(Back, S, !IO) :-
-    receive(Back, any, infinity, R, !IO),
+    process.receive(Back, any, infinity, R, !IO),
     ( R = message(V), S = use(V) ; R = timeout, S = "timeout" ).
 
 main(!IO) :-

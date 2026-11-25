@@ -1,5 +1,5 @@
 % The translation of run-user-defined-equality.m in parallel-do for mmc: the same
-% feature in plain Mercury, which must print the same.
+% program in plain Mercury, which must print the same.
 :- module parallel_do_user_defined_equality_translation.
 :- interface.
 :- import_module io.

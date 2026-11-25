@@ -1,5 +1,5 @@
 % The translation of run-layouts.m in gpu-process for mmc: the same
-% feature in plain Mercury, which must print the same.
+% program in plain Mercury, which must print the same.
 :- module gpu_process_layouts_translation.
 :- interface.
 :- import_module io.

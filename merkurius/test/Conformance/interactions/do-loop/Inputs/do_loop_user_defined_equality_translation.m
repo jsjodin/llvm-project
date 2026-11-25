@@ -1,5 +1,5 @@
 % The translation of run-user-defined-equality.m in do-loop for mmc: the same
-% feature in plain Mercury, which must print the same.
+% program in plain Mercury, which must print the same.
 :- module do_loop_user_defined_equality_translation.
 :- interface.
 :- import_module io.

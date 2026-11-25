@@ -1,5 +1,5 @@
 % The translation of run-type-classes.m in parallel-do for mmc: the same
-% feature in plain Mercury, which must print the same.
+% program in plain Mercury, which must print the same.
 :- module parallel_do_type_classes_translation.
 :- interface.
 :- import_module io.
