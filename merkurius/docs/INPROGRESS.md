@@ -8829,6 +8829,17 @@ tested shows.
    trace flags reach mmc too; a name starting `% MMC` would be one of the
    oracle's own lines.
 
+   *Pragmas, tests written (2026-11-24):* merkc parsed `obsolete`,
+   `obsolete_proc`, `type_spec` and `source_file` and then ignored them.
+   Now `obsolete` and `type_spec` are checked as mmc checks them, calls and
+   closures of obsolete predicates and procedures are warned of, and
+   `source_file` renames the lines after it in messages. `inline`,
+   `no_inline`, `no_determinism_warning` and `consider_used` already
+   agreed with mmc. The obsolete warnings and `source_file`'s file names are
+   tested in plain lit tests (`Semantics/pragmas/`, `Parser/source-file.m`),
+   because the oracle compares outputs and error lines only. Also fixed:
+   foreign C code now sees the standard headers that mmc's sees.
+
    Still to write, once mutables exist: reject tests for a mutable in the
    interface, with a type variable, with a unique inst, constant with
    attach_to_io_state, and thread_local with constant.
