@@ -1303,11 +1303,14 @@ void ClauseDesugarer::DesugarInto(const parser::DcgGoal &goal, Goals &out) {
             Goal condition{DesugarGoal(ite->condition)};
             StateMap afterCondition{state_};
             Goals arms[2];
+            // A missing else is [], which leaves the state as it was.
             StateMap ends[2]{Branch(ite->then, afterCondition, arms[0]),
-                Branch(ite->otherwise, start, arms[1])};
+                ite->otherwise ? Branch(*ite->otherwise, start, arms[1])
+                               : start};
             Merge(start, ends, arms, ite->tokens);
             out.push_back(NumberedIfThenElse(ite->tokens, condition,
-                GoalTokens(ite->then), arms[0], GoalTokens(ite->otherwise),
+                GoalTokens(ite->then), arms[0],
+                ite->otherwise ? GoalTokens(*ite->otherwise) : ite->tokens,
                 arms[1]));
           },
           [&](const parser::DcgNegation *negation) {

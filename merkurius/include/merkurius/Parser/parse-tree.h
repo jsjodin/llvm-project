@@ -1495,7 +1495,8 @@ struct DcgIfThenElse {
   IfThenElseForm form;
   DcgGoal condition;
   DcgGoal then;
-  DcgGoal otherwise;
+  // None for if C then T, whose else is [], as mmc reads it.
+  std::optional<DcgGoal> otherwise;
   template <typename F> void ForEachField(F &&f) const {
     f("form", form);
     f("condition", condition);

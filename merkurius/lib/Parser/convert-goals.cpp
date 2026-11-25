@@ -1502,6 +1502,18 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
     }
     return std::nullopt;
   }
+  if (c && arity == 1 && name == "if" && AsCompound(Operand(*c), "then", 2)) {
+    // A DCG if-then without an else, whose else is [], as mmc accepts; the
+    // manual requires the else part. The parse tree keeps it as written.
+    const CompoundTerm &thenTerm{*AsCompound(Operand(*c), "then", 2)};
+    auto condition{Apply(dcgGoal, Operand(thenTerm, 0), state)};
+    auto then{Apply(dcgGoal, Operand(thenTerm, 1), state)};
+    if (!condition || !then) {
+      return std::nullopt;
+    }
+    return state.arena.Make<DcgIfThenElse>(t.tokens(),
+        IfThenElseForm::IfThenElse, *condition, *then, std::nullopt);
+  }
   if (IsIfThenWithoutElse(t)) {
     SayMissingElse(t, state);
     return std::nullopt;
