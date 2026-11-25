@@ -276,6 +276,14 @@ std::string DefinitionKey(bool function, llvm::StringRef name, unsigned arity) {
 
 ModuleLoader::Imports ModuleLoader::LoadImports(const parser::ParseTree &tree,
     const parser::TokenSequence &tokens, llvm::StringRef directory) {
+  for (const parser::Item &item : tree.items) {
+    if (const auto *module{std::get_if<const parser::ModuleDecl *>(&item)}) {
+      self_.name = FullName(*(*module)->name);
+      self_.tokens = &tokens;
+      loaded_.try_emplace(self_.name, &self_);
+      break;
+    }
+  }
   Imports imports;
   Collect(tree, tokens, directory, false, imports);
   return imports;

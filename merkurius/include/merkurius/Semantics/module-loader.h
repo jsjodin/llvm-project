@@ -96,6 +96,8 @@ public:
 
   // The modules `tree`'s items import and use, and builtin, which every
   // module imports implicitly (reference manual, "The module system").
+  // `tree` is the module compiled: a module that imports it, directly or
+  // through others, finds Self() for it, not its source read again.
   struct Imports {
     std::vector<const ModuleInterface *> imports, uses;
   };
@@ -109,8 +111,12 @@ public:
     return it == loaded_.end() ? nullptr : it->second;
   }
 
-  // Every module loaded, in the order loading began.
+  // Every module loaded, in the order loading began; not Self().
   llvm::ArrayRef<const ModuleInterface *> modules() const { return order_; }
+
+  // The module compiled, as the modules that import it find it: its name
+  // only, since its declarations are its own compile's.
+  const ModuleInterface *Self() const { return &self_; }
 
 private:
   struct File;
@@ -123,6 +129,7 @@ private:
   bool sound_;
   parser::ReaderOptions readerOptions_;
   bool openTypes_;
+  ModuleInterface self_;
   std::vector<std::unique_ptr<File>> files_;
   llvm::StringMap<ModuleInterface *> loaded_;
   std::vector<const ModuleInterface *> order_;

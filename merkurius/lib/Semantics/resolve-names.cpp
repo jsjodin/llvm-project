@@ -650,6 +650,10 @@ bool Resolver::IncompatibleSolver(const Symbol &symbol,
 }
 
 ModuleSymbols &Resolver::Symbols(const ModuleInterface &module) {
+  // A module that imports the module compiled sees its own symbols.
+  if (&module == loader_.Self()) {
+    return *result_.module_;
+  }
   if (auto it{result_.imported_.find(&module)};
       it != result_.imported_.end()) {
     return *it->second;
