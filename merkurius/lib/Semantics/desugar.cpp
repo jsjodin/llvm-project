@@ -1662,8 +1662,10 @@ void ClauseDesugarer::DesugarTry(const parser::TryGoal &t, Goals &out) {
   }
   for (std::size_t i{catches}; i-- > 0;) {
     const parser::CatchClause &c{*t.catches[i]};
-    chain = Make<IfThenElse>(c.tokens, Number(), tests[i],
-        Conjoin(GoalTokens(c.goal), arms[arm + i]), chain);
+    // The arm is numbered before the if-then-else, in its own statement:
+    // the order of a call's arguments is unspecified.
+    Goal then{Conjoin(GoalTokens(c.goal), arms[arm + i])};
+    chain = Make<IfThenElse>(c.tokens, Number(), tests[i], then, chain);
   }
   Goals exception;
   {
