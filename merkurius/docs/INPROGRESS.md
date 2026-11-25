@@ -9111,6 +9111,27 @@ tested shows.
    unreachable, a defensive check, or a feature not done. (It replaced
    the random generators; see "Random programs" above.)
 
+   *Coverage run 3 (2026-11-25):* 89.9% of lines, 91.7% of functions and
+   82.8% of branches, against run 2's 89.7%, 91.6% and 82.8%; the
+   extension chapters and the interactions reached some 640 lines more,
+   in the open types' runtime and code generation, the decomposer, the
+   lowering and the roots. Of the lines changed since run 2, 32 were
+   unreached. One was a bug, fixed with its test: a comparison predicate
+   declared without a determinism was not checked, so one inferred multi
+   was accepted and committed to its first solution. New tests reach a
+   tuple of ground types in an open term passed as in
+   (`open-types/run-ground-tuples.m`), do loops in a lambda's body and
+   under negations (`do-loops/meaning/run-nested-goals.m`, the first to
+   reach that part of the loops' translation), a uniqueness error that
+   inferring the argument shared does not fix
+   (`Semantics/uniqueness/inferred-shared-unfixed.m`), and a variable
+   named twice in a private clause. The rest are defensive checks and
+   NotYet reports, but for a must-match deconstruction in a body that
+   common subexpression elimination changed, which no program found
+   reaches, as a loop's body is checked as a procedure of its own.
+   Flang's code that merkc does not use, in `provenance.cpp`,
+   `message.cpp` and the headers copied with them, is removed next.
+
 ### Nested submodules
 
 Not yet implemented. Six reject tests of nested submodules have

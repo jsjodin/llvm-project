@@ -2,7 +2,8 @@
 % A variable that occurs only in a parallel loop's body is local to each
 % iteration, what OpenMP calls private, with nothing to declare, and so is
 % the for's counter. A private clause naming one is redundant and draws a
-% warning; the loop is generated as without it.
+% warning, once however often it is named; the loop is generated as without
+% it.
 % ORACLE: none
 %
 % REQUIRES: libomp
@@ -31,7 +32,12 @@ main(!IO) :-
     %$omp parallel do private(J) reduction((+) : T)
     ( for(J, 1, N), fromto(0, T0, T1, T) do T1 = T0 + J ),
 % CHECK: warn-private-redundant.m:[[@LINE-2]]:{{[0-9]+}}: warning: J is local to each iteration of the loop already, so naming it in a private clause is redundant
-    io.write_int(T, !IO), io.nl(!IO).
+    io.write_int(T, !IO), io.nl(!IO),
+    %$omp parallel do private(K, K) private(K) reduction((+) : U)
+    ( for(K, 1, 10), fromto(0, U0, U1, U) do U1 = U0 + K ),
+% CHECK: warn-private-redundant.m:[[@LINE-2]]:{{[0-9]+}}: warning: K is local to each iteration of the loop already, so naming it in a private clause is redundant
+    io.write_int(U, !IO), io.nl(!IO).
 % OUTPUT:3.141593
 % OUTPUT-NEXT:500500
+% OUTPUT-NEXT:55
 % OUTPUT-NOT:{{.}}
