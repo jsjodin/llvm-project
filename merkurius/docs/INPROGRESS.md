@@ -8952,7 +8952,20 @@ tested shows.
    regions. Found and fixed on the way: enums and one-functor types could
    not enter a region, a value that can never be flat was "not yet
    implemented" rather than the design's error, and a semidet region's
-   failure was ignored. Still to do: the other extensions.
+   failure was ignored.
+
+   *Open types, begun (2026-11-25):* `extensions/open-types/`. mmc has
+   no open terms, so a run- test's oracle is a translation into Prolog
+   (`% TRANSLATION: Inputs/*.pl`), which the oracle runs with SWI-Prolog;
+   `Inputs/mercury_write.pl` writes terms as `io.write` and `open.write`
+   do. Run tests: difference lists, unification, `to_open` and
+   `from_open` of each kind of value, `var` and `nonvar`, `closed(T)`
+   holes, negated contexts undoing their bindings, and the parallel
+   loops the rule allows. Reject tests: purity, modes, determinism, the
+   parallel loop rule and the flag. Found and fixed: a collection after
+   one hole was bound to another stopped on an update-only root.
+   Still to do: messages with open terms (with `processes/`), and the
+   other extensions.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.

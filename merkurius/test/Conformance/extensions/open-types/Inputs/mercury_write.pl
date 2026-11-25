@@ -1,8 +1,9 @@
 % Writes terms as Merkurius' io.write and open.write write them, for the
 % Prolog translations of the open-types tests: a list as [1, 2, 3], a
-% compound term as f(A, B), a tuple '{}'(...) as {A, B}, and each unbound
-% variable as _1, _2 and so on, numbered in the order the write meets
-% them, depth first and left to right.
+% compound term as f(A, B), a tuple '{}'(...) as {A, B}, a pair as A - B,
+% a string in double quotes, and each unbound variable as _1, _2 and so
+% on, numbered in the order the write meets them, depth first and left to
+% right.
 
 mercury_write(Term) :-
     \+ \+ ( term_variables(Term, Vars),
@@ -25,6 +26,11 @@ write_term_m(T) :-
 write_term_m([H | T]) :- !,
     % A partial list: [1, 2 | _1].
     write('['), write_term_m(H), write_tail(T), write(']').
+write_term_m(T) :-
+    string(T), !,
+    writeq(T).
+write_term_m(A - B) :- !,
+    write_term_m(A), write(' - '), write_term_m(B).
 write_term_m(T) :-
     compound(T), compound_name_arguments(T, '{}', [Args]), !,
     comma_list(Args, List),
