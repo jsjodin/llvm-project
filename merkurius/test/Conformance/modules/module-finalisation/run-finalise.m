@@ -8,6 +8,7 @@
 % RUN: env MERK_GC_EVERY_ALLOC=1 not %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t2
 % RUN: not %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 not %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % OUTPUT:main
 % OUTPUT-NEXT:first
 % OUTPUT-NEXT:second

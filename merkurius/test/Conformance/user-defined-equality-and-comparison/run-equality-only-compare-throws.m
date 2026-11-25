@@ -8,6 +8,7 @@
 % RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t2
 % RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % OUTPUT:equal
 % OUTPUT-NEXT:univ_cons(software_error("call to compare/3 for non-canonical type `run_equality_only_compare_throws.set(int)\'"))
 % OUTPUT-NOT:{{.}}

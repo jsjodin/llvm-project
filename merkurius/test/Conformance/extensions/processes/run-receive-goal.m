@@ -14,6 +14,7 @@
 % RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 -freceive-goal %s -o %t2
 % RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % OUTPUT:["b1", "a:two", "b3", "a:four"]
 % OUTPUT-NEXT:small(3)
 % OUTPUT-NEXT:large(30)

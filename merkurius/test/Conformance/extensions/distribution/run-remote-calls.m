@@ -15,6 +15,7 @@
 % RUN: env MERK_GC_EVERY_ALLOC=1 %nodes %t0 server client | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 -fprocess-declarations %s -o %t2
 % RUN: %nodes %t2 server client | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %nodes %t2 server client | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % OUTPUT:server: quitting without a reply
 % OUTPUT-NEXT:client: add: reply(5)
 % OUTPUT-NEXT:client: slow, waiting 100 ms: timeout

@@ -9014,7 +9014,9 @@ tested shows.
    pointer, which the statepoint pass listed in a bundle, was paired
    with itself by the rewrite, which takes what a bundle lists to be a
    base (`CodeGen/gc-interior-pointer.m`). The oracle's collection run
-   is at -O0, which found them only in the library's code, built at -O2.
+   was at -O0, which found them only in the library's code, built at -O2,
+   so since 2026-11-25 every run- test also runs at -O2 with a
+   collection at every allocation; no other test failed that way.
 
    *Distribution, begun (2026-11-25):* `extensions/distribution/`. A
    test's `% NODES:` line names its roles, each a node: the program is

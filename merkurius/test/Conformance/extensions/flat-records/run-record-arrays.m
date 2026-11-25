@@ -13,6 +13,7 @@
 % RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t2
 % RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % OUTPUT:particle(point(2i32, 3i32), blue, 'f', -45i8, -815i16, 25u8, celsius(2.5), 6.25, 5000015u64)
 % OUTPUT-NEXT:particle(point(0i32, 7i32), blue, 'd', -47i8, -889i16, 15u8, celsius(1.5), 2.25, 3000009u64)
 % OUTPUT-NEXT:point(100i32, -100i32)

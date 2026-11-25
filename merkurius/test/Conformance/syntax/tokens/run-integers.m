@@ -7,6 +7,7 @@
 % RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t2
 % RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % OUTPUT:[10, 10, 10, 10, 97, 1000000, 65535, 2, 10]
 % OUTPUT-NEXT:{10i8, 10i16, 10i32, 10i64}
 % OUTPUT-NEXT:{10u, 10u8, 10u16, 10u32, 10u64, 255u8}

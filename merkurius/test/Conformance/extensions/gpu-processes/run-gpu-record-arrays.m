@@ -18,6 +18,7 @@
 % RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 -fprocess-declarations %s -o %t2
 % RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % OUTPUT:message(array([cell(point(109i32, -110i32), 108u8, red, 3.0), cell(point(71i32, -73i32), 71u8, blue, 1.5), cell(point(33i32, -36i32), 34u8, green, 0.0)]))
 % OUTPUT-NEXT:message(array([cell(point(11i32, -12i32), 12u8, green, 0.0)]))
 % OUTPUT-NEXT:message(array([]))

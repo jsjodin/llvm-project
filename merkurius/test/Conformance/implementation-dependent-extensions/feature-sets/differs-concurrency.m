@@ -7,10 +7,11 @@
 % RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t2
 % RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % OUTPUT:ok
 % OUTPUT-NOT:{{.}}
 % MMC-STATUS: rejected
-% MMC: 21: Error: this module must be compiled in a grade that supports concurrent execution.
+% MMC: 22: Error: this module must be compiled in a grade that supports concurrent execution.
 
 :- module differs_concurrency.
 :- interface.

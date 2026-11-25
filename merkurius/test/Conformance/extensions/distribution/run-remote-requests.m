@@ -16,6 +16,7 @@
 % RUN: env MERK_GC_EVERY_ALLOC=1 %nodes %t0 server client | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 -fprocess-declarations %s -o %t2
 % RUN: %nodes %t2 server client | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %nodes %t2 server client | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % OUTPUT:server: served 1009 requests
 % OUTPUT-NEXT:client: connected
 % OUTPUT-NEXT:client: the server is another node: yes

@@ -6,7 +6,8 @@ Mercury module whose header names what it tests (`% MANUAL:` or `% DESIGN:`)
 and whose class is the start of its file name:
 
   run-      compiles, runs, and prints what mmc's program prints, with mmc's
-            exit status;
+            exit status, built at -O0 and at -O2 and each run also with a
+            collection at every allocation;
   reject-   is rejected, with an error at each line marked `% ERROR`, which
             are the lines mmc reports errors at;
   nyi-      gives merkc's "not yet implemented" error; mmc must compile and
@@ -442,6 +443,8 @@ def run_lines(test, status):
             "%t0 2>&1 | " + FILECHECK_OUTPUT,
             "% RUN: merkc -O2 " + arguments + " %libomp-flags -o %t2",
             "% RUN: " + threads + expect + "%t2 2>&1 | " + FILECHECK_OUTPUT,
+            "% RUN: " + threads + "MERK_GC_EVERY_ALLOC=1 " + expect +
+            "%t2 2>&1 | " + FILECHECK_OUTPUT,
             "% RUN: merkc -O0 " + sequential + " -o %t0s",
             "% RUN: " + expect + "%t0s 2>&1 | " + FILECHECK_OUTPUT,
             "% RUN: merkc -O2 " + sequential + " -o %t2s",
@@ -457,6 +460,8 @@ def run_lines(test, status):
             FILECHECK_OUTPUT,
             "% RUN: merkc -O2 " + arguments + " -o %t2",
             "% RUN: %nodes %t2 " + roles + " | " + FILECHECK_OUTPUT,
+            "% RUN: env MERK_GC_EVERY_ALLOC=1 %nodes %t2 " + roles + " | " +
+            FILECHECK_OUTPUT,
         ]
     return [
         "% RUN: merkc -O0 " + arguments + " -o %t0",
@@ -465,6 +470,8 @@ def run_lines(test, status):
         FILECHECK_OUTPUT,
         "% RUN: merkc -O2 " + arguments + " -o %t2",
         "% RUN: " + expect + "%t2 2>&1 | " + FILECHECK_OUTPUT,
+        "% RUN: env MERK_GC_EVERY_ALLOC=1 " + expect + "%t2 2>&1 | " +
+        FILECHECK_OUTPUT,
     ]
 
 
@@ -555,22 +562,28 @@ def triage(test, merkc, mmc_status, mmc_out):
 
 
 def process(path, args):
-    try:
-        test = Test(path)
-        if test.no_oracle:
-            return path, "ok", []
-        generated, notes = generate(test, args)
-        if test.known_bug:
-            generated.insert(0, "% XFAIL: *")
-    except TestError as e:
-        return path, "error", [str(e)]
-    if test.text(generated) == "\n".join(test.lines):
-        return path, "ok", notes
-    if args.update:
+    # Writing the lines can move the body, and a program that prints its
+    # line numbers, as $line does, prints others: so it is run again on
+    # what was written, until that is what it would write.
+    updated = False
+    for _ in range(3):
+        try:
+            test = Test(path)
+            if test.no_oracle:
+                return path, "ok", []
+            generated, notes = generate(test, args)
+            if test.known_bug:
+                generated.insert(0, "% XFAIL: *")
+        except TestError as e:
+            return path, "error", [str(e)]
+        if test.text(generated) == "\n".join(test.lines):
+            return path, "updated" if updated else "ok", notes
+        if not args.update:
+            return path, "stale", notes
         with open(path, "w", encoding="utf-8") as f:
             f.write(test.text(generated))
-        return path, "updated", notes
-    return path, "stale", notes
+        updated = True
+    return path, "error", ["its lines change each time they are written"]
 
 
 def tests_in(paths):
