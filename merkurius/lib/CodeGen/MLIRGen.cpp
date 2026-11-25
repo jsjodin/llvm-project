@@ -146,8 +146,21 @@ static std::string CType(const semantics::Type &type) {
 // are passed as their constructors' numbers, as all enumerations are. The
 // list macros are not yet implemented: a Merkurius list's layout is not
 // mmc's, and foreign code allocates without collecting (docs/INPROGRESS.md).
+// The standard headers are those that mmc's foreign code sees without
+// including them, as programs written for it rely on: the ISO C ones its
+// runtime's headers include, but not math.h or stdbool.h, which they do not.
 static constexpr llvm::StringLiteral kForeignPrelude{R"(/* Foreign code, written by merkc. */
+#include <assert.h>
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 typedef intptr_t MR_Integer;
 typedef uintptr_t MR_Unsigned;
 typedef double MR_Float;
