@@ -1142,7 +1142,7 @@ bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
   case InstKind::Any:
   case InstKind::Ground: {
     if (a->kind == InstKind::Any) {
-      return b->kind == InstKind::Any;
+      return b->kind == InstKind::Any || !types_.MayHoldAny(type);
     }
     if (a->kind == InstKind::HigherOrder) {
       // A function's ground is the default function inst, which a closure

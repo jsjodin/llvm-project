@@ -192,6 +192,12 @@ public:
   // primitive, abstract, higher-order or variable type, or none (null).
   virtual bool Constructors(
       const Type *type, std::vector<ConstructorTypes> &) = 0;
+  // Whether a value of `type` with inst any may be other than ground: a
+  // type variable, a solver type, open(T) or closed(T), or a type whose
+  // constructors' arguments may hold one. Any other type's any matches
+  // ground, as in mmc, whose rule is that of solver types. True if not
+  // known.
+  virtual bool MayHoldAny(const Type *) { return true; }
 };
 
 // Where coerce cannot convert a term: the functors and argument numbers

@@ -190,7 +190,48 @@ public:
     return true;
   }
 
+  bool MayHoldAny(const Type *type) override {
+    llvm::DenseSet<const Type *> visiting;
+    return MayHoldAny(type, visiting);
+  }
+
 private:
+  // A type being looked at already, as a recursive type's argument is, is
+  // taken to hold none: whether it does is decided by its other parts.
+  bool MayHoldAny(const Type *type, llvm::DenseSet<const Type *> &visiting) {
+    if (!type) {
+      return true;
+    }
+    switch (type->kind) {
+    case TypeKind::Named:
+      break;
+    case TypeKind::Tuple:
+      return llvm::any_of(type->arguments,
+          [&](const Type *argument) { return MayHoldAny(argument, visiting); });
+    case TypeKind::HigherOrder:
+      return false;
+    default:
+      return true; // a type variable
+    }
+    if (types_.types().IsOpenOrClosed(type) ||
+        std::holds_alternative<const parser::SolverTypeDefn *>(
+            type->constructor->declaration)) {
+      return true;
+    }
+    if (!visiting.insert(type).second) {
+      return false;
+    }
+    std::vector<ConstructorTypes> constructors;
+    bool may{Constructors(type, constructors) &&
+        llvm::any_of(constructors, [&](const ConstructorTypes &constructor) {
+          return llvm::any_of(constructor.arguments, [&](const Type *argument) {
+            return MayHoldAny(argument, visiting);
+          });
+        })};
+    visiting.erase(type);
+    return may;
+  }
+
   const NameResolution &resolution_;
   TypeChecking &types_;
   common::Arena arena_;
