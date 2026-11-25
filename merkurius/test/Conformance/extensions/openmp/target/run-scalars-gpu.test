@@ -1,0 +1,27 @@
+The program of run-scalars.m, run on the machine's GPU: each scalar is
+mapped by copy into the region, and each output back from it.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/run-scalars.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
+RUN:   | FileCheck %S/run-scalars.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK: info: Entering OpenMP kernel at {{.*}}run-scalars.m:{{[0-9]+}}:5 with 17 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
+CHECK-NEXT: info: to(I)[8]
+CHECK-NEXT: info: to(U)[8]
+CHECK-NEXT: info: to(B)[1]
+CHECK-NEXT: info: to(L)[8]
+CHECK-NEXT: info: to(F)[8]
+CHECK-NEXT: info: to(C)[4]
+CHECK-NEXT: info: to(K)[8]
+CHECK-NEXT: info: to(M)[8]
+CHECK-NEXT: info: from(I1)[8]
+CHECK-NEXT: info: from(U1)[8]
+CHECK-NEXT: info: from(B1)[1]
+CHECK-NEXT: info: from(L1)[8]
+CHECK-NEXT: info: from(F1)[8]
+CHECK-NEXT: info: from(C1)[4]
+CHECK-NEXT: info: from(K1)[8]
+CHECK-NEXT: info: from(M1)[8]
+CHECK-NOT: Entering OpenMP kernel

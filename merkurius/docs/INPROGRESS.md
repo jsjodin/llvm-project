@@ -8944,9 +8944,15 @@ tested shows.
    to the body and an error on a shared one, was a not-yet-implemented
    error in merkc; now built (`warn-private-redundant.m`,
    `reject-private.m`), with the clauses each leaf takes listed in
-   `OpenMPClauses.h` and checked against OMP.td by a unit test. Still to
-   do: target regions, which
-   need a GPU and so -gpu tests, then the other extensions.
+   `OpenMPClauses.h` and checked against OMP.td by a unit test.
+   `extensions/openmp/target/` (2026-11-25): scalars, arrays, cells of
+   scalars, a target teams loop and a data region, each run by the
+   oracle on the host and sequentially, and by its `-gpu.test` on the
+   GPU, which checks the maps; and the errors of regions, nesting and data
+   regions. Found and fixed on the way: enums and one-functor types could
+   not enter a region, a value that can never be flat was "not yet
+   implemented" rather than the design's error, and a semidet region's
+   failure was ignored. Still to do: the other extensions.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.

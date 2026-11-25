@@ -1,0 +1,14 @@
+The program of run-data.m, run on the machine's GPU: the data region
+maps the array once, around the goal, and the target regions in the
+procedures it calls find it there; the device's elements come back as the
+region ends.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/run-data.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
+RUN:   | FileCheck %S/run-data.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK: info: Entering OpenMP data region {{.*}}run-data.m:{{[0-9]+}}:9 with 1 arguments:
+CHECK-NEXT: info: tofrom(A)[8008]
+CHECK-COUNT-4: info: Entering OpenMP kernel at {{.*}}run-data.m:{{[0-9]+}}:5
+CHECK-NOT: Entering OpenMP

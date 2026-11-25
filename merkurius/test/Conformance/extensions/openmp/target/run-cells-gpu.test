@@ -1,0 +1,17 @@
+The program of run-cells.m, run on the machine's GPU: each cell of
+scalars is mapped to the region by its words.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/run-cells.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
+RUN:   | FileCheck %S/run-cells.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK: info: Entering OpenMP kernel at {{.*}}run-cells.m:{{[0-9]+}}:5 with 7 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
+CHECK-NEXT: info: to(U)[24]
+CHECK-NEXT: info: to(V)[24]
+CHECK-NEXT: info: to(S)[16]
+CHECK-NEXT: info: from(D)[8]
+CHECK-NEXT: info: from(W)[8]
+CHECK-NEXT: info: from(N)[8]
+CHECK-NOT: Entering OpenMP kernel

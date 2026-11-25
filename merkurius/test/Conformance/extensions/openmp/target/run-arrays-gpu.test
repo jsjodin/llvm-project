@@ -1,0 +1,21 @@
+The program of run-arrays.m, run on the machine's GPU: the arrays the
+region updates are mapped tofrom, over their headers' and elements' words.
+A region whose procedure updates an array, which its operations do not
+show, maps each array of the type tofrom and finds which one it gives
+(design document, "What is lowered so far"), so the array it only reads
+is copied back too, unchanged.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/run-arrays.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
+RUN:   | FileCheck %S/run-arrays.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK: info: Entering OpenMP kernel at {{.*}}run-arrays.m:{{[0-9]+}}:5 with 6 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
+CHECK-NEXT: info: tofrom(A)[32]
+CHECK-NEXT: info: tofrom(STATE_VARIABLE_B_0)[40]
+CHECK: info: Entering OpenMP kernel at {{.*}}run-arrays.m:{{[0-9]+}}:5 with 7 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
+CHECK-NEXT: info: tofrom(STATE_VARIABLE_B_0)[16]
+CHECK-NEXT: info: tofrom(STATE_VARIABLE_C_0)[24]
+CHECK-NOT: Entering OpenMP kernel

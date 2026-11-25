@@ -1,0 +1,26 @@
+The program of run-teams-loop.m, run on the machine's GPU: each
+reduction's variable is mapped tofrom, an array the loop only reads to, and
+one it updates tofrom.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fdo-loops -fopenmp --offload-arch=%offload-arch %libomp-flags %S/run-teams-loop.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
+RUN:   | FileCheck %S/run-teams-loop.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK: info: Entering OpenMP kernel at {{.*}}run-teams-loop.m:{{[0-9]+}}:5 with 5 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
+CHECK-NEXT: info: to(N)[8]
+CHECK-NEXT: info: tofrom(Sum)[8]
+CHECK-NEXT: info: tofrom(Lo)[8]
+CHECK-NEXT: info: tofrom(Hi)[8]
+CHECK: info: Entering OpenMP kernel at {{.*}}run-teams-loop.m:{{[0-9]+}}:5 with 4 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
+CHECK-NEXT: info: to(N)[8]
+CHECK-NEXT: info: to(STATE_VARIABLE_A_0)[32776]
+CHECK-NEXT: info: tofrom(Sum)[8]
+CHECK: info: Entering OpenMP kernel at {{.*}}run-teams-loop.m:{{[0-9]+}}:5 with 4 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
+CHECK-NEXT: info: to(N)[8]
+CHECK-NEXT: info: tofrom(STATE_VARIABLE_A_0)[32776]
+CHECK-NEXT: info: to(Sum)[8]
+CHECK-NOT: Entering OpenMP kernel
