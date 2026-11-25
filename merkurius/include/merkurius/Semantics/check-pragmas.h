@@ -20,7 +20,12 @@
 //   modes, and its substitution gives each variable of the declaration
 //   one type that does not mention the variables it replaces ("Syntax and
 //   semantics of type specialization pragmas"). The specialization itself
-//   is a hint, which merkc's polymorphism does without.
+//   is a hint, which merkc's polymorphism does without;
+// - memo, loop_check and minimal_model ("Tabled evaluation") and fact_table
+//   ("Fact tables") name a predicate or function of the module, and are
+//   checked as mmc checks them, but are not yet implemented;
+// - require_feature_set ("Feature sets") asks for features that merkc has,
+//   or reports those it does not.
 //
 // The pragmas that name a predicate by name and arity only, such as inline,
 // are checked with purity (check-purity.cpp).

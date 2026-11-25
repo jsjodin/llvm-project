@@ -146,6 +146,10 @@ static std::string CType(const semantics::Type &type) {
 // are passed as their constructors' numbers, as all enumerations are. The
 // list macros are not yet implemented: a Merkurius list's layout is not
 // mmc's, and foreign code allocates without collecting (docs/INPROGRESS.md).
+// The trailing interface of the reference manual's "Trailing" has its types,
+// so that untrail functions compile, and its macros, which report trailing
+// as not yet implemented where they are used.
+//
 // The standard headers are those that mmc's foreign code sees without
 // including them, as programs written for it rely on: the ISO C ones its
 // runtime's headers include, but not math.h or stdbool.h, which they do not.
@@ -185,6 +189,14 @@ typedef MR_Word MR_Comparison_Result;
 #define MR_list_tail(list) (_Pragma("GCC error \"not yet implemented: MR_list_tail on Merkurius lists\"") 0)
 #define MR_list_empty() (_Pragma("GCC error \"not yet implemented: MR_list_empty on Merkurius lists\"") 0)
 #define MR_list_cons(head, tail) (_Pragma("GCC error \"not yet implemented: MR_list_cons on Merkurius lists\"") 0)
+typedef enum { MR_undo, MR_exception, MR_retry, MR_commit, MR_solve, MR_gc } MR_untrail_reason;
+typedef MR_Word MR_ChoicepointId;
+#define MR_trail_value(address, value) (_Pragma("GCC error \"not yet implemented: trailing (MR_trail_value)\"") 0)
+#define MR_trail_current_value(address) (_Pragma("GCC error \"not yet implemented: trailing (MR_trail_current_value)\"") 0)
+#define MR_trail_function(function, value) (_Pragma("GCC error \"not yet implemented: trailing (MR_trail_function)\"") 0)
+#define MR_current_choicepoint_id() (_Pragma("GCC error \"not yet implemented: trailing (MR_current_choicepoint_id)\"") 0)
+#define MR_null_choicepoint_id() (_Pragma("GCC error \"not yet implemented: trailing (MR_null_choicepoint_id)\"") 0)
+#define MR_choicepoint_newer(x, y) (_Pragma("GCC error \"not yet implemented: trailing (MR_choicepoint_newer)\"") 0)
 static inline MR_Float MR_word_to_float(MR_Word word) {
   MR_Float number;
   __builtin_memcpy(&number, &word, sizeof number);

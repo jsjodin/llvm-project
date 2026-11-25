@@ -12,6 +12,7 @@
 // the checks here are the ones mmc makes while reading a pragma.
 
 #include "convert-rules.h"
+#include "llvm/ADT/STLExtras.h"
 
 namespace merkurius::parser {
 
@@ -303,6 +304,19 @@ constexpr auto foreignProcAttributes{expect("a list of attributes",
         "a foreign_proc attribute"}))};
 
 // The attribute list of a tabling pragma.
+// Reports fast_loose and specified given together: both say how the
+// arguments are looked up in the memo table (reference manual, "Tabled
+// evaluation"). mmc: "duplicate argument tabling methods attribute".
+static bool BothLookups(
+    const TablingAttributes &attributes, const Term &at, ConvertState &state) {
+  if (!attributes.fastLoose || !attributes.specified) {
+    return false;
+  }
+  state.messages.Say(GetSource(at, state.tokens),
+      "'fast_loose' and 'specified' both say how arguments are looked up; give one of them"_err_en_US);
+  return true;
+}
+
 std::optional<const TablingAttributes *> ConvertTablingAttributes(
     const Term &term, TablingMethod method, ConvertState &state) {
   const Term &t{StripParentheses(term)};
@@ -331,6 +345,7 @@ std::optional<const TablingAttributes *> ConvertTablingAttributes(
     } else if (llvm::isa<NameTerm>(a) && name == "fast_loose") {
       duplicate = attributes.fastLoose;
       attributes.fastLoose = true;
+      ok &= !BothLookups(attributes, a, state);
     } else if (llvm::isa<NameTerm>(a) &&
         name == "disable_warning_if_ignored") {
       duplicate = attributes.disableWarningIfIgnored;
@@ -349,6 +364,7 @@ std::optional<const TablingAttributes *> ConvertTablingAttributes(
       auto args{Apply(tabledArgs, *c->arguments()[0], state)};
       ok &= args.has_value();
       attributes.specified = args.value_or(llvm::ArrayRef<TabledArg>{});
+      ok &= !BothLookups(attributes, a, state);
       if (Arity(*c) == 2) {
         const Term &hidden{StripParentheses(*c->arguments()[1])};
         llvm::StringRef hiddenName{
@@ -569,10 +585,27 @@ std::optional<Item> PragmaRule::Convert(
             "a feature: 'concurrency', 'single_prec_float', "
             "'double_prec_float', 'memo', 'parallel_conj', 'trailing', "
             "'strict_sequential' or 'conservative_gc'"}))};
-    if (auto converted{Apply(features, *args[0], state)}) {
-      return state.arena.Make<RequireFeatureSetPragma>(t.tokens(), *converted);
+    auto converted{Apply(features, *args[0], state)};
+    if (!converted) {
+      return std::nullopt;
     }
-    return std::nullopt;
+    // The pairs that the reference manual says cannot be specified
+    // together ("Feature sets"). mmc: "conflicting features in feature set:
+    // floats cannot be both single- and double-precision", "trailing works
+    // only with sequential conjunctions".
+    if (llvm::is_contained(*converted, Feature::SinglePrecFloat) &&
+        llvm::is_contained(*converted, Feature::DoublePrecFloat)) {
+      state.messages.Say(GetSource(*args[0], state.tokens),
+          "the features 'single_prec_float' and 'double_prec_float' conflict: floats cannot be both"_err_en_US);
+      return std::nullopt;
+    }
+    if (llvm::is_contained(*converted, Feature::ParallelConj) &&
+        llvm::is_contained(*converted, Feature::Trailing)) {
+      state.messages.Say(GetSource(*args[0], state.tokens),
+          "the features 'parallel_conj' and 'trailing' conflict: trailing works only with sequential conjunctions"_err_en_US);
+      return std::nullopt;
+    }
+    return state.arena.Make<RequireFeatureSetPragma>(t.tokens(), *converted);
   }
   if (name == "source_file") {
     if (!CheckArgumentCount(*body, name, args.size(), 1, 1, state)) {

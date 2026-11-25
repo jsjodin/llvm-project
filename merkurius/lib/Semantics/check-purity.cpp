@@ -450,9 +450,11 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
   // The promises of the pragmas, by predicate or function. Every pragma
   // that names a predicate or function, a promise or not, names one of
   // this module's, declared or with its type inferred, and none is both
-  // inline and no_inline.
+  // inline and no_inline, or has two of terminates, does_not_terminate and
+  // check_termination, as in mmc.
   llvm::DenseMap<const Symbol *, Purity> promised;
   llvm::DenseMap<const Symbol *, parser::PredPragmaKind> inlining;
+  llvm::DenseMap<const Symbol *, parser::PredPragmaKind> termination;
   for (const parser::Item &item : tree.items) {
     const auto *pragma{std::get_if<const parser::PredPragma *>(&item)};
     if (!pragma) {
@@ -474,14 +476,26 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
         promised[symbol] = promise;
       }
       parser::PredPragmaKind kind{(*pragma)->kind};
-      if (kind != parser::PredPragmaKind::Inline &&
-          kind != parser::PredPragmaKind::NoInline) {
+      llvm::DenseMap<const Symbol *, parser::PredPragmaKind> *exclusive{
+          nullptr};
+      switch (kind) {
+      case parser::PredPragmaKind::Inline:
+      case parser::PredPragmaKind::NoInline:
+        exclusive = &inlining;
+        break;
+      case parser::PredPragmaKind::Terminates:
+      case parser::PredPragmaKind::DoesNotTerminate:
+      case parser::PredPragmaKind::CheckTermination:
+        exclusive = &termination;
+        break;
+      default:
         continue;
       }
-      auto [at, added]{inlining.try_emplace(symbol, kind)};
+      auto [at, added]{exclusive->try_emplace(symbol, kind)};
       if (!added && at->second != kind) {
         // mmc: "`:- pragma no_inline' declaration conflicts with previous
-        // inline pragma for `p'/2".
+        // inline pragma for `p'/2", and the same for the termination
+        // pragmas.
         messages_.Say(Source((*pragma)->tokens),
             "`:- pragma %s' for %s conflicts with the earlier %s pragma"_err_en_US,
             common::SnakeName(parser::EnumToString(kind)), Text(*symbol),

@@ -303,7 +303,7 @@ private:
       const parser::TokenSequence &);
   void MatchForeignExports(const parser::ParseTree &);
   void MatchClauses();
-  void CheckHasClauses();
+  void CheckHasClauses(const parser::ParseTree &);
   // What CheckInstForType keeps for one argument of a declaration.
   struct InstTypeWalk {
     const Symbol &symbol;
@@ -1146,18 +1146,29 @@ void ModeChecker::Run(const parser::ParseTree &tree) {
   MatchPragmaProcs(tree);
   MatchForeignExports(tree);
   MatchClauses();
-  CheckHasClauses();
+  CheckHasClauses(tree);
 }
 
 // A predicate or function of the module, not a method, needs clauses or a
 // foreign_proc for C (mmc: "Error: no clauses for predicate `p'/1."). After
 // an earlier error none is reported: a clause that did not desugar may have
 // been for it, and the compilation fails anyway.
-void ModeChecker::CheckHasClauses() {
+void ModeChecker::CheckHasClauses(const parser::ParseTree &tree) {
   if (options_.stubUnimplemented || messages_.AnyFatalError()) {
     return;
   }
   llvm::DenseSet<const Symbol *> defined;
+  // A fact table's facts are in its file, which check-pragmas.cpp reports
+  // as not yet implemented.
+  for (const parser::Item &item : tree.items) {
+    if (const auto *pragma{
+            std::get_if<const parser::FactTablePragma *>(&item)}) {
+      for (const Symbol *symbol :
+          PragmaTargets(resolution_.module(), *(*pragma)->pred)) {
+        defined.insert(symbol);
+      }
+    }
+  }
   for (const ClauseTypes &clause : types_.clauses()) {
     if (!clause.method && clause.definition) {
       defined.insert(clause.definition);
@@ -1234,6 +1245,9 @@ void ModeChecker::MatchPragmaProcs(const parser::ParseTree &tree) {
       spec = &(*pragma)->pred;
     } else if (const auto *pragma{
                    std::get_if<const parser::TypeSpecPragma *>(&item)}) {
+      spec = &(*pragma)->pred;
+    } else if (const auto *pragma{
+                   std::get_if<const parser::TablingPragma *>(&item)}) {
       spec = &(*pragma)->pred;
     }
     if (const auto *proc{
