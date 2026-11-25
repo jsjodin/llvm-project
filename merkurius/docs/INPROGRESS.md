@@ -9038,6 +9038,28 @@ tested shows.
    fence, stays in `CodeGen/process-remote.m` and
    `process-remote-monitor.m`.
 4. The interaction generator, with the features and contexts above.
+
+   *Begun (2026-11-25):* `utils/conformance/generate-interactions.py`
+   writes `interactions/<context>/run-<feature>.m`, checked in, and the
+   oracle writes their expectations from mmc's output. A feature is a
+   type and two functions, `make(int) = fdata` and `use(fdata) = string`,
+   which exercise it; a context moves values of the type through itself
+   and prints what `use` makes of them, and does nothing a feature might
+   not allow, as unifying two values. Features: a type of more functors
+   than a pointer has tags, an enumeration with a notag and a record of
+   numbers, closures stored in a term, type classes through a
+   constraint, an existentially typed constructor, an equivalence type,
+   user-defined equality, field access and update, nondet and semidet
+   code, an array in unique modes, and a try goal. Contexts: closures, a
+   type class's methods called by their dictionary, polymorphic
+   procedures and containers, a nondet goal, a value thrown and caught,
+   and another module. The 66 tests pass at -O0 and -O2, with and
+   without a collection at every allocation, and found no bug; the
+   generator's `--check` says whether the checked-in tests are what it
+   writes. Still to do: the extension contexts, a do loop, a parallel
+   region, a host process, a GPU process and a message's type, whose
+   oracle is the same program in a plain context, and open types as a
+   feature; then triples of the contexts that nest.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.
 
