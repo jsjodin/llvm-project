@@ -8964,7 +8964,9 @@ tested shows.
    loops the rule allows. Reject tests: purity, modes, determinism, the
    parallel loop rule and the flag. Found and fixed: a collection after
    one hole was bound to another stopped on an update-only root.
-   Still to do: messages with open terms (with `processes/`).
+   Messages with open terms (`run-open-messages.m`) have a translation
+   with SWI-Prolog's threads, whose thread_send_message copies a term
+   as `open.send` does.
 
    *Processes, begun (2026-11-25):* `extensions/processes/`. A run-
    test's oracle is a translation into Erlang (`Inputs/*.erl`, run with
@@ -8978,9 +8980,10 @@ tested shows.
    unhandled message in a det loop, an untested pattern variable, and the
    `unselected-message` warning. A kind with several message types is an
    nyi- test. Found and fixed on the way: each `_` in type qualifications
-   was one type variable. Still to do: monitors of failed processes,
-   exceptions in processes, open-term messages, GPU processes, flat
-   records, distribution.
+   was one type variable, and `any` never matched `ground`, even for a
+   mailbox taken out of a message with open terms in it. A process that
+   fails, and a server that fails in a request, are `run-process-failure.m`.
+   Still to do: GPU processes, flat records, distribution.
 4. The interaction generator, with the features and contexts above.
 5. The random generators moved under `generated/` and extended, with
    coverage telling which features they should reach next.
