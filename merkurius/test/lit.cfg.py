@@ -16,7 +16,7 @@ config.test_format = lit.formats.ShTest()
 
 # Merkurius sources, .test files for tests that need no source of their own,
 # and MLIR modules in the merk dialect.
-config.suffixes = [".m", ".test", ".mlir"]
+config.suffixes = [".m", ".test", ".mlir", ".ll"]
 
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.merkurius_obj_root, "test")

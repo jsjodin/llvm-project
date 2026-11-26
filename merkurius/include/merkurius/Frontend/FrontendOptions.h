@@ -84,6 +84,11 @@ enum class ActionKind {
   EmitLLVM,
   // -emit-llvm-bc: the same, as bitcode.
   EmitLLVMBitcode,
+  // -fdebug-dump-statepoints: the same, rewritten for the collector, with
+  // its statepoints and relocations, as the back end gets it. From IR that
+  // -emit-llvm-bc wrote, the rewrite is all it runs, so that a test can
+  // check what it makes of IR written by hand.
+  DebugDumpStatepoints,
   // -S: the target's assembly for it.
   EmitAssembly,
   // -emit-obj: its object file.

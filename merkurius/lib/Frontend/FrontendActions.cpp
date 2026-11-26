@@ -1137,9 +1137,10 @@ bool CodeGenAction::Lower(
 bool CodeGenAction::LowerLLVMIR() {
   CompilerInstance &ci{getInstance()};
   if (kind_ != ActionKind::EmitLLVM && kind_ != ActionKind::EmitLLVMBitcode &&
+      kind_ != ActionKind::DebugDumpStatepoints &&
       kind_ != ActionKind::EmitAssembly && kind_ != ActionKind::EmitObj) {
     options::reportError("LLVM IR input can only be compiled to LLVM IR, "
-                         "bitcode, assembly or an object file");
+                         "bitcode, statepoints, assembly or an object file");
     return false;
   }
   std::string error;
@@ -1216,6 +1217,11 @@ bool CodeGenAction::Emit(llvm::Module &llvmModule,
   }
   if (kind_ == ActionKind::EmitLLVMBitcode) {
     llvm::WriteBitcodeToFile(llvmModule, os);
+    return true;
+  }
+  if (kind_ == ActionKind::DebugDumpStatepoints) {
+    codegen::RewriteForCollector(llvmModule, target);
+    llvmModule.print(os, nullptr);
     return true;
   }
   llvm::SmallString<0> code;

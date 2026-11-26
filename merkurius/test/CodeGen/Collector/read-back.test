@@ -1,0 +1,19 @@
+The collector's rewrite of LLVM IR that -emit-llvm-bc wrote, read back as
+text, which a test can then edit by hand: the bitcode keeps the root types'
+notes and says it is optimized, so the read-back module compiles to the
+same object file as the source, and -fdebug-dump-statepoints shows the same
+rewrite from either.
+
+RUN: merkc -fc1 -O2 -emit-obj %S/../statepoints.m -o %t.source.o
+RUN: merkc -fc1 -O2 -emit-llvm-bc %S/../statepoints.m -o %t.bc
+RUN: llvm-dis %t.bc -o %t.ll
+RUN: merkc -fc1 -O2 -emit-obj %t.ll -o %t.read-back.o
+RUN: cmp %t.source.o %t.read-back.o
+RUN: merkc -fc1 -O2 -fdebug-dump-statepoints %S/../statepoints.m -o - | FileCheck %s
+RUN: merkc -fc1 -O2 -fdebug-dump-statepoints %t.ll -o - | FileCheck %s
+CHECK: gc.statepoint
+CHECK: gc.relocate
+
+What else the IR can be compiled to.
+RUN: not merkc -fc1 -emit-merk %t.ll 2>&1 | FileCheck %s --check-prefix=ONLY
+ONLY: LLVM IR input can only be compiled to LLVM IR, bitcode, statepoints, assembly or an object file

@@ -60,6 +60,7 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
   case ActionKind::EmitMLIR:
   case ActionKind::EmitLLVM:
   case ActionKind::EmitLLVMBitcode:
+  case ActionKind::DebugDumpStatepoints:
   case ActionKind::EmitAssembly:
   case ActionKind::EmitObj:
     return std::make_unique<CodeGenAction>(ci.getFrontendOpts().programAction);

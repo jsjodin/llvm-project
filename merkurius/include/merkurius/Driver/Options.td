@@ -222,6 +222,10 @@ def emit_llvm : Flag<["-"], "emit-llvm">,
   HelpText<"Write the module's LLVM IR">;
 def emit_llvm_bc : Flag<["-"], "emit-llvm-bc">,
   HelpText<"Write the module's LLVM bitcode">;
+def fdebug_dump_statepoints : Flag<["-"], "fdebug-dump-statepoints">,
+  HelpText<"Write the module's LLVM IR after the rewrite for the garbage "
+           "collector, with its statepoints and relocations; from LLVM IR "
+           "read back from -emit-llvm-bc, the rewrite only">;
 def emit_obj : Flag<["-"], "emit-obj">,
   HelpText<"Write the module's object file">;
 

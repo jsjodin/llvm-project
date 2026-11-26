@@ -31,7 +31,8 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
           OPT_fdebug_dump_types, OPT_fdebug_dump_loops, OPT_fdebug_dump_modes,
           OPT_fdebug_dump_determinism, OPT_fdebug_dump_polymorphism,
           OPT_emit_merk, OPT_fdebug_dump_frees, OPT_emit_merk_bc, OPT_emit_mlir,
-          OPT_emit_llvm, OPT_emit_llvm_bc, OPT_S, OPT_emit_obj)) {
+          OPT_emit_llvm, OPT_emit_llvm_bc, OPT_fdebug_dump_statepoints, OPT_S,
+          OPT_emit_obj)) {
     switch (arg->getOption().getID()) {
     case OPT_E:
       opts.programAction = ActionKind::PrintPreprocessedInput;
@@ -98,6 +99,9 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
       break;
     case OPT_emit_llvm_bc:
       opts.programAction = ActionKind::EmitLLVMBitcode;
+      break;
+    case OPT_fdebug_dump_statepoints:
+      opts.programAction = ActionKind::DebugDumpStatepoints;
       break;
     case OPT_S:
       opts.programAction = ActionKind::EmitAssembly;
