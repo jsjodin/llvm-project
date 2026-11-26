@@ -1471,6 +1471,34 @@ static void ListLiveRoots(llvm::Function &function, KnownTypes &known) {
   }
 }
 
+// Whether a pointer is to static data, a constant global, through phis and
+// selects: what such data holds is static too.
+static bool IsInStaticData(const llvm::Value *address) {
+  llvm::SmallPtrSet<const llvm::Value *, 16> seen;
+  llvm::SmallVector<const llvm::Value *> worklist{address};
+  while (!worklist.empty()) {
+    const llvm::Value *value{
+        CellOf(worklist.pop_back_val())->stripPointerCasts()};
+    if (!seen.insert(value).second) {
+      continue;
+    }
+    if (auto *global{llvm::dyn_cast<llvm::GlobalVariable>(value)}) {
+      if (!global->isConstant()) {
+        return false;
+      }
+    } else if (auto *phi{llvm::dyn_cast<llvm::PHINode>(value)}) {
+      for (const llvm::Use &use : phi->incoming_values()) {
+        worklist.push_back(use.get());
+      }
+    } else if (auto *select{llvm::dyn_cast<llvm::SelectInst>(value)}) {
+      worklist.push_back(select->getTrueValue());
+      worklist.push_back(select->getFalseValue());
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
 
 // What static data holds is static or a number, and does not move.
 static bool IsFromStaticData(const llvm::Value *root) {
@@ -1482,7 +1510,8 @@ static bool IsFromStaticData(const llvm::Value *root) {
       continue;
     }
     if (auto *load{llvm::dyn_cast<llvm::LoadInst>(value)}) {
-      if (!llvm::isa<llvm::Constant>(load->getPointerOperand())) {
+      if (!llvm::isa<llvm::Constant>(load->getPointerOperand()) &&
+          !IsInStaticData(load->getPointerOperand())) {
         return false;
       }
     } else if (auto *relocate{llvm::dyn_cast<llvm::GCRelocateInst>(value)}) {
@@ -1491,6 +1520,9 @@ static bool IsFromStaticData(const llvm::Value *root) {
       for (const llvm::Use &use : llvm::cast<llvm::User>(value)->operands()) {
         worklist.push_back(use.get());
       }
+    } else if (auto *select{llvm::dyn_cast<llvm::SelectInst>(value)}) {
+      worklist.push_back(select->getTrueValue());
+      worklist.push_back(select->getFalseValue());
     } else {
       return false;
     }
