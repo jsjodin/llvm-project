@@ -1181,14 +1181,17 @@ static llvm::Value *RootOf(llvm::Value *value) {
 // address on two paths, has one that points past its cell's tag, into its
 // cell. Such a value has no cell to list: listed as it is, the rewrite would
 // take it for a base, and a collection for the start of a cell of the type
-// FindType finds through it. Left out, the rewrite makes it a base of the
-// cells, which FindRootTypes gives the type, and it moves by its offset.
+// FindType finds through it; left out, nothing the bundle lists would keep
+// its cells. SinkMergedOffsets makes one whose pointers are the same
+// distance into their cells a pointer into a merge of the cells.
 static bool IsInteriorMerge(llvm::Value *value) {
   if (!llvm::isa<llvm::PHINode, llvm::SelectInst>(value)) {
     return false;
   }
   llvm::SmallPtrSet<const llvm::Value *, 8> seen;
   llvm::SmallVector<const llvm::Value *> worklist{value};
+  // A merge of static data only, as a constant, is not a root.
+  bool interior{false}, heap{false};
   while (!worklist.empty()) {
     const llvm::Value *merged{worklist.pop_back_val()};
     if (!seen.insert(merged).second) {
@@ -1203,14 +1206,93 @@ static bool IsInteriorMerge(llvm::Value *value) {
       continue;
     }
     llvm::APInt offset{64, 0};
-    merged->stripAndAccumulateConstantOffsets(
+    const llvm::Value *cell{merged->stripAndAccumulateConstantOffsets(
         llvm::cast<llvm::Instruction>(value)->getModule()->getDataLayout(),
-        offset, /*AllowNonInbounds=*/true);
-    if (offset.isNegative() || offset.uge(8)) {
-      return true;
+        offset, /*AllowNonInbounds=*/true)};
+    heap = heap || !llvm::isa<llvm::Constant>(cell);
+    // Back to the cell from its tag is not into it.
+    interior = interior || offset.slt(-7) || offset.sge(8);
+  }
+  return interior && heap;
+}
+
+// The cell that `value` points into, through GEPs of constant offsets, and
+// how far into it; null if a GEP's offset is not constant.
+static llvm::Value *CellAndOffset(
+    llvm::Value *value, const llvm::DataLayout &layout, llvm::APInt &offset) {
+  offset = llvm::APInt{64, 0};
+  while (auto *gep{llvm::dyn_cast<llvm::GEPOperator>(value)}) {
+    if (!gep->accumulateConstantOffset(layout, offset)) {
+      return nullptr;
+    }
+    value = gep->getPointerOperand();
+  }
+  return value;
+}
+
+// A phi or select of pointers the same distance into their cells, past the
+// tag, as GVN's PRE makes of a field's address on two paths, becomes that
+// distance into a merge of the cells, as it was before PRE. ListLiveRoots
+// then lists the merge of the cells, whose type says what they hold, and
+// the rewrite pairs the field's address with it. Left as it is, nothing the
+// bundle lists keeps the cells (IsInteriorMerge).
+static void SinkMergedOffsets(llvm::Function &function) {
+  const llvm::DataLayout &layout{function.getDataLayout()};
+  for (bool changed{true}; changed;) {
+    changed = false;
+    llvm::SmallVector<llvm::Instruction *> merges;
+    for (llvm::Instruction &instruction : llvm::instructions(function)) {
+      if (llvm::isa<llvm::PHINode, llvm::SelectInst>(instruction) &&
+          IsHeapPointer(instruction.getType())) {
+        merges.push_back(&instruction);
+      }
+    }
+    for (llvm::Instruction *merge : merges) {
+      std::optional<llvm::APInt> common;
+      // Static data, as a constant, does not move, and is not a root.
+      bool uniform{true}, heap{false};
+      for (const llvm::Use &use : merge->operands()) {
+        if (!IsHeapPointer(use->getType())) {
+          continue;
+        }
+        llvm::APInt offset;
+        llvm::Value *cell{CellAndOffset(use.get(), layout, offset)};
+        if (!cell || (common && *common != offset)) {
+          uniform = false;
+          break;
+        }
+        heap = heap || !llvm::isa<llvm::Constant>(cell);
+        common = offset;
+      }
+      if (!uniform || !heap || !common || common->slt(8)) {
+        continue;
+      }
+      llvm::Instruction *cells{merge->clone()};
+      cells->setName(merge->getName() + ".cells");
+      // The rewrite's base, though a static cell is one of them, whose base
+      // it would otherwise take to be null, making a phi of its own.
+      cells->setMetadata(
+          "is_base_value", llvm::MDNode::get(function.getContext(), {}));
+      cells->insertBefore(merge->getIterator());
+      for (llvm::Use &use : cells->operands()) {
+        if (IsHeapPointer(use->getType())) {
+          llvm::APInt offset;
+          use.set(CellAndOffset(use.get(), layout, offset));
+        }
+      }
+      auto *address{llvm::GetElementPtrInst::Create(
+          llvm::Type::getInt8Ty(function.getContext()), cells,
+          {llvm::ConstantInt::get(function.getContext(), *common)}, "",
+          // After the block's phis, or after the select of the cells.
+          llvm::isa<llvm::PHINode>(merge)
+              ? merge->getParent()->getFirstInsertionPt()
+              : merge->getIterator())};
+      address->takeName(merge);
+      merge->replaceAllUsesWith(address);
+      merge->eraseFromParent();
+      changed = true;
     }
   }
-  return false;
 }
 
 // Lists at a safepoint what is live there and its bundle does not have: the
@@ -1289,9 +1371,18 @@ static void ListLiveRoots(llvm::Function &function, KnownTypes &known) {
           // In a fixed order, for the same code from the same module.
           llvm::SmallSetVector<llvm::Value *, 8> missing;
           for (llvm::Value *value : after) {
-            if (!listed.contains(CellOf(value)) && !IsInteriorMerge(value)) {
-              missing.insert(RootOf(value));
+            if (listed.contains(CellOf(value))) {
+              continue;
             }
+            if (IsInteriorMerge(value)) {
+              std::string text;
+              llvm::raw_string_ostream os{text};
+              os << "not yet implemented: a merge of pointers at different "
+                    "distances into their cells, live at a safepoint, in "
+                 << function.getName() << ":" << *value;
+              llvm::report_fatal_error(llvm::StringRef{text});
+            }
+            missing.insert(RootOf(value));
           }
           std::vector<llvm::Value *> entries{
               deopt->Inputs.begin(), deopt->Inputs.end()};
@@ -1890,6 +1981,7 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
       CastAtUses(function);
       ReadAtUses(function, known);
       ReadBitsEarly(function, known);
+      SinkMergedOffsets(function);
       ListLiveRoots(function, known);
       any = true;
     } else if (!function.isDeclaration()) {
