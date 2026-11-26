@@ -30,6 +30,7 @@
 #include "llvm/Linker/Linker.h"
 #include "llvm/Object/OffloadBinary.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -7217,7 +7218,13 @@ void OptimizeLLVMIR(llvm::Module &module, const TargetInfo &target) {
   llvm::FunctionAnalysisManager functions;
   llvm::CGSCCAnalysisManager sccs;
   llvm::ModuleAnalysisManager modules;
-  llvm::PassBuilder builder{module.getContext(), &target.targetMachine()};
+  // -mllvm's -print-after=<pass>, -print-after-all and the like.
+  llvm::PassInstrumentationCallbacks callbacks;
+  llvm::StandardInstrumentations instrumentation{
+      module.getContext(), /*DebugLogging=*/false};
+  instrumentation.registerCallbacks(callbacks, &modules);
+  llvm::PassBuilder builder{module.getContext(), &target.targetMachine(),
+      std::nullopt, std::nullopt, &callbacks};
   builder.registerModuleAnalyses(modules);
   builder.registerCGSCCAnalyses(sccs);
   builder.registerFunctionAnalyses(functions);

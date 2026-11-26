@@ -157,6 +157,7 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
   opts.warnUnselectedMessage = args.hasFlag(
       OPT_Wunselected_message, OPT_Wno_unselected_message, true);
   opts.traceFlags = args.getAllArgValues(OPT_trace_flag_EQ);
+  opts.llvmArgs = args.getAllArgValues(OPT_mllvm);
   if (const llvm::opt::Arg *arg =
           args.getLastArg(OPT_fmode_inference_iteration_limit_EQ)) {
     llvm::StringRef value{arg->getValue()};

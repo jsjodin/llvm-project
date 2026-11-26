@@ -137,6 +137,8 @@ struct FrontendOptions {
   bool warnUnselectedMessage{true};
   // --trace-flag=, for the flag(Name) conditions of trace goals.
   std::vector<std::string> traceFlags;
+  // -mllvm, LLVM's command-line options, parsed before any action runs.
+  std::vector<std::string> llvmArgs;
 };
 
 // The options of code generation: the target, and how far to optimize.

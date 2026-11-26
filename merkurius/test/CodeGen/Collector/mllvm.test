@@ -1,0 +1,18 @@
+-mllvm passes options on to LLVM, so -print-after shows the rewrite's IR
+before the collector's later passes, and the optimizer's passes are
+instrumented too.
+
+RUN: merkc -fc1 -O2 -emit-obj %S/interior-phi.ll -o /dev/null \
+RUN:   -mllvm -print-after=rewrite-statepoints-for-gc 2>&1 \
+RUN:   | FileCheck %s --check-prefix=REWRITE
+REWRITE: *** IR Dump After RewriteStatepointsForGC on [module] ***
+REWRITE: gc.statepoint{{.*}}@merk_alloc_slow
+
+RUN: merkc -O2 -c %S/../../Driver/Inputs/empty-main.m -o /dev/null \
+RUN:   -mllvm -print-after=instcombine 2>&1 | FileCheck %s --check-prefix=OPT
+OPT: *** IR Dump After InstCombinePass on
+
+An option LLVM does not have is an error.
+RUN: not merkc -fc1 -O2 -emit-obj %S/interior-phi.ll -o /dev/null \
+RUN:   -mllvm -no-such-option 2>&1 | FileCheck %s --check-prefix=UNKNOWN
+UNKNOWN: Unknown command line argument '-no-such-option'

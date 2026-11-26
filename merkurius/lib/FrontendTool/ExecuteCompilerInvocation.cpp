@@ -11,6 +11,7 @@
 #include "merkurius/Frontend/FrontendActions.h"
 #include "merkurius/FrontendTool/Utils.h"
 #include "merkurius/Version.inc"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -80,6 +81,18 @@ bool executeCompilerInvocation(CompilerInstance &ci) {
   if (opts.showVersion) {
     llvm::outs() << "merkc -fc1 version " MERKURIUS_VERSION_STRING "\n";
     return true;
+  }
+  // LLVM's own options, as Flang's -mllvm: the first value is the name its
+  // errors give.
+  if (!opts.llvmArgs.empty()) {
+    std::vector<const char *> args{"merkc (LLVM option parsing)"};
+    for (const std::string &arg : opts.llvmArgs) {
+      args.push_back(arg.c_str());
+    }
+    if (!llvm::cl::ParseCommandLineOptions(
+            static_cast<int>(args.size()), args.data())) {
+      return false;
+    }
   }
   bool ok{true};
   for (const std::string &input : opts.inputs) {

@@ -72,6 +72,9 @@ def trace_flag_EQ : Joined<["--"], "trace-flag=">, MetaVarName<"<name>">,
            "flag(\"<name>\"), as mmc's --trace-flag does">;
 def I : JoinedOrSeparate<["-"], "I">, MetaVarName<"<dir>">,
   HelpText<"Add <dir> to the directories searched for imported modules">;
+def mllvm : Separate<["-"], "mllvm">, MetaVarName<"<value>">,
+  HelpText<"Pass <value> to LLVM's command-line options, such as "
+           "-print-after=<pass>, as Clang's -mllvm does">;
 
 def fgpu_process_waves_EQ : Joined<["-"], "fgpu-process-waves=">,
   MetaVarName<"<n>">,

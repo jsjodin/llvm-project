@@ -18,6 +18,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/BuiltinGCs.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -26,7 +27,7 @@
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/ValueMap.h"
 #include "llvm/Passes/PassBuilder.h"
-#include "llvm/IR/Dominators.h"
+#include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -2030,7 +2031,13 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
   llvm::FunctionAnalysisManager functions;
   llvm::CGSCCAnalysisManager sccs;
   llvm::ModuleAnalysisManager modules;
-  llvm::PassBuilder builder{module.getContext(), &target.targetMachine()};
+  // -mllvm's -print-after=<pass>, -print-after-all and the like.
+  llvm::PassInstrumentationCallbacks callbacks;
+  llvm::StandardInstrumentations instrumentation{
+      module.getContext(), /*DebugLogging=*/false};
+  instrumentation.registerCallbacks(callbacks, &modules);
+  llvm::PassBuilder builder{module.getContext(), &target.targetMachine(),
+      std::nullopt, std::nullopt, &callbacks};
   builder.registerModuleAnalyses(modules);
   builder.registerCGSCCAnalyses(sccs);
   builder.registerFunctionAnalyses(functions);

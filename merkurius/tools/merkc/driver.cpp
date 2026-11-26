@@ -111,6 +111,10 @@ static void addFrontendOptions(const InputArgList &args, Job &job,
   for (const llvm::opt::Arg *arg : args.filtered(OPT_trace_flag_EQ)) {
     job.push_back(arg->getAsString(args));
   }
+  for (const std::string &value : args.getAllArgValues(OPT_mllvm)) {
+    job.push_back("-mllvm");
+    job.push_back(value);
+  }
   for (const std::string &dir : args.getAllArgValues(OPT_I)) {
     job.push_back("-I");
     job.push_back(dir);
