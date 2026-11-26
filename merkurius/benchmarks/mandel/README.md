@@ -61,6 +61,25 @@ advance. No tile starts or ends, so balancing is tested alone.
   (`fail=order`, or `kernel` on a GPU), and the iterations and checksum are
   the plain run's whatever ends. It prints the places lost and the tiles
   given back.
+- `mandel-nodes.m`: `mandel-recover.m` with its places on other nodes, OS
+  processes on this machine over TCP (`docs/INPROGRESS.md`, Failure, D2).
+  `coordinator WORKERS` listens and prints its port; each `worker PORT`
+  joins it and spawns places when asked. A place's `noconnection` means
+  its node is lost, and its place is spawned again on a live worker, or at
+  the coordinator when none is left. A worker that loses the coordinator,
+  as when it is cut off, stops its places and ends. Run it with
+  `utils/faults/kill-nodes.py`, which kills workers with `SIGKILL`:
+
+  ```
+  kill-nodes.py --spare 0 --port-from 0 --mtbf 0.2 --count 2 -- \
+    "mandel-nodes coordinator 3" "mandel-nodes worker {port}" \
+    "mandel-nodes worker {port}" "mandel-nodes worker {port}"
+  ```
+
+  and `MERK_FAULTS="partition ..."` at the coordinator for partitions. It
+  prints the places and nodes lost and the tiles given back. With
+  `MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1` in the environment, every node
+  collects at each allocation and checks its roots.
 - `mandel.py`, independent, in Python, whose floats are doubles that it does
   not fuse either: the counts for small frames, which the tests check the
   programs against.

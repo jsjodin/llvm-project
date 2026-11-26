@@ -1,0 +1,63 @@
+mandel-nodes.m's zoom with its places on three worker nodes, OS processes
+over loopback (docs/INPROGRESS.md, Failure, step 6, D2), run by
+utils/faults/kill-nodes.py, which keeps the coordinator and kills workers
+with SIGKILL: with no faults, with two and with all three workers killed
+at random, and with partitions injected at the coordinator, it gives
+mandel-recover.m's iterations and checksum (mandel-recover.test), and every
+node that is not killed exits with 0, a worker cut off from the coordinator
+too. How many places and nodes are lost depends on when the kills come.
+
+RUN: merkc -O0 -fdo-loops -fprocess-declarations %S/../../benchmarks/mandel/mandel-nodes.m -o %t0
+RUN: merkc -O2 -fdo-loops -fprocess-declarations %S/../../benchmarks/mandel/mandel-nodes.m -o %t2
+RUN: rm -rf %t.home && mkdir %t.home
+
+RUN: env HOME=%t.home MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 %kill-nodes --spare 0 --port-from 0 --seed 1 --mtbf 60 --count 0 -- "%t0 coordinator 3" "%t0 worker {port}" "%t0 worker {port}" "%t0 worker {port}" | FileCheck %s --check-prefixes=SMALL,NONE
+SMALL: Iterations: 10601425
+SMALL-NEXT: Checksum: 63198496
+NONE-NEXT: Places lost: 0
+NONE-NEXT: Nodes lost: 0
+NONE-NEXT: Tiles given back: 0
+NONE-DAG: node 0: exited with 0
+NONE-DAG: node 1: exited with 0
+NONE-DAG: node 2: exited with 0
+NONE-DAG: node 3: exited with 0
+
+Two workers killed, at -O2 and -O0, with every message read or freed at
+the coordinator, and all three killed, whose places the coordinator then
+spawns at its own node.
+RUN: env HOME=%t.home MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 3 --mtbf 0.15 --count 2 -- "env MERK_CHECK_MESSAGES=1 %t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" 2>&1 | FileCheck %s --check-prefixes=MID,FREED
+RUN: env HOME=%t.home MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 4 --mtbf 0.3 --count 2 -- "%t0 coordinator 3" "%t0 worker {port}" "%t0 worker {port}" "%t0 worker {port}" | FileCheck %s --check-prefix=MID
+RUN: env HOME=%t.home MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 7 --mtbf 0.1 --count 3 -- "%t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" | FileCheck %s --check-prefix=MID
+FREED: Merkurius runtime: 0 messages are neither read nor freed
+MID: Iterations: 1116763296
+MID-NEXT: Checksum: 24081410283
+MID: node 0: exited with 0
+
+Partitions: the coordinator's fault injector silences its connections to
+two workers, which each see the coordinator lost, stop their places and
+exit with 0; the coordinator fences them off and gives their places'
+chunks to the third.
+RUN: env HOME=%t.home MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=60 %kill-nodes --spare 0 --port-from 0 --seed 1 --mtbf 60 --count 0 -- "env MERK_FAULTS='seed=2 mtbf=500 partition count=2 log=%t.partitions' %t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" | FileCheck %s --check-prefix=CUT
+CUT: Iterations: 5897442044
+CUT-NEXT: Checksum: 253694394825
+CUT-DAG: node 0: exited with 0
+CUT-DAG: node 1: exited with 0
+CUT-DAG: node 2: exited with 0
+CUT-DAG: node 3: exited with 0
+
+With every node collecting at each allocation and checking its roots
+(MERK_GC_EVERY_ALLOC, MERK_CHECK_ROOTS): with no faults, every node
+reports what it checked; with workers killed, at -O2 and -O0, and with
+partitions, the results are the same and no node that is not killed fails,
+as one would on a bad root.
+RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 %kill-nodes --spare 0 --port-from 0 --seed 1 --mtbf 60 --count 0 -- "%t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" > %t.gc 2>&1
+RUN: FileCheck %s --check-prefixes=SMALL,NONE < %t.gc
+RUN: FileCheck %s --check-prefix=ROOTS < %t.gc
+ROOTS-COUNT-4: Merkurius runtime: roots: {{[1-9][0-9]*}} safepoints
+RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 3 --mtbf 0.15 --count 2 -- "%t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" 2>&1 | FileCheck %s --check-prefixes=MID,ALIVE
+RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 4 --mtbf 0.3 --count 2 -- "%t0 coordinator 3" "%t0 worker {port}" "%t0 worker {port}" "%t0 worker {port}" 2>&1 | FileCheck %s --check-prefixes=MID,ALIVE
+RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=60 %kill-nodes --spare 0 --port-from 0 --seed 1 --mtbf 60 --count 0 -- "env MERK_FAULTS='seed=2 mtbf=500 partition count=2' %t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" 2>&1 | FileCheck %s --check-prefixes=CUT,ALIVE
+ALIVE-NOT: exited with {{[1-9]}}
+
+RUN: not %t0 | FileCheck %s --check-prefix=USAGE
+USAGE: usage: coordinator WORKERS | worker PORT

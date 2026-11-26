@@ -20,3 +20,19 @@ RUN: %python -c "import sys; a = [l.split() for l in open(sys.argv[1])]; b = [l.
 RUN: not %kill-nodes --seed 1 --mtbf 60 -- "true" "false" | FileCheck %s --check-prefix=FAILED
 FAILED: node 0: exited with 0
 FAILED-NEXT: node 1: exited with 1
+
+--spare keeps a node from being killed: with node 0 spared, the two kills
+take nodes 1 and 2. --port-from starts node 0 first and gives the port it
+prints to the others as {port}; its output still comes through.
+RUN: %kill-nodes --spare 0 --seed 4 --mtbf 0.1 --count 2 -- "sleep 1" "sleep 2" "sleep 2" | FileCheck %s --check-prefix=SPARE
+SPARE: node 0: exited with 0
+SPARE-NEXT: node 1: killed
+SPARE-NEXT: node 2: killed
+RUN: %kill-nodes --port-from 0 --seed 1 --mtbf 60 --count 0 -- "sh -c 'echo listening 4321; sleep 0.5; echo after'" "sh -c 'echo got {port} >&2'" 2>&1 | FileCheck %s --check-prefix=PORT
+PORT-DAG: listening 4321
+PORT-DAG: got 4321
+PORT-DAG: after
+PORT: node 0: exited with 0
+PORT-NEXT: node 1: exited with 0
+RUN: not %kill-nodes --port-from 0 --seed 1 --mtbf 60 --count 0 -- "true" 2>&1 | FileCheck %s --check-prefix=NOPORT
+NOPORT: kill-nodes.py: node 0 ended without printing "listening PORT"

@@ -2,6 +2,7 @@
 """Runs a program's nodes and kills them with SIGKILL at random times.
 
 Usage: kill-nodes.py [--seed N] [--mtbf SECONDS] [--count N]
+                     [--spare N]... [--port-from N]
                      [--log FILE] [--replay FILE] -- COMMAND [COMMAND...]
 
 The fault injector's harness half (docs/INPROGRESS.md, Failure, step 3):
@@ -17,16 +18,25 @@ since the nodes started and the node's number among the commands, from 0,
 after a line with the seed. --replay kills the same nodes at the same
 times, and writes what it did to --log too, without the seed's line.
 
+--spare N keeps node N from being killed, as a program's coordinator,
+which may be given more than once. --port-from N starts node N first and
+waits for it to print "listening PORT", as a node that listens on a free
+port does; the other commands' {port} is that port, and the clock of the
+kills starts once they all run. Node N's output still goes to this
+script's standard output.
+
 Once every node has ended, it prints how each ended, and exits with 0 if
 every node it did not kill exited with 0, else 1.
 """
 
 import argparse
 import random
+import re
 import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 POLL = 0.01
@@ -39,6 +49,10 @@ def arguments():
     parser.add_argument("--mtbf", type=float,
                         help="the mean time between failures, in seconds")
     parser.add_argument("--count", type=int, default=1)
+    parser.add_argument("--spare", type=int, action="append", default=[],
+                        help="a node that is never killed")
+    parser.add_argument("--port-from", type=int,
+                        help="the node whose \"listening PORT\" is {port}")
     parser.add_argument("--log", help="where the schedule is written")
     parser.add_argument("--replay", help="a schedule to repeat")
     parser.add_argument("commands", nargs="+", metavar="COMMAND")
@@ -74,6 +88,42 @@ def wait_until(nodes, when):
     return True
 
 
+def start(commands, port_from):
+    """The nodes, started, and the thread that forwards the output of the
+    node whose port the others' {port} is, if there is one."""
+    if port_from is None:
+        return [subprocess.Popen(shlex.split(c)) for c in commands], None
+    if not 0 <= port_from < len(commands):
+        sys.exit(f"kill-nodes.py: --port-from {port_from}: there is no such "
+                 "node")
+    listener = subprocess.Popen(shlex.split(commands[port_from]),
+                                stdout=subprocess.PIPE, text=True)
+    port = None
+    for line in listener.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        m = re.match(r"listening (\d+)$", line.strip())
+        if m:
+            port = m.group(1)
+            break
+    if port is None:
+        listener.wait()
+        sys.exit(f"kill-nodes.py: node {port_from} ended without printing "
+                 "\"listening PORT\"")
+
+    def copy():
+        for line in listener.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+    forward = threading.Thread(target=copy, daemon=True)
+    forward.start()
+    nodes = [listener if i == port_from
+             else subprocess.Popen(shlex.split(c.replace("{port}", port)))
+             for i, c in enumerate(commands)]
+    return nodes, forward
+
+
 def main():
     options = arguments()
     seed = options.seed
@@ -82,8 +132,7 @@ def main():
     log = open(options.log, "w") if options.log else None
     if log and not options.replay:
         print(f"# seed={seed}", file=log, flush=True)
-    nodes = [subprocess.Popen(shlex.split(command))
-             for command in options.commands]
+    nodes, forward = start(options.commands, options.port_from)
     started = time.monotonic()
     killed = set()
 
@@ -111,12 +160,15 @@ def main():
             at += generator.expovariate(1 / options.mtbf)
             if not wait_until(nodes, at):
                 break
-            running = [i for i, node in enumerate(nodes) if node.poll() is None]
+            running = [i for i, node in enumerate(nodes)
+                       if node.poll() is None and i not in options.spare]
             if running:
                 kill(at, running[generator.randrange(len(running))])
     failed = False
     for index, node in enumerate(nodes):
         status = node.wait()
+        if index == options.port_from:
+            forward.join()
         if index in killed:
             print(f"node {index}: killed")
         else:

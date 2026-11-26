@@ -8129,7 +8129,31 @@ Sketched for a later stage:
      comes at a time that differs between runs, so the process a fault
      names may not exist yet at its time. As documented for step 3.
 5. **A watcher on a GPU** (10).
-6. **D2,** several nodes, partitions.
+6. **D2,** several nodes, partitions. *Built 2026-11-25:*
+   `benchmarks/mandel/mandel-nodes.m` is `mandel-recover.m` with its places
+   on worker nodes, OS processes on this machine over TCP. The coordinator
+   listens and prints its port; each worker joins it and spawns places when
+   asked. A place's `noconnection` means its node is lost, and the place is
+   spawned again on a live worker, or at the coordinator when none is left.
+   A worker that loses the coordinator, as when it is cut off, stops its
+   places and ends. `utils/faults/kill-nodes.py` gained `--spare`, a node
+   never killed, and `--port-from`, a node whose printed port the others
+   are given.
+   - *Results* (`test/Benchmarks/mandel-nodes.test`): with no faults, with
+     two and with all three workers killed with `SIGKILL`, and with two
+     workers cut off by the coordinator's partitions, the checksum is the
+     plain run's, at -O2 and -O0. Every node that is not killed exits with
+     0, a cut-off worker too, and no message is left at the coordinator.
+     The same holds with every node collecting at each allocation and
+     checking its roots.
+   - *Found on the way,* each fixed with a test of its own, the last four
+     by that GC check and the codegen oracle run with it: a phi of casts
+     of heap pointers crashed the rewrite (`LiftCastPhis`); ListLiveRoots
+     kept pointers to calls it had replaced; a phi of a field's address in
+     two cells was listed as a cell of its own; once left out, nothing kept
+     its cells (`SinkMergedOffsets`); and a pointer read from a select of
+     static terms had no type. The IR entry, `-fdebug-dump-statepoints` on
+     LLVM IR, and `-mllvm` came out of these.
 7. **GPU fault probes and the plugin's hook** (7), on the gfx90a system,
    with the user's leave.
 8. **D3** in merkurius-mc.
