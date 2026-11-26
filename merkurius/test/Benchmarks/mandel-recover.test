@@ -22,6 +22,22 @@ NONE-NEXT: Places lost: 0
 NONE-NEXT: Tiles given back: 0
 FREED: Merkurius runtime: 0 messages are neither read nor freed
 
+With a collection at each allocation and the roots checked at each
+safepoint, with no faults and with places failing. Each run of the
+coordinator, whose loop reads a field of its frame state through a phi of
+the field's address in the first frame's static term and in a cell,
+checked that phi as a frame state of its own, and failed by chance; the
+runs repeat.
+RUN: merkc -O2 -fdo-loops -fprocess-declarations %S/../../benchmarks/mandel/mandel-recover.m -o %t2
+RUN: env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=3 %t2 host 2>/dev/null | FileCheck %s --check-prefix=CHECKED
+RUN: env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=3 %t2 host 2>/dev/null | FileCheck %s --check-prefix=CHECKED
+RUN: env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=3 %t2 host 2>/dev/null | FileCheck %s --check-prefix=CHECKED
+RUN: env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=3 %t2 host 2>/dev/null | FileCheck %s --check-prefix=CHECKED
+RUN: env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=3 MERK_FAULTS="seed=5 mtbf=2 fail=order count=10" %t2 host 2>/dev/null | FileCheck %s --check-prefix=CHECKED
+RUN: env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=3 MERK_FAULTS="seed=6 mtbf=2 fail=order count=10" %t2 host 2>/dev/null | FileCheck %s --check-prefix=CHECKED
+CHECKED: Iterations: 2017213
+CHECKED-NEXT: Checksum: 5015620
+
 A place that is lost with no restarts left, at the first fault. The fault
 may hit the place between its spawn and its monitor, which the monitor
 reports as noproc, as Erlang's does.

@@ -1177,6 +1177,42 @@ static llvm::Value *RootOf(llvm::Value *value) {
   return tagged ? value : cell;
 }
 
+// Whether a phi or select of pointers, as GVN's PRE makes of a field's
+// address on two paths, has one that points past its cell's tag, into its
+// cell. Such a value has no cell to list: listed as it is, the rewrite would
+// take it for a base, and a collection for the start of a cell of the type
+// FindType finds through it. Left out, the rewrite makes it a base of the
+// cells, which FindRootTypes gives the type, and it moves by its offset.
+static bool IsInteriorMerge(llvm::Value *value) {
+  if (!llvm::isa<llvm::PHINode, llvm::SelectInst>(value)) {
+    return false;
+  }
+  llvm::SmallPtrSet<const llvm::Value *, 8> seen;
+  llvm::SmallVector<const llvm::Value *> worklist{value};
+  while (!worklist.empty()) {
+    const llvm::Value *merged{worklist.pop_back_val()};
+    if (!seen.insert(merged).second) {
+      continue;
+    }
+    if (llvm::isa<llvm::PHINode, llvm::SelectInst>(merged)) {
+      for (const llvm::Use &use : llvm::cast<llvm::User>(merged)->operands()) {
+        if (use->getType()->isPointerTy()) {
+          worklist.push_back(use.get());
+        }
+      }
+      continue;
+    }
+    llvm::APInt offset{64, 0};
+    merged->stripAndAccumulateConstantOffsets(
+        llvm::cast<llvm::Instruction>(value)->getModule()->getDataLayout(),
+        offset, /*AllowNonInbounds=*/true);
+    if (offset.isNegative() || offset.uge(8)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Lists at a safepoint what is live there and its bundle does not have: the
 // optimizer can keep a value alive for longer than the Merkurius code did, and
 // the rewrite would then make a root that nothing describes. Its type_infos
@@ -1253,7 +1289,7 @@ static void ListLiveRoots(llvm::Function &function, KnownTypes &known) {
           // In a fixed order, for the same code from the same module.
           llvm::SmallSetVector<llvm::Value *, 8> missing;
           for (llvm::Value *value : after) {
-            if (!listed.contains(CellOf(value))) {
+            if (!listed.contains(CellOf(value)) && !IsInteriorMerge(value)) {
               missing.insert(RootOf(value));
             }
           }
