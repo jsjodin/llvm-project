@@ -515,6 +515,93 @@ static llvm::Value *CloneChain(
   return clone;
 }
 
+// The heap pointer that the C pointer `value` is computed from, through an
+// addrspacecast and GEPs on it, rebuilt in the heap's address space before
+// `place`, as a GEP on a cast is the cast of the same GEP; null if `value` is
+// not computed that way. A null C pointer is the heap's null.
+static llvm::Value *HeapPointerOf(
+    llvm::Value *value, llvm::Instruction *place) {
+  if (llvm::isa<llvm::ConstantPointerNull>(value)) {
+    return llvm::ConstantPointerNull::get(
+        llvm::PointerType::get(value->getContext(), kHeapAddressSpace));
+  }
+  if (auto *cast{llvm::dyn_cast<llvm::AddrSpaceCastInst>(value)};
+      cast && IsHeapPointer(cast->getSrcTy())) {
+    return cast->getPointerOperand();
+  }
+  auto *gep{llvm::dyn_cast<llvm::GetElementPtrInst>(value)};
+  if (!gep) {
+    return nullptr;
+  }
+  llvm::Value *base{HeapPointerOf(gep->getPointerOperand(), place)};
+  if (!base) {
+    return nullptr;
+  }
+  llvm::SmallVector<llvm::Value *> indices(gep->indices());
+  return llvm::GetElementPtrInst::Create(
+      gep->getSourceElementType(), base, indices, "", place->getIterator());
+}
+
+// A phi of C pointers made from heap pointers, as GVN's PRE makes of the
+// casts that meet at a block, would carry them past safepoints, unrelocated.
+// It becomes a phi of the heap pointers, cast after it, a cast that CastAtUses
+// then makes again at each use. Each incoming value is a cast of a heap
+// pointer, a GEP on one, null, or such a phi, which is lifted first.
+static void LiftCastPhis(llvm::Function &function) {
+  for (bool changed{true}; changed;) {
+    changed = false;
+    llvm::SmallVector<llvm::PHINode *> phis;
+    for (llvm::BasicBlock &block : function) {
+      for (llvm::PHINode &phi : block.phis()) {
+        auto *type{llvm::dyn_cast<llvm::PointerType>(phi.getType())};
+        if (type && type->getAddressSpace() == 0) {
+          phis.push_back(&phi);
+        }
+      }
+    }
+    for (llvm::PHINode *phi : phis) {
+      // A phi of nothing made from heap pointers is not one to lift.
+      bool fromHeap{false}, liftable{true};
+      for (llvm::Value *incoming : phi->incoming_values()) {
+        llvm::Value *root{incoming};
+        while (auto *gep{llvm::dyn_cast<llvm::GetElementPtrInst>(root)}) {
+          root = gep->getPointerOperand();
+        }
+        auto *cast{llvm::dyn_cast<llvm::AddrSpaceCastInst>(root)};
+        if (cast && IsHeapPointer(cast->getSrcTy())) {
+          fromHeap = true;
+        } else if (!llvm::isa<llvm::ConstantPointerNull>(root)) {
+          liftable = false;
+        }
+      }
+      if (!fromHeap || !liftable) {
+        continue;
+      }
+      auto *lifted{llvm::PHINode::Create(
+          llvm::PointerType::get(function.getContext(), kHeapAddressSpace),
+          phi->getNumIncomingValues(), phi->getName() + ".heap",
+          phi->getIterator())};
+      // A block that is an incoming block twice, as a switch's, has one
+      // value.
+      llvm::DenseMap<llvm::BasicBlock *, llvm::Value *> made;
+      for (unsigned i{0}; i < phi->getNumIncomingValues(); ++i) {
+        llvm::BasicBlock *from{phi->getIncomingBlock(i)};
+        auto [it, added]{made.try_emplace(from, nullptr)};
+        if (added) {
+          it->second =
+              HeapPointerOf(phi->getIncomingValue(i), from->getTerminator());
+        }
+        lifted->addIncoming(it->second, from);
+      }
+      auto *cast{new llvm::AddrSpaceCastInst(lifted, phi->getType(),
+          phi->getName(), phi->getParent()->getFirstInsertionPt())};
+      phi->replaceAllUsesWith(cast);
+      phi->eraseFromParent();
+      changed = true;
+    }
+  }
+}
+
 // A C pointer made from a heap pointer is not a root. The optimizer hoists one
 // out of a loop, past safepoints, and its use then has the address from before
 // a collection. Making it again at each use, before statepoints are made, has
@@ -545,9 +632,13 @@ static void CastAtUses(llvm::Function &function) {
           continue;
         }
         if (llvm::isa<llvm::PHINode>(user)) {
-          llvm::report_fatal_error(llvm::Twine{
-              "not yet implemented: a C pointer from a heap pointer that "
-              "goes through a phi, in "} + function.getName());
+          // One that LiftCastPhis could not lift, as one of its incoming
+          // values is not made from a heap pointer.
+          llvm::report_fatal_error(
+              llvm::Twine{
+                  "not yet implemented: a C pointer from a heap pointer that "
+                  "goes through a phi with other values, in "} +
+              function.getName());
         }
         use.set(CloneChain(link, user, chain));
       }
@@ -1717,6 +1808,7 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
       function.setUWTableKind(llvm::UWTableKind::Async);
       MarkLeaves(function);
       RecordTypes(function, known);
+      LiftCastPhis(function);
       CastAtUses(function);
       ReadAtUses(function, known);
       ReadBitsEarly(function, known);
