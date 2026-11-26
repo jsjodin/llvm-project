@@ -8188,9 +8188,44 @@ Sketched for a later stage:
       refers to a moved array, so nothing changes it while it travels.
     - *The pinned chunk is the message,* not copied once more into the
       mailbox, as `SendTo` does now.
-    - *Tests and measures:* the array untouched while it travels; the
-      sender's time per send against the array's size; other GPUs' RPCs
-      during a large send.
+    - *Only large messages:* below a crossover, measured per GPU, the
+      bookkeeping of a background copy costs more than the copy, and small
+      messages go as now.
+    - *Order:* a send takes its place in the receiver's mailbox when it is
+      made, and the copy fills it in later, so a smaller message sent after
+      it cannot overtake it. The peer queues keep order the same way: the
+      slot is taken at the send, and the receiver copies from it.
+    - *Memory for messages in flight:* a send takes what it needs before it
+      returns: the pinned chunk, the send pool's block, the receiver's
+      arena space. No message is dropped for want of it. Hardware copies do
+      not lose data under load; a busy copy engine queues the next copy,
+      and no hardware queue is made per copy (the GPU resets seen came from
+      oversubscribed compute queues). The pinned chunks and copies of at
+      most 512 KiB stay, which avoid the plugin's stall on copies of more
+      than 1 MiB from memory it did not pin.
+    - *The user's points, 2026-11-26:*
+      - *A copy error as a fault is configurable.* Sends are not blocking,
+        so the language gives a sender no way to know whether one worked,
+        and a failed copy is not part of the language now. Today
+        `SendArrayFromDevice` calls `Fail`, which ends the program.
+      - *Throttling is the program's,* by communicating with the other
+        processes, not a policy of the runtime. But the program must know
+        the condition: why its messages are not getting through, such as
+        no memory for messages in flight, or copies failing.
+    - *Proposed, to decide with the user:* the runtime reports such
+      conditions as typed messages into a mailbox the program chooses, as
+      monitors report a `down`. A copy error is then fatal (today's
+      behaviour) or reported, as configured. While there is no memory for
+      a send, the sender still waits, as a full peer slot makes it wait
+      now. That is the last resort that keeps every message, and the report
+      lets the program throttle before that happens. Open: the reasons'
+      type, whether a condition's end is reported too, and whether a
+      reported copy error names the message's target and key.
+    - *Tests and measures:* the array untouched while it travels; order
+      kept between a large message and a small one after it; the sender's
+      time per send against the array's size; other GPUs' RPCs during a
+      large send; a send that waits for memory; a copy error, injected,
+      reported and fatal.
 
 **Decided 2026-11-22:** refusing a down node, not epochs; typed reasons;
 `stop` in step 1; D3 in MC-transport-plan.md, with these steps as its
