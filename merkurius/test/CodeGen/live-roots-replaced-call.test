@@ -1,0 +1,10 @@
+When the collector rewrite adds a root to a safepoint's call, it makes the
+call again with the larger list and erases the old one. The live sets of
+the blocks still to come, and the type_infos found, held the old call, and
+a later safepoint read it, freed: a crash in merkc now and then, or, once
+its memory held the next call made, a root that was not one. Here the
+receive loop's calls, whose results are live into other blocks, are made
+again; valgrind finds no read of freed memory.
+
+REQUIRES: valgrind, amdgpu-registered-target
+RUN: %valgrind merkc -fc1 -O2 -fopenmp -emit-obj %S/omp-target-receive-ring.m -o %t.o

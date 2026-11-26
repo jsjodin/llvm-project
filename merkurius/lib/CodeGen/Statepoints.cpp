@@ -1182,6 +1182,38 @@ static llvm::Value *RootOf(llvm::Value *value) {
 // the rewrite would then make a root that nothing describes. Its type_infos
 // are found here, while each is still one SSA value, and listing them makes
 // the rewrite relocate them. That can make one live at an earlier safepoint.
+// Has what held `old`, which is to be erased, hold `now`: a set, a list, or
+// a map from values to lists or to lists of them, by its keys and its lists.
+static void Rename(llvm::Value *old, llvm::Value *now, ValueSet &values) {
+  if (values.erase(old)) {
+    values.insert(now);
+  }
+}
+
+static void Rename(llvm::Value *old, llvm::Value *now,
+    llvm::SmallVector<llvm::Value *, 2> &list) {
+  llvm::replace(list, old, now);
+}
+
+template <typename Map>
+static void Rename(llvm::Value *old, llvm::Value *now, Map &map) {
+  if (auto it{map.find(old)}; it != map.end()) {
+    auto entry{std::move(it->second)};
+    map.erase(it);
+    map[now] = std::move(entry);
+  }
+  for (auto &[key, entry] : map) {
+    if constexpr (std::is_same_v<std::decay_t<decltype(entry)>,
+                      llvm::SmallVector<llvm::Value *, 2>>) {
+      Rename(old, now, entry);
+    } else {
+      for (auto &list : entry) {
+        Rename(old, now, list);
+      }
+    }
+  }
+}
+
 static void ListLiveRoots(llvm::Function &function, KnownTypes &known) {
   TypeInfosOf made;
   for (bool changed{true}; changed;) {
@@ -1290,6 +1322,16 @@ static void ListLiveRoots(llvm::Function &function, KnownTypes &known) {
                 call, bundles, call->getIterator())};
             replaced->takeName(call);
             call->replaceAllUsesWith(replaced);
+            // What holds the call, for the blocks and calls still to come,
+            // holds its replacement: a pointer to the call, once erased, may
+            // name the next instruction made in its memory.
+            Rename(call, replaced, live);
+            for (auto &[_, values] : liveIn) {
+              Rename(call, replaced, values);
+            }
+            Rename(call, replaced, made);
+            Rename(call, replaced, infos);
+            Rename(call, replaced, alternatives);
             StepBack(*replaced, live);
             call->eraseFromParent();
             changed = true;

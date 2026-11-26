@@ -305,3 +305,12 @@ if mmc and os.path.exists(mmc):
             ),
         )
     )
+
+# Tests that run the compiler under valgrind, for reads of memory it has
+# freed, which change its output only by chance; without valgrind they are
+# unsupported.
+valgrind = shutil.which("valgrind")
+if valgrind:
+    config.available_features.add("valgrind")
+    config.substitutions.append(
+        ("%valgrind", "%s -q --error-exitcode=99" % valgrind))
