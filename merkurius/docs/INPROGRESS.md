@@ -8226,6 +8226,54 @@ Sketched for a later stage:
       time per send against the array's size; other GPUs' RPCs during a
       large send; a send that waits for memory; a copy error, injected,
       reported and fatal.
+    - *Hardware that can help* (2026-11-26, from knowledge of AMD's
+      hardware and ROCr, not yet probed here; the names are to check):
+      - *The copy engines, run asynchronously by the host.* A GPU has
+        several, apart from its compute units. `hsa_amd_memory_async_copy`
+        starts a copy with an HSA completion signal, and
+        `hsa_amd_signal_async_handler` runs a callback on ROCr's thread when
+        it ends, off our RPC server thread. Today's `olMemcpy` waits. This
+        is most of the step. `hsa_amd_memory_async_copy_on_engine` and
+        `hsa_amd_memory_copy_engine_status` choose the engine, so that one
+        could be kept for background copies and never queue ahead of
+        urgent messages. MI200 GPUs may have separate engines for xGMI and
+        for PCIe, so that copies to the host would not compete with copies
+        between GPUs.
+      - *The GPU writing into host memory itself.* A store to pinned host
+        memory is posted: the lane does not wait for it. Many lanes reach
+        near the link's speed: 6.5–9.8 GB/s with 1024 lanes, against 5–24
+        GB/s for the copy engine (Messages between GPU processes on one GPU,
+        item 4, the HIP probe). A process's
+        worker teams could write a snapshot straight into a host ring while
+        its loops run, and the host only takes a notice. It costs compute
+        units, and it works on the gfx1030 too, where the copy engine is
+        not used for sends.
+      - *Interrupts instead of polling.* A kernel can raise an interrupt
+        (`s_sendmsg`) that wakes a host thread waiting on an HSA signal, so
+        the host could sleep until a transfer is posted or done. The libc
+        RPC server polls.
+      - *Coherent memory on the gfx1030.* Its release does not write the
+        L2 back, so the copy engine could read stale words. Arrays to be
+        sent could be made in fine-grained memory, which the copy engine
+        sees without a write-back, at the cost of slower writes while the
+        array is built.
+      - *Not of use here:* RDMA from the GPU to the network card (the links
+        between hosts are TCP only); the CPU reading GPU memory through the
+        PCIe window (slow reads); the GPU programming a copy engine itself
+        (possible in principle, but ROCr does not support it, and a mistake
+        there would risk the device).
+    - *Recommended:* the host runs the copy on a copy engine with ROCr's
+      asynchronous calls and a completion callback off the RPC server
+      thread, if it can on an engine kept for background copies. The GPU
+      writing into host memory is the fallback for the gfx1030.
+    - *Probes first:*
+      - on r11, with the user's leave: how many copy engines a gfx90a has,
+        and whether copies to the host slow the halos over xGMI;
+      - on r11: how fast worker teams write into host memory, and how much
+        that slows the loops;
+      - on r11: whether keeping an engine for background copies works;
+      - on the gfx1030, with its CU mask: the copy engine reading an array
+        made in fine-grained memory, and how much slower building it is.
 
 **Decided 2026-11-22:** refusing a down node, not epochs; typed reasons;
 `stop` in step 1; D3 in MC-transport-plan.md, with these steps as its
