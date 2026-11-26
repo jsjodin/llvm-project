@@ -7959,6 +7959,15 @@ ending process. The result must be flat, as every message to a GPU is.
   integers and identical whoever tracks which particle. The scalar flux is a
   float sum, which depends on the order of the adds; identical only with
   fixed-point tallies or a fixed order of reduction.
+- **D4, SERGHEI's shallow water on several GPUs** (planned 2026-11-25;
+  merkurius-serghei-swe, docs/INPROGRESS.md, Fault tolerance). Its strips
+  carry state from step to step and trade halos, unlike D1's tiles. The
+  answer does not depend on the split, so after a loss the survivors share
+  the world, as the port's dynamic rebalancing does already. Checkpoints in
+  two levels: each GPU to its own host over PCIe, idle while the halos go
+  over xGMI, then each host to a buddy host. Global rollback first, then
+  only the lost strip replaying from logged halos. It needs asynchronous
+  moving sends to the host (step 12).
 - **Later, UTS:** a stolen subtree lost with its thief must be recomputed
   from its root, which needs a record of steals not yet answered.
 
@@ -8155,13 +8164,33 @@ Sketched for a later stage:
      static terms had no type. The IR entry, `-fdebug-dump-statepoints` on
      LLVM IR, and `-mllvm` came out of these.
 7. **GPU fault probes and the plugin's hook** (7), on the gfx90a system,
-   with the user's leave.
+   with the user's leave. The host must also close a trapped kernel's peer
+   queues: the kernel never closes them, so a sender on another GPU still
+   finds the queue open, and spins once its slots are full (`PutPeer`).
+   Injected stops close their own.
 8. **D3** in merkurius-mc.
 9. **Heartbeats and back-edge checks** (6), only if D1 to D3 need them;
    measure their cost first.
 10. **The baseline model,** with its measured parts, and the curves.
 11. **GPU-to-GPU fault tolerance** (Later, above), once GPUs message each
     other directly.
+12. **Asynchronous moving sends of large arrays to the host,** for D4's
+    checkpoints (planned 2026-11-25). Today a GPU process's send of a large
+    array (`SendArrayThroughHost`) waits until the host has copied all of
+    it by the copy engine, 512 KiB at a time (`SendArrayFromDevice`): about
+    7–10 ms for 25 MB at the 2.4–3.8 GB/s measured on gfx90a. The copy runs
+    on the offload plugin's one RPC server thread, which serves every
+    device, so every GPU's RPCs wait behind it.
+    - *A send that is the array's last use* (`moves`) hands its block
+      over: the device posts the address and goes on; the host copies by
+      the copy engine in the background, off the server thread, and gives
+      the block back on a return ring, as peer copies do. Nothing else
+      refers to a moved array, so nothing changes it while it travels.
+    - *The pinned chunk is the message,* not copied once more into the
+      mailbox, as `SendTo` does now.
+    - *Tests and measures:* the array untouched while it travels; the
+      sender's time per send against the array's size; other GPUs' RPCs
+      during a large send.
 
 **Decided 2026-11-22:** refusing a down node, not epochs; typed reasons;
 `stop` in step 1; D3 in MC-transport-plan.md, with these steps as its
