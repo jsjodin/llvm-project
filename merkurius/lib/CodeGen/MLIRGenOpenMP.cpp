@@ -391,31 +391,6 @@ void MerkGenerator::RegisterMessageTypes() {
   merk::ConstructorOp::create(builder_, loc, name);
 }
 
-// A process.timeout's milliseconds, -1 for infinity, as library/process.m's
-// milliseconds has them.
-mlir::Value MerkGenerator::TimeoutMilliseconds(
-    mlir::Value timeout, mlir::Location loc) {
-  auto i64{builder_.getI64Type()};
-  auto cases{builder_.getArrayAttr(
-      {builder_.getArrayAttr(
-           {merk::FunctorAttr::get(&context_, "infinity", 0)}),
-          builder_.getArrayAttr(
-              {merk::FunctorAttr::get(&context_, "after", 1)})})};
-  auto switchOp{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{i64},
-      timeout, cases, /*canFail=*/false)};
-  mlir::OpBuilder::InsertionGuard guard{builder_};
-  builder_.setInsertionPointToStart(&switchOp->getRegion(0).emplaceBlock());
-  merk::YieldOp::create(builder_, loc, IntegerConstant(i64, -1, loc));
-  builder_.setInsertionPointToStart(&switchOp->getRegion(1).emplaceBlock());
-  auto deconstruct{merk::DeconstructOp::create(builder_, loc,
-      mlir::TypeRange{i64}, timeout,
-      merk::FunctorAttr::get(&context_, "after", 1))};
-  mlir::Value milliseconds{mlir::arith::MaxSIOp::create(builder_, loc,
-      deconstruct.getResult(0), IntegerConstant(i64, 0, loc))};
-  merk::YieldOp::create(builder_, loc, milliseconds);
-  return switchOp->getResult(0);
-}
-
 // receive(Mailbox, any, Timeout, Result, !IO) in a target region, or in
 // any procedure of the device's compile, all of which run on the device:
 // the only receive the device has so far (docs/INPROGRESS.md, The device's
