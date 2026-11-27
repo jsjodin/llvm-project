@@ -9532,14 +9532,15 @@ runtime has no such check now.
      the host"). Found on the way: pingpong's echo thread kept its
      mailboxes' handle cells, on the collector's heap, which a collection
      freed; fixed, with a run in pingpong.test at every allocation.
-   - *(e) Next, decided with the user 2026-11-27:* a process about to
-     block spins a little first, while no process anywhere is runnable,
-     up to `MERK_SPIN_MICROSECONDS` and the deadline, in every host wait:
-     `merk_select_first`, the loop's wait and `merk_mailbox_wait`. (d)'s
-     faster receive blocks before a partner on another worker answers, and
-     each block is a futex sleep and wake: pingpong's cpu-process with 48
-     workers went from 3.9 to 4.4 µs a round, and a spin in
-     `merk_select_first` alone made it 1.7 µs, with nearly no sleeps.
+   - *(e) Built 2026-11-27, decided with the user:* a process about to
+     block when no process anywhere is runnable spins first, yielding, up
+     to `MERK_SPIN_MICROSECONDS` and the deadline, in every host wait:
+     `merk_select_first`, the loop's wait and `merk_mailbox_wait`
+     (`SpinBeforeBlock`, `NothingRunnable`). (d)'s faster receive blocked
+     before a partner on another worker answered, and each block is a
+     futex sleep and wake: pingpong's cpu-process on every worker took 4.4
+     µs a round after (d), 3.9 before it, and 1.8 with the spin (design
+     document, "Plain receives on the host").
 
    Decided with the user:
    - *Each case's matcher is a known procedure,* named by symbol, with

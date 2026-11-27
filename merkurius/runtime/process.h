@@ -166,6 +166,10 @@ void Unpin();
 int EnterParallelRegion();
 void ExitParallelRegion();
 
+// Whether no process is waiting to run on any worker, so that a process
+// about to block may spin a little instead, holding up none.
+bool NothingRunnable();
+
 // Makes a new process runnable.
 void Start(Process *);
 // With the process's waitLock held, which it keeps: makes a blocked process

@@ -774,6 +774,10 @@ static void Yield() {
   AfterSwitch();
 }
 
+bool NothingRunnable() {
+  return runnable.load(std::memory_order_relaxed) == 0;
+}
+
 void Wake(Process *process) {
   if (!process->waiting) {
     return;

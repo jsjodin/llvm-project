@@ -579,6 +579,25 @@ void SpinForArrival(std::int64_t seen, std::int64_t end) {
   }
 }
 
+// A process about to block when no other process could run spins first,
+// until the number of arrivals is no longer `seen`, while nothing becomes
+// runnable, up to the spin's time and the deadline. Its partner on another
+// worker often answers within a microsecond, and a block costs a futex
+// sleep and wake when the answer comes: two processes in a ping-pong on
+// all the workers took 4.5 us a round, and 1.8 with this
+// (docs/INPROGRESS.md, Concurrency in merk, step 1 (e)). It yields, as a
+// worker's idle spin does (process.cpp, Idle), so that with fewer cores
+// than threads the partner can run; a pause instead was 11% faster there,
+// and would hold the partner's core.
+void SpinBeforeBlock(std::int64_t seen, std::int64_t deadline) {
+  std::int64_t end{SpinEnd(deadline)};
+  ArrivalCounts &counts{MyCounts()};
+  while (__atomic_load_n(&counts.arrivals, __ATOMIC_ACQUIRE) == seen &&
+      NothingRunnable() && Now() < end) {
+    sched_yield();
+  }
+}
+
 pthread_once_t spinOnce = PTHREAD_ONCE_INIT;
 std::int64_t spinNanoseconds{50000};
 
@@ -994,6 +1013,7 @@ extern "C" std::int64_t merk_mailbox_wait(
   bool suspends{CanSuspend()};
   std::int64_t spinEnd{suspends ? 0 : SpinEnd(deadline)};
   std::int64_t result{0};
+  bool spun{false};
   for (;;) {
     std::int64_t seen{suspends ? 0 : StartLooking()};
     std::int64_t arrivals{
@@ -1016,14 +1036,20 @@ extern "C" std::int64_t merk_mailbox_wait(
       break;
     }
     if (suspends) {
-      // The process scheduled next spins if nothing can run.
       if (deadline >= 0 && Now() >= deadline) {
         Unlock(mailbox);
         break;
       }
+      if (!spun && NothingRunnable()) {
+        Unlock(mailbox);
+        spun = true;
+        SpinBeforeBlock(arrivals, deadline);
+        continue;
+      }
       pthread_mutex_lock(&CurrentProcess()->waitLock);
       Unlock(mailbox);
       Block(deadline);
+      spun = false;
       continue;
     }
     Unlock(mailbox);
@@ -1089,6 +1115,9 @@ extern "C" std::int64_t merk_mailbox_wait_arrival(
   ArrivalCounts &counts{MyCounts()};
   if (CanSuspend()) {
     Process *self{CurrentProcess()};
+    if (NothingRunnable()) {
+      SpinBeforeBlock(seen, deadline);
+    }
     for (;;) {
       pthread_mutex_lock(&self->waitLock);
       if (__atomic_load_n(&counts.arrivals, __ATOMIC_SEQ_CST) != seen) {
@@ -2385,18 +2414,17 @@ extern "C" void merk_select_take(std::uint64_t state) {
 // message leaves it, with its value in the state's first word: 0. Anything
 // else, the deadline, the mailbox closed or what a monitor left, is for
 // merk_select_next, which looks again: -1. A process waits as
-// merk_mailbox_wait has it, with the mailbox's lock held until its waitLock
-// is, so that it does as little as it can between a send and blocking; a
-// process just woken by that send is on the sender's local queue, which a
-// spinning worker would otherwise steal (process.cpp, Block).
+// merk_mailbox_wait has it: it spins a little first (SpinBeforeBlock), then
+// blocks with the mailbox's lock held until its waitLock is.
 extern "C" std::int64_t merk_select_first(
     std::uint64_t state, const Word *handle) {
   merk_select_case(state, handle);
   auto *select{reinterpret_cast<HostSelect *>(state)};
   SelectCase &group{select->cases[0]};
   bool suspends{CanSuspend()};
+  bool spun{false};
   for (;;) {
-    std::int64_t seen{suspends ? 0 : merk_mailbox_arrivals()};
+    std::int64_t seen{merk_mailbox_arrivals()};
     Mailbox *mailbox{Find(group.handle)};
     if (!mailbox) {
       return -1;
@@ -2423,9 +2451,16 @@ extern "C" std::int64_t merk_select_first(
       return -1;
     }
     if (suspends) {
+      if (!spun && NothingRunnable()) {
+        Unlock(mailbox);
+        spun = true;
+        SpinBeforeBlock(seen, select->deadline);
+        continue;
+      }
       pthread_mutex_lock(&CurrentProcess()->waitLock);
       Unlock(mailbox);
       Block(select->deadline);
+      spun = false;
       continue;
     }
     Unlock(mailbox);

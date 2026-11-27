@@ -5092,7 +5092,16 @@ The receive goals' cases above were unchanged, within 3%. With messages that the
 | `cpu-process`, two processes | 1 | 0.65 (0.63–0.67) | 0.60 (0.58–0.63) |
 | `cpu-process` | all | 3.86 (2.91–3.91) | 4.53 (3.58–4.71) |
 
-With one worker, which runs both processes, a round costs 8% less. With every worker, `cpu-process` costs 17% more: the receive, being faster, blocks before the partner on another worker answers, where the library's often found the answer there, and each block is a futex sleep and wake (about 11000 voluntary context switches in a run against 9000). A process that spins a little before blocking, while nothing else can run, takes 1.67 µs a round with nearly no sleeps (step 1 (e)).
+With one worker, which runs both processes, a round costs 8% less. With every worker, `cpu-process` costs 17% more: the receive, being faster, blocks before the partner on another worker answers, where the library's often found the answer there, and each block is a futex sleep and wake (about 11000 voluntary context switches in a run against 9000). So now, on 8f6408267d36, a process about to block when no other process could run spins first, until a message arrives, something becomes runnable, the deadline, or the spin's time, `MERK_SPIN_MICROSECONDS` (50 by default), yielding as a worker's idle spin does, in every wait of the host's receives (`runtime/mailbox.cpp`, `SpinBeforeBlock`; step 1 (e)). Three alternating runs, the median and range:
+
+| Case | Workers | Loop | Loop, spinning |
+| --- | ---: | ---: | ---: |
+| `cpu-local` | 1 | 2.05 (2.05–2.15) | 1.91 (1.90–1.96) |
+| `cpu-local` | all | 2.86 (2.74–2.96) | 1.98 (1.95–1.99) |
+| `cpu-process` | 1 | 0.62 (0.60–0.63) | 0.59 (0.58–0.59) |
+| `cpu-process` | all | 4.38 (3.61–4.72) | 1.83 (1.82–1.87) |
+
+Every worker's case is now faster than the library's receive was: `cpu-process` 1.83 µs against 3.86. The throughput cases and pingpong's `cpu` over TCP did not change. A spin with a pause instruction rather than a yield was 11% faster on `cpu-process` (1.63 µs), but with fewer cores than threads it would hold the core of the process it waits for. With one worker, nothing spins, as the partner is always runnable, and the check comes before the mailbox's lock is given up, so the receive costs nothing more.
 
 The pingpong benchmark's echo thread kept pointers to its mailboxes' handle cells, which are on the collector's heap, where nothing the thread holds is a root: after the first collection, about 32700 rounds in with the library's receive, which allocated at each, it read freed memory and stopped with "a message was read that is not in its mailbox". It copies the handles' words now, and `Benchmarks/pingpong.test` runs it with a collection at every allocation.
 
