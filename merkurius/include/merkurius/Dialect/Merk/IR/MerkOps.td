@@ -367,6 +367,51 @@ def Merk_ClosureWordOp : Merk_Op<"closure_word", [Pure]> {
   let assemblyFormat = "$closure `,` $index attr-dict";
 }
 
+def Merk_ReceiveOp : Merk_Op<"receive", [
+    AttrSizedOperandSegments, DeclareOpInterfaceMethods<SymbolUserOpInterface>
+  ]> {
+  let summary = "a receive goal: one message, which some case selects";
+  let description = [{
+    A receive goal (design document, "The receive goal"), as desugaring
+    made it: a case for each of its mailboxes, in the order first written,
+    whose matcher, a semidet procedure, takes the case's captured values
+    and a message, and gives the arm and the pattern's variables as a
+    word, or fails. The result is `process.receive_result(R)`:
+    `receive_message` of what a matcher gave, or `receive_nothing` at the
+    timeout. `result_info` is R's type_info.
+
+    `message_infos` are the type_infos of each case's messages, and
+    `captured_counts` how many of `captured` each case's matcher takes,
+    first case first. `captures`, one for each case, says what each
+    captured value is, as `merk.closure`'s does, for lowering where it
+    makes closures of the matchers; without it, as on a device, they have
+    no layout.
+
+    ```mlir
+    %r = merk.receive %t with %ti matchers [@m.p$lambda0] counts [1]
+        on(%box : !merk.term<"process.mailbox(m.msg)">) infos(%mi)
+        captured(%ref : i64) captures [[["int/0"]]]
+        : !merk.term<"process.timeout">
+        -> !merk.term<"process.receive_result(T0)">
+    ```
+  }];
+  let arguments = (ins Merk_TermType:$timeout, Merk_TypeInfoType:$result_info,
+      Variadic<AnyType>:$mailboxes, Variadic<Merk_TypeInfoType>:$message_infos,
+      Variadic<AnyType>:$captured, FlatSymbolRefArrayAttr:$matchers,
+      DenseI64ArrayAttr:$captured_counts, OptionalAttr<ArrayAttr>:$captures);
+  let results = (outs Merk_TermType:$result);
+  let assemblyFormat = [{
+    $timeout `with` $result_info
+    `matchers` $matchers `counts` $captured_counts
+    `on` `(` $mailboxes `:` type($mailboxes) `)`
+    `infos` `(` $message_infos `)`
+    (`captured` `(` $captured^ `:` type($captured) `)`)?
+    (`captures` $captures^)?
+    attr-dict `:` qualified(type($timeout)) `->` qualified(type($result))
+  }];
+  let hasVerifier = 1;
+}
+
 def Merk_CallClosureOp : Merk_Op<"call_closure"> {
   let summary = "a higher-order call";
   let description = [{

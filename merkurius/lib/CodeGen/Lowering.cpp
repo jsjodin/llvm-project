@@ -5621,8 +5621,166 @@ void UnifyTailCallTypes(mlir::ModuleOp module) {
   }
 }
 
+namespace {
+// A value of another type, through its word.
+mlir::Value CoerceTo(mlir::OpBuilder &builder, mlir::Location loc,
+    mlir::Value value, mlir::Type type) {
+  if (value.getType() == type) {
+    return value;
+  }
+  auto word{merk::WordType::get(builder.getContext())};
+  if (value.getType() != word) {
+    value = merk::ToWordOp::create(builder, loc, word, value);
+  }
+  if (type != word) {
+    value = merk::FromWordOp::create(builder, loc, type, value);
+  }
+  return value;
+}
+
+// The module's procedure of that name, or a private declaration of one.
+merk::ProcOp ProcNamed(mlir::ModuleOp module, llvm::StringRef name,
+    mlir::FunctionType type, merk::Determinism determinism) {
+  if (auto proc{module.lookupSymbol<merk::ProcOp>(name)}) {
+    return proc;
+  }
+  mlir::OpBuilder builder{module.getBodyRegion()};
+  builder.setInsertionPointToEnd(module.getBody());
+  auto proc{
+      merk::ProcOp::create(builder, module.getLoc(), name, type, determinism)};
+  proc.setPrivate();
+  return proc;
+}
+
+// The closure entry of a receive's matcher: it takes the closure and the
+// message's word, and calls the matcher with the closure's captured values
+// and the message, in the types the matcher takes.
+merk::ProcOp MatcherEntry(mlir::ModuleOp module, merk::ProcOp matcher) {
+  std::string name{matcher.getSymName().str() + "$receive"};
+  if (auto entry{module.lookupSymbol<merk::ProcOp>(name)}) {
+    return entry;
+  }
+  mlir::MLIRContext *context{module.getContext()};
+  auto word{merk::WordType::get(context)};
+  mlir::OpBuilder builder{module.getBodyRegion()};
+  builder.setInsertionPointToEnd(module.getBody());
+  mlir::Location loc{matcher.getLoc()};
+  auto entry{merk::ProcOp::create(builder, loc, name,
+      builder.getFunctionType({merk::ClosureType::get(context), word}, {word}),
+      merk::Determinism::Semidet)};
+  entry.setPrivate();
+  mlir::Block *block{entry.addEntryBlock()};
+  builder.setInsertionPointToStart(block);
+  mlir::FunctionType type{matcher.getFunctionType()};
+  llvm::SmallVector<mlir::Value> inputs;
+  for (unsigned i{0}; i + 1 < type.getNumInputs(); ++i) {
+    mlir::Value captured{merk::ClosureWordOp::create(builder, loc, word,
+        block->getArgument(0), static_cast<std::int64_t>(i))};
+    inputs.push_back(CoerceTo(builder, loc, captured, type.getInput(i)));
+  }
+  inputs.push_back(
+      CoerceTo(builder, loc, block->getArgument(1), type.getInputs().back()));
+  auto call{merk::CallOp::create(
+      builder, loc, type.getResults(), matcher.getSymName(), inputs)};
+  merk::SucceedOp::create(builder, loc, call.getResults());
+  return entry;
+}
+
+// Each merk.receive, as the library's receive: a selector of a
+// selecting_matching case for each case, the first innermost, whose
+// function is a closure of the case's matcher, then a call of
+// process.receive_goal.
+// Temporary (merk.receive step 1, docs/INPROGRESS.md, Concurrency in merk):
+// until a GPU process's receive is made from the cases, which also lose
+// their closures on the host if measurements show that they cost.
+void ExpandReceives(mlir::ModuleOp module) {
+  llvm::SmallVector<merk::ReceiveOp> receives;
+  module.walk([&](merk::ReceiveOp op) { receives.push_back(op); });
+  if (receives.empty()) {
+    return;
+  }
+  mlir::MLIRContext *context{module.getContext()};
+  mlir::OpBuilder builder{context};
+  auto info{merk::TypeInfoType::get(context)};
+  auto closureType{merk::ClosureType::get(context)};
+  auto selectorType{merk::TermType::get(context, "process.selector(T0)")};
+  llvm::StringRef resultPrefix{"process.receive_result("};
+  auto selectorType1{merk::TermType::get(context, "process.selector(T1)")};
+  auto mailboxType{merk::TermType::get(context, "process.mailbox(T0)")};
+  auto timeoutType{merk::TermType::get(context, "process.timeout")};
+  auto resultType{merk::TermType::get(context, "process.receive_result(T0)")};
+  merk::ProcOp newSelector{ProcNamed(module, "process.new_selector_f0_0",
+      builder.getFunctionType({info}, {selectorType}), merk::Determinism::Det)};
+  merk::ProcOp selecting{ProcNamed(module, "process.selecting_matching_f3_0",
+      builder.getFunctionType(
+          {info, info, mailboxType, closureType, selectorType1},
+          {selectorType1}),
+      merk::Determinism::Det)};
+  merk::ProcOp receiveGoal{ProcNamed(module, "process.receive_goal_5_0",
+      builder.getFunctionType({info, selectorType, timeoutType}, {resultType}),
+      merk::Determinism::Det)};
+  for (merk::ReceiveOp receive : receives) {
+    builder.setInsertionPoint(receive);
+    mlir::Location loc{receive.getLoc()};
+    // The selectors' type, process.selector(R) of the receive's
+    // process.receive_result(R), as the collector needs it of what stays
+    // live across a closure's allocation.
+    llvm::StringRef name{
+        mlir::cast<merk::TermType>(receive.getResult().getType()).getName()};
+    mlir::Type ownSelector{selectorType};
+    if (name.consume_front(resultPrefix) && name.consume_back(")")) {
+      ownSelector = merk::TermType::get(
+          context, ("process.selector(" + name + ")").str());
+    }
+    mlir::Value selector{CoerceTo(builder, loc,
+        merk::CallOp::create(builder, loc, mlir::TypeRange{selectorType},
+            newSelector.getSymName(), mlir::ValueRange{receive.getResultInfo()})
+            .getResult(0),
+        ownSelector)};
+    std::optional<mlir::ArrayAttr> captures{receive.getCaptures()};
+    mlir::OperandRange captured{receive.getCaptured()};
+    std::size_t at{0};
+    for (auto [i, attr] : llvm::enumerate(receive.getMatchers())) {
+      auto matcher{module.lookupSymbol<merk::ProcOp>(
+          mlir::cast<mlir::FlatSymbolRefAttr>(attr).getValue())};
+      auto count{static_cast<std::size_t>(receive.getCapturedCounts()[i])};
+      llvm::SmallVector<mlir::Value> words;
+      for (mlir::Value value : captured.slice(at, count)) {
+        words.push_back(
+            CoerceTo(builder, loc, value, merk::WordType::get(context)));
+      }
+      at += count;
+      mlir::Value closure{merk::ClosureOp::create(builder, loc, closureType,
+          mlir::FlatSymbolRefAttr::get(
+              context, MatcherEntry(module, matcher).getSymName()),
+          words,
+          captures ? mlir::cast<mlir::ArrayAttr>((*captures)[i])
+                   : mlir::ArrayAttr{})};
+      selector = merk::CallOp::create(builder, loc,
+          mlir::TypeRange{selectorType1}, selecting.getSymName(),
+          mlir::ValueRange{receive.getMessageInfos()[i],
+              receive.getResultInfo(),
+              CoerceTo(builder, loc, receive.getMailboxes()[i], mailboxType),
+              closure, CoerceTo(builder, loc, selector, selectorType1)})
+                     .getResult(0);
+      selector = CoerceTo(builder, loc, selector, ownSelector);
+    }
+    mlir::Value result{merk::CallOp::create(builder, loc,
+        mlir::TypeRange{resultType}, receiveGoal.getSymName(),
+        mlir::ValueRange{receive.getResultInfo(),
+            CoerceTo(builder, loc, selector, selectorType),
+            receive.getTimeout()})
+                           .getResult(0)};
+    receive.getResult().replaceAllUsesWith(
+        CoerceTo(builder, loc, result, receive.getResult().getType()));
+    receive->erase();
+  }
+}
+} // namespace
+
 llvm::LogicalResult Lowerer::Lower() {
   module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect, mrt::MrtDialect>();
+  ExpandReceives(module_);
   // On a device nothing calls a descriptor's unify entry, since a generic
   // unification is an error there, and the procedure is not compiled for it.
   // Its functors stay, by which a message is copied (runtime/copy.h).

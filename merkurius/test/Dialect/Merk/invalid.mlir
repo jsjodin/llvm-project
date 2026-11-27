@@ -33,6 +33,10 @@
 // RUN: not merkc -fc1 -emit-merk %t/soft-ite-type.mlir 2>&1 | FileCheck %s --check-prefix=SOFT-ITE-TYPE
 // RUN: not merkc -fc1 -emit-merk %t/nondet-call-closure.mlir 2>&1 | FileCheck %s --check-prefix=NONDET-CALL-CLOSURE
 // RUN: not merkc -fc1 -emit-merk %t/moves.mlir 2>&1 | FileCheck %s --check-prefix=MOVES
+// RUN: not merkc -fc1 -emit-merk %t/receive-cases.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-CASES
+// RUN: not merkc -fc1 -emit-merk %t/receive-counts.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-COUNTS
+// RUN: not merkc -fc1 -emit-merk %t/receive-matcher.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-MATCHER
+// RUN: not merkc -fc1 -emit-merk %t/receive-captured.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-CAPTURED
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -384,5 +388,53 @@ module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   merk.proc @p(%m: !merk.term<"process.mailbox(int)">, %k: i64) attributes {determinism = #merk.determinism<det>} {
     merk.foreign_call @merk_device_send(%m, %k, %k) moves : (!merk.term<"process.mailbox(int)">, i64, i64) -> ()
     merk.succeed
+  }
+}
+
+//--- receive-cases.mlir
+// RECEIVE-CASES: receive-cases.mlir:[[@LINE+6]]:10: error: 'merk.receive' op needs a mailbox, a message type_info and a count of captured values for each matcher
+module {
+  merk.proc private @m(%w: !merk.word) -> !merk.word attributes {determinism = #merk.determinism<semidet>} {
+    merk.succeed %w : !merk.word
+  }
+  merk.proc @p(%t: !merk.term<"process.timeout">, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) -> !merk.term<"process.receive_result(T0)"> attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.receive %t with %i matchers [@m, @m] counts [0, 0] on(%b : !merk.term<"process.mailbox(int)">) infos(%i) : !merk.term<"process.timeout"> -> !merk.term<"process.receive_result(T0)">
+    merk.succeed %0 : !merk.term<"process.receive_result(T0)">
+  }
+}
+
+//--- receive-counts.mlir
+// RECEIVE-COUNTS: receive-counts.mlir:[[@LINE+6]]:10: error: 'merk.receive' op counts 1 captured values, but has 0
+module {
+  merk.proc private @m(%w: !merk.word) -> !merk.word attributes {determinism = #merk.determinism<semidet>} {
+    merk.succeed %w : !merk.word
+  }
+  merk.proc @p(%t: !merk.term<"process.timeout">, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) -> !merk.term<"process.receive_result(T0)"> attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.receive %t with %i matchers [@m] counts [1] on(%b : !merk.term<"process.mailbox(int)">) infos(%i) : !merk.term<"process.timeout"> -> !merk.term<"process.receive_result(T0)">
+    merk.succeed %0 : !merk.term<"process.receive_result(T0)">
+  }
+}
+
+//--- receive-matcher.mlir
+// RECEIVE-MATCHER: receive-matcher.mlir:[[@LINE+6]]:10: error: 'merk.receive' op names @m, which does not take its captured values and a message, giving a word, semidet
+module {
+  merk.proc private @m(%w: !merk.word) -> !merk.word attributes {determinism = #merk.determinism<det>} {
+    merk.succeed %w : !merk.word
+  }
+  merk.proc @p(%t: !merk.term<"process.timeout">, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) -> !merk.term<"process.receive_result(T0)"> attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.receive %t with %i matchers [@m] counts [0] on(%b : !merk.term<"process.mailbox(int)">) infos(%i) : !merk.term<"process.timeout"> -> !merk.term<"process.receive_result(T0)">
+    merk.succeed %0 : !merk.term<"process.receive_result(T0)">
+  }
+}
+
+//--- receive-captured.mlir
+// RECEIVE-CAPTURED: receive-captured.mlir:[[@LINE+6]]:10: error: 'merk.receive' op passes @m a captured value of type 'i64' for one of type '!merk.word'
+module {
+  merk.proc private @m(%x: !merk.word, %w: !merk.word) -> !merk.word attributes {determinism = #merk.determinism<semidet>} {
+    merk.succeed %w : !merk.word
+  }
+  merk.proc @p(%t: !merk.term<"process.timeout">, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">, %c: i64) -> !merk.term<"process.receive_result(T0)"> attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.receive %t with %i matchers [@m] counts [1] on(%b : !merk.term<"process.mailbox(int)">) infos(%i) captured(%c : i64) : !merk.term<"process.timeout"> -> !merk.term<"process.receive_result(T0)">
+    merk.succeed %0 : !merk.term<"process.receive_result(T0)">
   }
 }

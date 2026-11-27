@@ -15,6 +15,12 @@
 % - A timeout arm, and without one, the error when every mailbox is closed,
 %   which ends the program.
 %
+% Each receive goal is a merk.receive, which names each mailbox's matcher
+% (docs/INPROGRESS.md, Concurrency in merk, step 1): the counter loop's
+% has two cases, Self's and Downs', first written first, and no selector.
+% Lowering makes it the library's receive: a selector of a closure of each
+% matcher, the first case innermost, then process.receive_goal.
+%
 % mmc has no receive goal, so the output is written by hand.
 %
 % RUN: merkc -freceive-goal -O0 %s -o %t0 && not %t0 > %t0.out 2> %t0.err
@@ -23,6 +29,8 @@
 % RUN: merkc -freceive-goal -O2 %s -o %t2 && not %t2 > %t2.out 2> %t2.err
 % RUN: FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace < %t2.out
 % RUN: FileCheck %s --check-prefix=ERROR < %t2.err
+% RUN: merkc -fc1 -freceive-goal -emit-merk %s -o - | FileCheck %s --check-prefix=MERK
+% RUN: merkc -fc1 -freceive-goal -O0 -emit-llvm %s -o - | FileCheck %s --check-prefix=LLVM
 %
 % OUTPUT:worker died: worker 1
 % OUTPUT-NEXT:idle
@@ -42,6 +50,28 @@
 % OUTPUT-NEXT:timeout: none
 % OUTPUT-NOT:{{.}}
 % ERROR: receive: every mailbox is closed
+%
+% MERK-LABEL: merk.proc private @receive_goal.loop_5_0(
+% MERK-NOT: merk.closure
+% MERK-NOT: merk.call @process.{{selecting_matching|new_selector|receive_goal}}
+% MERK: merk.receive {{.*}} matchers [@receive_goal.loop_5_0$lambda0, @receive_goal.loop_5_0$lambda1] counts [0, 0]
+% MERK-SAME: on(%arg1, %arg2 : !merk.term<"process.mailbox(receive_goal.counter_msg)">, !merk.term<"process.mailbox(string)">)
+% MERK-SAME: -> !merk.term<"process.receive_result(process.receive_arms(int,
+% MERK-NOT: merk.closure
+% MERK-NOT: merk.call @process.{{selecting_matching|new_selector|receive_goal}}
+% MERK-LABEL: merk.proc private @receive_goal.loop_5_0$lambda0(
+% MERK-SAME: !merk.term<"receive_goal.counter_msg">) -> !merk.word
+% MERK-SAME: determinism = #merk.determinism<semidet>
+%
+% LLVM-LABEL: define {{.*}} @receive_goal.loop_5_0(
+% LLVM: %[[S0:[0-9]+]] = call {{.*}} @process.new_selector_f0_0(
+% LLVM: store ptr @"receive_goal.loop_5_0$lambda0$receive"
+% LLVM: %[[S1:[0-9]+]] = call {{.*}} @process.selecting_matching_f3_0({{.*}}, ptr addrspace(1) %[[S0]])
+% LLVM: store ptr @"receive_goal.loop_5_0$lambda1$receive"
+% LLVM: %[[S2:[0-9]+]] = call {{.*}} @process.selecting_matching_f3_0({{.*}}, ptr addrspace(1) %[[S1]])
+% LLVM: call {{.*}} @process.receive_goal_5_0({{.*}}, ptr addrspace(1) %[[S2]],
+% LLVM-LABEL: define {{.*}} @"receive_goal.loop_5_0$lambda0$receive"(
+% LLVM: call {{.*}} @"receive_goal.loop_5_0$lambda0"(
 
 :- module receive_goal.
 :- interface.

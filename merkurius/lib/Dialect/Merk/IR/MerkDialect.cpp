@@ -422,6 +422,74 @@ llvm::LogicalResult TypeclassInfoOp::verifySymbolUses(
   return mlir::success();
 }
 
+llvm::LogicalResult ReceiveOp::verify() {
+  std::size_t cases{getMatchers().size()};
+  if (getMailboxes().size() != cases || getMessageInfos().size() != cases ||
+      getCapturedCounts().size() != cases) {
+    return emitOpError("needs a mailbox, a message type_info and a count of "
+                       "captured values for each matcher");
+  }
+  if (cases == 0) {
+    return emitOpError("needs a case");
+  }
+  std::int64_t captured{0};
+  for (std::int64_t count : getCapturedCounts()) {
+    if (count < 0) {
+      return emitOpError("has a negative count of captured values");
+    }
+    captured += count;
+  }
+  if (static_cast<std::size_t>(captured) != getCaptured().size()) {
+    return emitOpError("counts ")
+        << captured << " captured values, but has " << getCaptured().size();
+  }
+  if (std::optional<mlir::ArrayAttr> captures{getCaptures()}) {
+    if (captures->size() != cases) {
+      return emitOpError("needs what each case's captured values are");
+    }
+    for (auto [attr, count] : llvm::zip(*captures, getCapturedCounts())) {
+      auto each{mlir::dyn_cast<mlir::ArrayAttr>(attr)};
+      if (!each || static_cast<std::int64_t>(each.size()) != count) {
+        return emitOpError("needs what each of a case's captured values is");
+      }
+    }
+  }
+  return mlir::success();
+}
+
+llvm::LogicalResult ReceiveOp::verifySymbolUses(
+    mlir::SymbolTableCollection &symbolTable) {
+  mlir::Type word{WordType::get(getContext())};
+  mlir::OperandRange captured{getCaptured()};
+  std::size_t at{0};
+  for (auto [matcher, count] :
+      llvm::zip(getMatchers().getAsRange<mlir::FlatSymbolRefAttr>(),
+          getCapturedCounts())) {
+    auto proc{symbolTable.lookupNearestSymbolFrom<ProcOp>(*this, matcher)};
+    if (!proc) {
+      return emitOpError("names ") << matcher << ", which is no procedure";
+    }
+    mlir::FunctionType type{proc.getFunctionType()};
+    // The captured values, then the message; the arm and its variables.
+    if (proc.getDeterminism() != Determinism::Semidet ||
+        type.getNumInputs() != static_cast<unsigned>(count) + 1 ||
+        type.getNumResults() != 1 || type.getResult(0) != word) {
+      return emitOpError("names ")
+          << matcher
+          << ", which does not take its captured values and a message, "
+             "giving a word, semidet";
+    }
+    for (std::int64_t i{0}; i < count; ++i, ++at) {
+      if (captured[at].getType() != type.getInput(i)) {
+        return emitOpError("passes ")
+            << matcher << " a captured value of type " << captured[at].getType()
+            << " for one of type " << type.getInput(i);
+      }
+    }
+  }
+  return mlir::success();
+}
+
 llvm::LogicalResult ClosureOp::verifySymbolUses(
     mlir::SymbolTableCollection &symbolTable) {
   auto proc{symbolTable.lookupNearestSymbolFrom<ProcOp>(*this, getEntryAttr())};

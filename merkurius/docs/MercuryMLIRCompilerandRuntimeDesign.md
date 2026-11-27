@@ -2174,6 +2174,7 @@ Two new dialects carry Mercury semantics until upstream dialects can take over: 
 | `merk.has_functor` | Test a term's constructor, for `merk.guard` |
 | `merk.type_def` | A type's constructors and their arguments' types, from which lowering chooses its layout |
 | `merk.call`, `merk.call_closure`, `merk.closure` | First-order calls, higher-order calls, closure construction |
+| `merk.receive` | A receive goal: its mailboxes, each with the procedure that selects its messages, and the timeout (`INPROGRESS.md`, Concurrency in merk) |
 | `merk.ite`, `merk.not`, `merk.disj` | If-then-else, negation, disjunction |
 | `merk.succeed`, `merk.fail`, `merk.commit` | Produce a solution, fail, prune remaining solutions |
 | `merk.throw`, `merk.try` | Exceptions |

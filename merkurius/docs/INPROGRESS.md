@@ -9438,8 +9438,8 @@ reported as not yet implemented where the compiler meets it:
 
 ## Concurrency in merk, and what mrt is for
 
-Discussed with the user 2026-11-27; proposed, nothing decided or built.
-Two questions came up together: whether processes and messages should be
+Discussed with the user 2026-11-27. Step 1 is being built (below); the
+rest is proposed, nothing decided. Two questions came up together: whether processes and messages should be
 operations of a dialect, and whether `mrt`, which is small, should stay.
 
 ### Processes and messages as merk operations
@@ -9466,8 +9466,8 @@ operation for them. Every pass that cares recognises them by the callee.
 
 **Proposed: operations in merk,** not `mrt`, as they are about meaning,
 not layout: `merk.new_mailbox`, `merk.spawn`, `merk.send`, `merk.monitor`,
-`merk.stop`, and `merk.receive` with its arms as regions instead of a
-closure. They lower to the same runtime calls as now, so the runtime does
+`merk.stop`, and `merk.receive`, which names each case's matcher
+instead of taking a closure (decided at step 1, below). They lower to the same runtime calls as now, so the runtime does
 not change. What they would give:
 - *Analyses on merk.* The approach known for Go (from memory, to check:
   Lange, Ng, Toninho and Yoshida, ICSE 2018) extracts each process's
@@ -9477,8 +9477,8 @@ not change. What they would give:
 - *Selective receive on a GPU.* A GPU process cannot receive selectively
   today, as the selector is a closure, which GPU code cannot make; so
   serghei-swe's strips receive with `any` and sort messages by hand
-  (merkurius-serghei-swe, docs/INPROGRESS.md). With arms as regions,
-  lowering inlines them, and no closure is needed. This is the payoff
+  (merkurius-serghei-swe, docs/INPROGRESS.md). With each case's matcher
+  named, lowering calls it directly, and no closure is needed. This is the payoff
   that exists now.
 - *Optimizations on messages:* receive arms inlined on the host too, sends
   to one target batched, and a message's flatness and last use at the
@@ -9491,10 +9491,69 @@ nodes, or with GPU processes, "nothing in flight" is harder to know. The
 runtime has no such check now.
 
 **Steps, if taken:**
-1. `merk.receive` with arms as regions, made from receive goals, lowered
-   as now on the host, and inlined on a GPU, giving GPU processes
-   selective receive. Tests: the receive goal's tests, and a GPU process
-   that selects.
+1. `merk.receive`, made from receive goals, lowered as now on the host,
+   and made from its cases on a GPU, giving GPU processes selective
+   receive. Tests: the receive goal's tests, and a GPU process that
+   selects. Two commits:
+   - *(a) Built 2026-11-27:* the operation, in code generation, and the
+     host's lowering to the library's receive; nothing changes at run
+     time. Tests: test/Dialect/Merk/receive.mlir, invalid.mlir's
+     `RECEIVE-*`, and test/CodeGen/receive-goal.m's `MERK` and `LLVM`
+     checks.
+   - *(b) Next:* a GPU process's list of messages taken but not selected,
+     and the GPU's lowering, which scans it, then the ring, calling each
+     case's matcher directly.
+
+   Decided with the user:
+   - *Each case's matcher is a known procedure,* named by symbol, with
+     the values its closure captured as operands, rather than the arms as
+     regions. Desugaring already makes each mailbox's patterns a semidet
+     lambda, `pred(Message::in, Selected::out)`, with the arm's number
+     and the pattern's variables in `Selected`; code generation makes it
+     a procedure, `<proc>$lambdaN`, which takes the captured values, then
+     the message. Regions would mean making the arms twice, as code
+     generation still needs the closure for the host's selector, or
+     teaching desugaring a new form. An analysis reads the matcher's
+     procedure as easily as a region.
+   - *A GPU's order is per mailbox:* each mailbox's messages are tried in
+     the order they arrived, the skipped ones before new ones, but there
+     is no order across mailboxes. The host takes the oldest selected
+     message across all of them, by global stamps (library/process.m,
+     `receive/3`); a GPU has no shared clock that is cheap to read on
+     every send, and its mailboxes are separate rings. Documented as the
+     GPU's rule, as a program must not rely on the host's.
+
+   How (a) is made: `FormReceive` (lib/CodeGen/MLIRGenCalls.cpp) finds,
+   just after the call of `process.receive_goal`, the chain of
+   `process.selecting_matching` calls down to `process.new_selector`, and
+   each case's `merk.closure`, whose entry's lambda procedure code
+   generation records. It replaces the call with a `merk.receive` with
+   the mailboxes, their messages' type_infos, the matchers, their captured
+   values and the closures' layouts, which the collector needs, and
+   erases the selector's calls and closures. A call of another shape
+   stays a call. The operation's result has the goal's type,
+   `receive_result(receive_arms(...))`, not the library's
+   `receive_result(T0)`, so that lowering knows the selectors' type: the
+   collector cannot describe a live `selector(T1)`. `ExpandReceives`
+   (lib/CodeGen/Lowering.cpp), first in lowering, makes the library's
+   receive again: a closure of a `$receive` entry of each matcher, which
+   reads the captured values and calls it, a `selecting_matching` case of
+   each, and the call of `receive_goal`.
+
+   At first, (a) kept code generation's selector as an operand, with
+   `receive_goal` as a `fallback` symbol that lowering called. The user
+   asked why it was needed; it was not, only the quickest way to keep the
+   host's code, and it made the operation say everything twice, with a
+   selector an analysis had to ignore and closures kept alive where
+   nothing used them. Rebuilt the same day without it. The host's receive
+   could also scan with direct calls, as (b)'s will on a GPU, without
+   closures; left until measurements show the closures cost, as it must
+   repeat the stamps' order and the wait in lowering.
+
+   `SpecializeKnownClosures` no longer sees the matchers' closures, as
+   lowering makes them, but it never specialized these calls: it clones
+   only a callee with a body, and `process.selecting_matching` is a
+   declaration in a program's module.
 2. `merk.send`, `merk.spawn`, `merk.new_mailbox`, `merk.monitor` and
    `merk.stop`, from the library's calls, lowered to the same runtime
    calls; the device's special cases of sends move onto `merk.send`.

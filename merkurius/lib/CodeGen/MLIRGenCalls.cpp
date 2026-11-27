@@ -161,6 +161,193 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
     return;
   }
   Called(goal, callee, arguments, body);
+  FormReceive(callee, arguments, body);
+}
+
+namespace {
+// A value as it was before Coerce made a word of it, or a value of another
+// type from that word.
+mlir::Value Uncoerced(mlir::Value value) {
+  while (mlir::Operation * op{value.getDefiningOp()}) {
+    if (auto fromWord{mlir::dyn_cast<merk::FromWordOp>(op)}) {
+      value = fromWord.getWord();
+    } else if (auto toWord{mlir::dyn_cast<merk::ToWordOp>(op)}) {
+      value = toWord.getValue();
+    } else {
+      break;
+    }
+  }
+  return value;
+}
+} // namespace
+
+// Desugaring makes a receive goal a selector of a case for each mailbox,
+// the last added outermost, each process.selecting_matching(Mailbox,
+// Matcher, Rest) down to process.new_selector, then a call of
+// process.receive_goal (desugar.cpp, DesugarReceive). Here, that call, just
+// generated, becomes a merk.receive of the cases, first written first, each
+// with its mailbox, its messages' type_info, and its matcher's procedure
+// with the values the closure captures, in the types the procedure takes.
+// The selector and the closures go: lowering makes them again where it
+// calls the library. Its result has the goal's type, not the library's
+// receive_result(T0), from which lowering knows its selectors', which the
+// collector needs. A call of receive_goal that is not of that shape, all
+// in one block, stays a call.
+void MerkGenerator::FormReceive(const Procedure &callee,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
+  const semantics::Symbol &symbol{*callee.symbol};
+  if (failed_ || Terminated() || symbol.module != "process" ||
+      symbol.name != "receive_goal" || symbol.arity != 5) {
+    return;
+  }
+  mlir::Value result{values_.lookup(arguments[2])};
+  if (!result) {
+    return;
+  }
+  auto call{Uncoerced(result).getDefiningOp<merk::CallOp>()};
+  if (!call || !call.getCallee().starts_with("process.receive_goal") ||
+      call.getInputs().size() != 3 || call->getNumResults() != 1) {
+    return;
+  }
+  mlir::Block *block{call->getBlock()};
+  struct Case {
+    mlir::Value mailbox;
+    mlir::Value info;
+    merk::ClosureOp closure;
+    merk::ProcOp matcher;
+  };
+  llvm::SmallVector<Case> cases;
+  mlir::Value selector{call.getInputs()[1]};
+  for (mlir::Value at{selector};;) {
+    auto link{Uncoerced(at).getDefiningOp<merk::CallOp>()};
+    if (!link || link->getBlock() != block) {
+      return;
+    }
+    if (link.getCallee().starts_with("process.new_selector") &&
+        link.getInputs().size() == 1) {
+      break;
+    }
+    if (!link.getCallee().starts_with("process.selecting_matching") ||
+        link.getInputs().size() != 5) {
+      return;
+    }
+    auto closure{
+        Uncoerced(link.getInputs()[3]).getDefiningOp<merk::ClosureOp>()};
+    if (!closure || closure->getBlock() != block) {
+      return;
+    }
+    auto lambda{entryLambdas_.find(closure.getEntry())};
+    if (lambda == entryLambdas_.end()) {
+      return;
+    }
+    auto matcher{module_.lookupSymbol<merk::ProcOp>(lambda->second)};
+    if (!matcher ||
+        matcher.getFunctionType().getNumInputs() !=
+            closure.getCaptured().size() + 1) {
+      return;
+    }
+    cases.push_back(
+        {link.getInputs()[2], link.getInputs()[0], closure, matcher});
+    at = link.getInputs()[4];
+  }
+  if (cases.empty()) {
+    return;
+  }
+  std::reverse(cases.begin(), cases.end());
+  mlir::Location loc{call.getLoc()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPoint(call);
+  llvm::SmallVector<mlir::Value> mailboxes, infos, captured;
+  llvm::SmallVector<mlir::Attribute> matchers, captures;
+  llvm::SmallVector<std::int64_t> counts;
+  bool layouts{true};
+  for (Case &c : cases) {
+    // The mailbox as the goal had it, not as the library's call takes it.
+    mlir::Value mailbox{Uncoerced(c.mailbox)};
+    mailboxes.push_back(
+        mlir::isa<merk::TermType>(mailbox.getType()) ? mailbox : c.mailbox);
+    infos.push_back(c.info);
+    mlir::FunctionType type{c.matcher.getFunctionType()};
+    for (auto [i, word] : llvm::enumerate(c.closure.getCaptured())) {
+      captured.push_back(Coerce(word, type.getInput(i), loc));
+    }
+    matchers.push_back(
+        mlir::FlatSymbolRefAttr::get(&context_, c.matcher.getSymName()));
+    counts.push_back(static_cast<std::int64_t>(c.closure.getCaptured().size()));
+    if (std::optional<mlir::ArrayAttr> layout{c.closure.getCaptures()}) {
+      captures.push_back(*layout);
+    } else {
+      layouts = false;
+    }
+  }
+  mlir::Type resultType{call.getResult(0).getType()};
+  if (std::optional<Represented> represented{
+          Represent(body.vars[arguments[2]].type)};
+      represented && mlir::isa<merk::TermType>(represented->type)) {
+    resultType = represented->type;
+  }
+  auto receive{merk::ReceiveOp::create(builder_, loc, resultType,
+      call.getInputs()[2], call.getInputs()[0], mailboxes, infos, captured,
+      builder_.getArrayAttr(matchers), builder_.getDenseI64ArrayAttr(counts),
+      layouts ? builder_.getArrayAttr(captures) : mlir::ArrayAttr{})};
+  mlir::Value old{call.getResult(0)};
+  mlir::Value got{Coerce(receive.getResult(), old.getType(), loc)};
+  old.replaceAllUsesWith(got);
+  for (auto &[var, value] : values_) {
+    if (value == old) {
+      value = got;
+    }
+  }
+  // The selector's calls and closures that nothing else uses, and the
+  // coercions between them. They have no effects. A coercion that is a
+  // variable's value, as a mailbox's may be, stays, unless it is of the
+  // selector or a closure.
+  llvm::DenseSet<mlir::Value> held;
+  for (const auto &[var, value] : values_) {
+    held.insert(value);
+  }
+  auto isSelectorPart{[](mlir::Operation *op) {
+    if (auto link{mlir::dyn_cast_or_null<merk::CallOp>(op)}) {
+      return link.getCallee().starts_with("process.selecting_matching") ||
+          link.getCallee().starts_with("process.new_selector");
+    }
+    return mlir::isa_and_nonnull<merk::ClosureOp>(op);
+  }};
+  llvm::SmallVector<mlir::Operation *> work{call};
+  llvm::DenseSet<mlir::Value> erased;
+  llvm::DenseSet<mlir::Operation *> erasedOps;
+  while (!work.empty()) {
+    mlir::Operation *op{work.pop_back_val()};
+    if (erasedOps.contains(op) || !op->use_empty()) {
+      continue;
+    }
+    llvm::SmallVector<mlir::Value> operands{op->getOperands()};
+    erased.insert(op->result_begin(), op->result_end());
+    erasedOps.insert(op);
+    op->erase();
+    for (mlir::Value operand : operands) {
+      mlir::Operation *from{operand.getDefiningOp()};
+      if (!from || from->getBlock() != block) {
+        continue;
+      }
+      if (isSelectorPart(from) ||
+          (mlir::isa<merk::ToWordOp, merk::FromWordOp>(from) &&
+              (!held.contains(operand) ||
+                  isSelectorPart(Uncoerced(operand).getDefiningOp())))) {
+        work.push_back(from);
+      }
+    }
+  }
+  // No variable keeps a value of what went.
+  llvm::SmallVector<BodyVar> gone;
+  for (const auto &[var, value] : values_) {
+    if (erased.contains(value)) {
+      gone.push_back(var);
+    }
+  }
+  for (BodyVar var : gone) {
+    values_.erase(var);
+  }
 }
 
 void MerkGenerator::PassTypeInfo(const semantics::TypeInfo &info,
@@ -634,6 +821,7 @@ merk::ProcOp MerkGenerator::ClosureEntry(merk::ProcOp proc, unsigned captured,
       proc.getDeterminism())};
   entry.setPrivate();
   entries_[name] = entry;
+  entryLambdas_[name] = proc.getSymName().str();
   mlir::Block *block{entry.addEntryBlock()};
   builder_.setInsertionPointToStart(block);
   mlir::Value closure{block->getArgument(0)};

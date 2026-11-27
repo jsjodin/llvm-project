@@ -1966,6 +1966,14 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
     SpecializeKnownClosures(module_);
   }
   MarkRegionsForTeamMailboxes();
+  // The closure entries of lambda expressions that only merk.receives' cases
+  // were made of, which nothing names (FormReceive).
+  for (const auto &entry : entryLambdas_) {
+    merk::ProcOp proc{entries_.lookup(entry.getKey())};
+    if (proc && mlir::SymbolTable::symbolKnownUseEmpty(proc, *owned)) {
+      proc.erase();
+    }
+  }
   // The program's entry: the main module's main(di, uo).
   for (const ProcedureBody &body : determinism_.bodies()) {
     const semantics::Symbol &symbol{*body.procedure->symbol};
