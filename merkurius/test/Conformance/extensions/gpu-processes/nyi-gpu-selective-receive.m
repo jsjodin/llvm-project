@@ -1,8 +1,8 @@
 % DESIGN: GPU processes / The device runtime
 % A receive with a selector other than any, which takes the oldest message
-% the selector accepts, needs a closure, which a GPU process cannot make
-% or call yet: reported at the selector, with a note for each call back to
-% the module's own code.
+% the selector accepts, needs a loop over the mailbox's messages that calls
+% the selector, which a GPU process cannot make yet: reported at the
+% receive.
 % ORACLE: none
 %
 % REQUIRES: amdgpu-registered-target, libomp
@@ -22,11 +22,7 @@
 
 taker(Report, Self, !IO) :-
     receive(Self, is_urgent, infinity, R, !IO),
-% CHECK: nyi-gpu-selective-receive.m:[[@LINE-1]]:19: error: 'merk.closure' op makes a closure, which cannot be done in a GPU process yet
-% CHECK: process.m:{{[0-9]+}}:{{[0-9]+}}: error: 'merk.call_closure' op calls a closure, which cannot be done in a GPU process yet
-% CHECK: nyi-gpu-selective-receive.m:[[@LINE-3]]:5: note: called by nyi_gpu_selective_receive.taker_4_0 here: process.receive_6_0
-% CHECK: process.m:{{[0-9]+}}:{{[0-9]+}}: error: 'merk.call_closure' op calls a closure, which cannot be done in a GPU process yet
-% CHECK: nyi-gpu-selective-receive.m:[[@LINE-5]]:5: note: called by nyi_gpu_selective_receive.taker_4_0 here: process.receive_6_0
+% CHECK: nyi-gpu-selective-receive.m:[[@LINE-1]]:5: error: 'merk.receive' op receives with a selector other than any, which cannot be done in a GPU process yet
     (
         R = message(N),
         send(Report, N, !IO)

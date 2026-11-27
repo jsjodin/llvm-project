@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the receive-goal benchmark and runs its cases (README.md): one
 # mailbox with every message selected, messages that no case selects in
-# front of those it does, and two mailboxes.
+# front of those it does, and two mailboxes; then receive/5's, with any,
+# with a selector, and with messages it rejects in front.
 #
 #   run.sh [build-dir] [program]
 #
@@ -26,3 +27,7 @@ fi
 "$program" two "$n"
 "$program" skip 100 "$((n / 10))"
 "$program" skip 1000 "$((n / 100))"
+"$program" any "$n"
+"$program" selector "$n"
+"$program" selector-skip 100 "$((n / 10))"
+"$program" selector-skip 1000 "$((n / 100))"

@@ -37,6 +37,9 @@
 // RUN: not merkc -fc1 -emit-merk %t/receive-counts.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-COUNTS
 // RUN: not merkc -fc1 -emit-merk %t/receive-matcher.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-MATCHER
 // RUN: not merkc -fc1 -emit-merk %t/receive-captured.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-CAPTURED
+// RUN: not merkc -fc1 -emit-merk %t/receive-unit-count.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-UNIT-COUNT
+// RUN: not merkc -fc1 -emit-merk %t/receive-unit-closure.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-UNIT-CLOSURE
+// RUN: not merkc -fc1 -emit-merk %t/receive-plain-cases.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-PLAIN-CASES
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -416,7 +419,7 @@ module {
 }
 
 //--- receive-matcher.mlir
-// RECEIVE-MATCHER: receive-matcher.mlir:[[@LINE+6]]:10: error: 'merk.receive' op names @m, which does not take its captured values and a message, giving a word, semidet
+// RECEIVE-MATCHER: receive-matcher.mlir:[[@LINE+6]]:10: error: 'merk.receive' op names @m, which does not take its captured values and a message, giving one value, semidet, a word for a receive goal
 module {
   merk.proc private @m(%w: !merk.word) -> !merk.word attributes {determinism = #merk.determinism<det>} {
     merk.succeed %w : !merk.word
@@ -436,5 +439,32 @@ module {
   merk.proc @p(%t: !merk.term<"process.timeout">, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">, %c: i64) -> !merk.term<"process.receive_result(T0)"> attributes {determinism = #merk.determinism<det>} {
     %0 = merk.receive %t with %i matchers [@m] counts [1] on(%b : !merk.term<"process.mailbox(int)">) infos(%i) captured(%c : i64) : !merk.term<"process.timeout"> -> !merk.term<"process.receive_result(T0)">
     merk.succeed %0 : !merk.term<"process.receive_result(T0)">
+  }
+}
+
+//--- receive-unit-count.mlir
+// RECEIVE-UNIT-COUNT: receive-unit-count.mlir:[[@LINE+3]]:10: error: 'merk.receive' op needs a closure, its one captured value, for each matcher that is a unit
+module {
+  merk.proc @p(%t: !merk.term<"process.timeout">, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) -> !merk.term<"process.received(int)"> attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.receive %t with %i plain matchers [unit] counts [0] on(%b : !merk.term<"process.mailbox(int)">) infos(%i) : !merk.term<"process.timeout"> -> !merk.term<"process.received(int)">
+    merk.succeed %0 : !merk.term<"process.received(int)">
+  }
+}
+
+//--- receive-unit-closure.mlir
+// RECEIVE-UNIT-CLOSURE: receive-unit-closure.mlir:[[@LINE+3]]:10: error: 'merk.receive' op needs a closure for a matcher that is a unit, not a value of type 'i64'
+module {
+  merk.proc @p(%t: !merk.term<"process.timeout">, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">, %c: i64) -> !merk.term<"process.received(int)"> attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.receive %t with %i plain matchers [unit] counts [1] on(%b : !merk.term<"process.mailbox(int)">) infos(%i) captured(%c : i64) : !merk.term<"process.timeout"> -> !merk.term<"process.received(int)">
+    merk.succeed %0 : !merk.term<"process.received(int)">
+  }
+}
+
+//--- receive-plain-cases.mlir
+// RECEIVE-PLAIN-CASES: receive-plain-cases.mlir:[[@LINE+3]]:10: error: 'merk.receive' op is plain, of one mailbox, but has 2 cases
+module {
+  merk.proc @p(%t: !merk.term<"process.timeout">, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">, %c: !merk.closure) -> !merk.term<"process.received(int)"> attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.receive %t with %i plain matchers [unit, unit] counts [1, 1] on(%b, %b : !merk.term<"process.mailbox(int)">, !merk.term<"process.mailbox(int)">) infos(%i, %i) captured(%c, %c : !merk.closure, !merk.closure) : !merk.term<"process.timeout"> -> !merk.term<"process.received(int)">
+    merk.succeed %0 : !merk.term<"process.received(int)">
   }
 }

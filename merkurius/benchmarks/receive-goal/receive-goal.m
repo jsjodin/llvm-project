@@ -1,11 +1,17 @@
-% Throughput of receive goals between the host's processes: how long a
-% message takes, from main's first send to the consumer's answer, over
+% Throughput of receive goals, and of receive/5, between the host's
+% processes: how long a message takes, from main's first send to the consumer's answer, over
 % many messages (README.md).
 %
 %   receive-goal plain N     one mailbox, every message selected
 %   receive-goal skip K N    K messages that no case selects wait in front
 %                            of the N, so each receive looks past them
 %   receive-goal two N       two mailboxes, the messages alternating
+%   receive-goal any N       receive/5 with any, every message taken
+%   receive-goal selector N  receive/5 with a selector, every message
+%                            selected
+%   receive-goal selector-skip K N
+%                            receive/5 with a selector, K messages that it
+%                            rejects in front of the N
 %
 % Each prints the messages, their sum, which checks that every one was
 % taken once, and the nanoseconds a message.
@@ -15,7 +21,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module float, int, list, process, string.
+:- import_module float, int, list, maybe, process, string.
 
 :- type job
     --->    job(int)
@@ -68,6 +74,52 @@ consume_two(Report, Self, Other, Sum, !IO) :-
             send(Report, sum(Sum), !IO)
     ).
 
+    % Takes jobs from its own mailbox with receive/5 until stop, with any
+    % or with a selector that leaves noise queued.
+:- process receiver(mailbox(report), how) receives job.
+
+:- type how
+    --->    with_any
+    ;       with_selector.
+
+receiver(Report, How, Self, !IO) :-
+    (
+        How = with_any,
+        receive_any(Report, Self, 0, !IO)
+    ;
+        How = with_selector,
+        receive_work(Report, Self, 0, !IO)
+    ).
+
+:- pred receive_any(mailbox(report)::in, mailbox(job)::in, int::in,
+    io::di, io::uo) is det.
+
+receive_any(Report, Self, Sum, !IO) :-
+    receive(Self, any, infinity, Got, !IO),
+    ( if Got = message(job(I)) then
+        receive_any(Report, Self, Sum + I, !IO)
+    else if Got = message(noise(_)) then
+        receive_any(Report, Self, Sum, !IO)
+    else
+        send(Report, sum(Sum), !IO)
+    ).
+
+:- pred work(job::in, maybe(int)::out) is semidet.
+
+work(job(I), yes(I)).
+work(stop, no).
+
+:- pred receive_work(mailbox(report)::in, mailbox(job)::in, int::in,
+    io::di, io::uo) is det.
+
+receive_work(Report, Self, Sum, !IO) :-
+    receive(Self, work, infinity, Got, !IO),
+    ( if Got = message(yes(I)) then
+        receive_work(Report, Self, Sum + I, !IO)
+    else
+        send(Report, sum(Sum), !IO)
+    ).
+
 main(!IO) :-
     io.command_line_arguments(Args, !IO),
     new_mailbox(Report, !IO),
@@ -105,9 +157,38 @@ main(!IO) :-
         else
             io.write_string("no mailbox from the consumer\n", !IO)
         )
+    else if
+        Args = ["any", NS],
+        string.to_int(NS, N)
+    then
+        spawn(receiver(Report, with_any), Self, !IO),
+        now(T0, !IO),
+        send_jobs(Self, Self, 1, N, !IO),
+        send(Self, stop, !IO),
+        finish("any", N, Report, T0, !IO)
+    else if
+        Args = ["selector", NS],
+        string.to_int(NS, N)
+    then
+        spawn(receiver(Report, with_selector), Self, !IO),
+        now(T0, !IO),
+        send_jobs(Self, Self, 1, N, !IO),
+        send(Self, stop, !IO),
+        finish("selector", N, Report, T0, !IO)
+    else if
+        Args = ["selector-skip", KS, NS],
+        string.to_int(KS, K),
+        string.to_int(NS, N)
+    then
+        spawn(receiver(Report, with_selector), Self, !IO),
+        send_noise(Self, 1, K, !IO),
+        now(T0, !IO),
+        send_jobs(Self, Self, 1, N, !IO),
+        send(Self, stop, !IO),
+        finish("selector-skip " ++ KS, N, Report, T0, !IO)
     else
-        io.write_string("usage: receive-goal plain N | skip K N | two N\n",
-            !IO)
+        io.write_string("usage: receive-goal plain N | skip K N | two N | " ++
+            "any N | selector N | selector-skip K N\n", !IO)
     ).
 
     % Sends job(I) to job(N), the odd ones to A and the even ones to B.

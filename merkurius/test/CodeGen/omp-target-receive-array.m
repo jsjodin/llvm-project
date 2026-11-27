@@ -90,7 +90,7 @@ main(!IO) :-
     ),
 % MERK-LABEL: merk.proc @omp_target_receive_array.main_2_0()
 % MERK: omp.target
-% MERK: merk.foreign_call @merk_device_receive_array(
+% MERK: merk.receive {{.*}} plain matchers [@process.any_2_0] {{.*}}merk.ring_kinds = array<i64: 1>
     receive(Out, any, after(0), R1, !IO),
     receive(Out, any, after(0), R2, !IO),
     io.print_line({R1, R2}, !IO),

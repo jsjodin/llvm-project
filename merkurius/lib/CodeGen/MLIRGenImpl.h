@@ -1055,6 +1055,11 @@ private:
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   bool FormReceiveOp(
       const Body &, llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  // The call of process.receive/5, just generated, as a plain merk.receive.
+  void FormPlainReceive(
+      llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  void ReplaceReceiveCall(
+      merk::CallOp call, mlir::Value result, mlir::Location loc);
   // process.team_mailbox(T, Box, !IO) in the device's compile: a call of the
   // device's runtime, for the message type's key (docs/INPROGRESS.md,
   // Processes as teams, step 2).

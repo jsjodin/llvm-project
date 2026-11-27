@@ -279,10 +279,12 @@
 
     % For a receive goal on the host, which the compiler makes a loop over
     % the runtime's candidates (merk_select_next): the error once every
-    % mailbox is closed or another node's, as receive/4 reports it; and the
-    % message that what a monitor left becomes, by its function, which
-    % takes the candidate's place.
+    % mailbox is closed or another node's, as receive/4 reports it, and for
+    % receive/5's one mailbox, as receive/5 reports it; and the message
+    % that what a monitor left becomes, by its function, which takes the
+    % candidate's place.
 :- pred select_closed is erroneous.
+:- pred select_mailbox_closed is erroneous.
 :- pred select_resolve(int::in, M::out, io::di, io::uo) is det.
 
     % Where a process runs: this node's host, or one of its GPUs, by its
@@ -601,6 +603,9 @@ receive_closed :-
 
 select_closed :-
     error("receive: every mailbox is closed or another node's").
+
+select_mailbox_closed :-
+    error("receive: the mailbox is closed or another node's").
 
 select_resolve(State, Message, !IO) :-
     select_down(State, Kind, Function, Monitor, Text, !IO),

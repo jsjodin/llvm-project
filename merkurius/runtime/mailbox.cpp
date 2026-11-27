@@ -2380,6 +2380,61 @@ extern "C" void merk_select_take(std::uint64_t state) {
   Unlock(mailbox);
 }
 
+// A receive of one mailbox's oldest message, whatever it is, as receive/5
+// with any makes: the mailbox becomes the state's one case, and its oldest
+// message leaves it, with its value in the state's first word: 0. Anything
+// else, the deadline, the mailbox closed or what a monitor left, is for
+// merk_select_next, which looks again: -1. A process waits as
+// merk_mailbox_wait has it, with the mailbox's lock held until its waitLock
+// is, so that it does as little as it can between a send and blocking; a
+// process just woken by that send is on the sender's local queue, which a
+// spinning worker would otherwise steal (process.cpp, Block).
+extern "C" std::int64_t merk_select_first(
+    std::uint64_t state, const Word *handle) {
+  merk_select_case(state, handle);
+  auto *select{reinterpret_cast<HostSelect *>(state)};
+  SelectCase &group{select->cases[0]};
+  bool suspends{CanSuspend()};
+  for (;;) {
+    std::int64_t seen{suspends ? 0 : merk_mailbox_arrivals()};
+    Mailbox *mailbox{Find(group.handle)};
+    if (!mailbox) {
+      return -1;
+    }
+    CheckOwner(mailbox);
+    if (Message *head{mailbox->head}) {
+      if (head->down) {
+        Unlock(mailbox);
+        return -1;
+      }
+      GiveToReader(head);
+      select->message = head->value;
+      mailbox->head = head->next;
+      if (mailbox->tail == &head->next) {
+        mailbox->tail = &mailbox->head;
+      }
+      --mailbox->count;
+      Unpin(head);
+      Unlock(mailbox);
+      return 0;
+    }
+    if (select->deadline >= 0 && Now() >= select->deadline) {
+      Unlock(mailbox);
+      return -1;
+    }
+    if (suspends) {
+      pthread_mutex_lock(&CurrentProcess()->waitLock);
+      Unlock(mailbox);
+      Block(select->deadline);
+      continue;
+    }
+    Unlock(mailbox);
+    if (merk_mailbox_wait_arrival(seen, select->deadline) == 0) {
+      return -1;
+    }
+  }
+}
+
 // What a monitor left as the candidate: as merk_mailbox_read gives it.
 extern "C" std::int64_t merk_select_down(std::uint64_t state, Word *function,
     std::int64_t *monitor, const char **text) {

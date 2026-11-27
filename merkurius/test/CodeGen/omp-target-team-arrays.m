@@ -286,7 +286,7 @@ collect(Box, !Got, !IO) :-
 % DEVICE-LABEL: merk.proc private @omp_target_team_arrays.share_5_0(
 % DEVICE: %[[MINE:.*]] = merk.foreign_call @merk_device_team_mailbox(%{{.*}}, %{{.*}}) : (i64, i64) -> !llvm.ptr
 % DEVICE-NEXT: builtin.unrealized_conversion_cast %[[MINE]] : !llvm.ptr to !merk.term<"process.mailbox(array.array(int))">
-% DEVICE: merk.foreign_call @merk_device_receive_array(
+% DEVICE: merk.receive {{.*}} plain matchers [@process.any_2_0] {{.*}}merk.ring_kinds = array<i64: 1>
 % DEVICE: merk.foreign_call @merk_device_send_array(
 % DEVICE-NOT: process.team_mailbox
 

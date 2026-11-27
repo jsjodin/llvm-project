@@ -9507,9 +9507,39 @@ runtime has no such check now.
      no closures and the runtime keeping a cursor per mailbox. Tests:
      test/CodeGen/receive-goal.m's `LLVM` checks, receive-goal-host.m,
      and the benchmark benchmarks/receive-goal.
-   - *(d) Planned 2026-11-27:* every one-mailbox receive, `receive/5`,
-     as a `merk.receive` too, with a case's matcher a procedure or a
-     closure; see "Plan for (d)" below.
+   - *(d) Built 2026-11-27:* every `receive/5` is a plain `merk.receive`
+     of one case (`plain`, giving `received(R)`), whose matcher is a known
+     procedure, with its captured values, or a unit for a closure, the
+     one captured value (MLIRGenCalls.cpp, `FormPlainReceive`). Lowering:
+     - `any` with its ring kind, from `ReceiveInTarget`, is the device
+       runtime's `merk_device_receive*` call in any compile, first, before
+       omp-function-filter, which would remove a receive that names a
+       host procedure (`ExpandDirectReceives`); the registers of every
+       `-gpu.test`, SERGHEI's port and pingpong are unchanged.
+     - On the host, every other is the loop of (c), where a closure's
+       case calls the closure and `any`'s calls nothing. `any` alone is
+       one call, `merk_select_first`, which takes the head or leaves the
+       rest (timeout, closed, what a monitor left) to the loop.
+     - On a device, any other is reported where it would run, before the
+       filter (`RejectDeviceReceives`); in code a device does not run it
+       is the library's call again (`ExpandPlainToLibrary`).
+     A polymorphic receive's message stays its word, noted for the
+     collector by R's type_info, as open.receive's is. Tests:
+     test/CodeGen/receive-plain.m, invalid.mlir's `RECEIVE-UNIT-*` and
+     `RECEIVE-PLAIN-CASES`, receive.mlir's plain round trip, and
+     nyi-gpu-selective-receive.m. Measured with benchmarks/receive-goal's
+     receive/5 cases and pingpong (design document, "Plain receives on
+     the host"). Found on the way: pingpong's echo thread kept its
+     mailboxes' handle cells, on the collector's heap, which a collection
+     freed; fixed, with a run in pingpong.test at every allocation.
+   - *(e) Next, decided with the user 2026-11-27:* a process about to
+     block spins a little first, while no process anywhere is runnable,
+     up to `MERK_SPIN_MICROSECONDS` and the deadline, in every host wait:
+     `merk_select_first`, the loop's wait and `merk_mailbox_wait`. (d)'s
+     faster receive blocks before a partner on another worker answers, and
+     each block is a futex sleep and wake: pingpong's cpu-process with 48
+     workers went from 3.9 to 4.4 µs a round, and a spin in
+     `merk_select_first` alone made it 1.7 µs, with nearly no sleeps.
 
    Decided with the user:
    - *Each case's matcher is a known procedure,* named by symbol, with
@@ -9699,8 +9729,10 @@ runtime has no such check now.
 
    Measurements: the design document's "Receive goals on the host".
 
-   Plan for (d), decided with the user 2026-11-27: one operation for
-   every receive. After (c), only the receive goal is a `merk.receive`.
+   Plan for (d), decided with the user 2026-11-27, built as planned but
+   for the result: rather than naming the result's two constructors, the
+   operation has a `plain` flag, as there are only the two results. One
+   operation for every receive. After (c), only the receive goal is a `merk.receive`.
    `receive(Box, Selector, Timeout, Result, !IO)`, the receive that
    SERGHEI's port, mc-transport and UTS call (`any` at 27 sites,
    `counts_only` at one), is still the library's `scan` on the host, and

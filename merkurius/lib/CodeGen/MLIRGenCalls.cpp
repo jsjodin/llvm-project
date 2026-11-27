@@ -164,6 +164,10 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
   FormReceive(goal, callee, arguments, body);
 }
 
+// process.any's procedure, a plain receive's matcher that takes every
+// message (Lowering.cpp, LowerSelect).
+constexpr llvm::StringLiteral kAnyMatcher{"process.any_2_0"};
+
 namespace {
 // A value as it was before Coerce made a word of it, or a value of another
 // type from that word.
@@ -206,8 +210,14 @@ bool IsSelectorPart(mlir::Operation *op) {
 void MerkGenerator::FormReceive(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
-  if (failed_ || Terminated() || symbol.module != "process" ||
-      symbol.name != "receive_goal" || symbol.arity != 5) {
+  if (failed_ || Terminated() || symbol.module != "process") {
+    return;
+  }
+  if (symbol.name == "receive" && symbol.arity == 6) {
+    FormPlainReceive(arguments, body);
+    return;
+  }
+  if (symbol.name != "receive_goal" || symbol.arity != 5) {
     return;
   }
   // A call that stays is the library's, which a GPU cannot run, as its
@@ -365,18 +375,26 @@ bool MerkGenerator::FormReceiveOp(const Body &goal,
                                  "receive goal"));
     }
   }
+  ReplaceReceiveCall(call, receive.getResult(), loc);
+  return true;
+}
+
+// A receive's call, replaced by its merk.receive's result: the call, the
+// selector's calls and closures that nothing else uses, and the coercions
+// between them go. They have no effects. A coercion that is a variable's
+// value, as a mailbox's may be, stays, unless it is of the selector or a
+// closure.
+void MerkGenerator::ReplaceReceiveCall(
+    merk::CallOp call, mlir::Value result, mlir::Location loc) {
+  mlir::Block *block{call->getBlock()};
   mlir::Value old{call.getResult(0)};
-  mlir::Value got{Coerce(receive.getResult(), old.getType(), loc)};
+  mlir::Value got{Coerce(result, old.getType(), loc)};
   old.replaceAllUsesWith(got);
   for (auto &[var, value] : values_) {
     if (value == old) {
       value = got;
     }
   }
-  // The selector's calls and closures that nothing else uses, and the
-  // coercions between them. They have no effects. A coercion that is a
-  // variable's value, as a mailbox's may be, stays, unless it is of the
-  // selector or a closure.
   llvm::DenseSet<mlir::Value> held;
   for (const auto &[var, value] : values_) {
     held.insert(value);
@@ -416,7 +434,93 @@ bool MerkGenerator::FormReceiveOp(const Body &goal,
   for (BodyVar var : gone) {
     values_.erase(var);
   }
-  return true;
+}
+
+// A call of process.receive/5, just generated, that ReceiveInTarget did
+// not make the device's (docs/INPROGRESS.md, Concurrency in merk, step 1
+// (d)): a plain merk.receive of one case. A selector that is a closure of
+// a known procedure, a named predicate or a lambda expression, as `any`
+// is, makes that procedure the matcher, with the closure's captured
+// values; any other selector is a value, and the case calls the closure.
+// On a device, only receive/5 with `any` is received so far, which
+// ReceiveInTarget makes; any other says why, in merk.not_on_device.
+void MerkGenerator::FormPlainReceive(
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
+  mlir::Value result{values_.lookup(arguments[3])};
+  if (!result) {
+    return;
+  }
+  auto call{Uncoerced(result).getDefiningOp<merk::CallOp>()};
+  if (!call || !call.getCallee().starts_with("process.receive_6_0") ||
+      call.getInputs().size() != 5 || call->getNumResults() != 1) {
+    return;
+  }
+  mlir::Location loc{call.getLoc()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPoint(call);
+  mlir::Value selector{call.getInputs()[3]};
+  llvm::SmallVector<mlir::Value> captured;
+  mlir::Attribute matcher{mlir::UnitAttr::get(&context_)};
+  auto closure{Uncoerced(selector).getDefiningOp<merk::ClosureOp>()};
+  merk::ProcOp known;
+  if (closure && closure->getBlock() == call->getBlock()) {
+    auto lambda{entryLambdas_.find(closure.getEntry())};
+    if (lambda != entryLambdas_.end()) {
+      known = module_.lookupSymbol<merk::ProcOp>(lambda->second);
+    }
+    if (known &&
+        (known.getDeterminism() != merk::Determinism::Semidet ||
+            known.getFunctionType().getNumInputs() !=
+                closure.getCaptured().size() + 1 ||
+            known.getFunctionType().getNumResults() != 1)) {
+      known = nullptr;
+    }
+  }
+  if (known) {
+    mlir::FunctionType type{known.getFunctionType()};
+    for (auto [i, word] : llvm::enumerate(closure.getCaptured())) {
+      captured.push_back(Coerce(word, type.getInput(i), loc));
+    }
+    matcher = mlir::FlatSymbolRefAttr::get(&context_, known.getSymName());
+  } else {
+    captured.push_back(selector);
+  }
+  mlir::Value mailbox{Uncoerced(call.getInputs()[2])};
+  if (!mlir::isa<merk::TermType>(mailbox.getType())) {
+    mailbox = call.getInputs()[2];
+  }
+  mlir::Type resultType{call.getResult(0).getType()};
+  const semantics::Type *received{body.vars[arguments[3]].type};
+  if (std::optional<Represented> represented{Represent(received)};
+      represented && mlir::isa<merk::TermType>(represented->type)) {
+    resultType = represented->type;
+  }
+  auto receive{merk::ReceiveOp::create(builder_, loc, resultType,
+      call.getInputs()[4], call.getInputs()[1], mlir::ValueRange{mailbox},
+      mlir::ValueRange{call.getInputs()[0]}, captured,
+      builder_.getArrayAttr({matcher}),
+      builder_.getDenseI64ArrayAttr(
+          {static_cast<std::int64_t>(captured.size())}),
+      known && closure.getCaptures()
+          ? builder_.getArrayAttr({*closure.getCaptures()})
+          : mlir::ArrayAttr{},
+      /*plain=*/true)};
+  if (received->kind == semantics::TypeKind::Named &&
+      received->arguments.size() == 1) {
+    if (std::optional<Represented> message{
+            Represent(received->arguments.front())}) {
+      receive->setAttr("merk.arms_type", mlir::TypeAttr::get(message->type));
+    }
+  }
+  if (target_.options().IsDevice()) {
+    bool any{known && known.getSymName() == kAnyMatcher};
+    receive->setAttr("merk.not_on_device",
+        builder_.getStringAttr(any ? "receives messages of a type that a "
+                                     "device does not receive"
+                                   : "receives with a selector other than "
+                                     "any"));
+  }
+  ReplaceReceiveCall(call, receive.getResult(), loc);
 }
 
 void MerkGenerator::PassTypeInfo(const semantics::TypeInfo &info,

@@ -1,6 +1,7 @@
 The receive-goal benchmark of benchmarks/receive-goal, on few messages, so
 that it keeps building and every message is taken once: one mailbox, two,
-and messages that no case selects in front.
+and messages that no case selects in front; and receive/5 with any, with a
+selector, and with messages it rejects in front.
 
 RUN: merkc -O2 -freceive-goal -fprocess-declarations -Wno-unselected-message %S/../../benchmarks/receive-goal/receive-goal.m -o %t
 RUN: %t plain 1000 | FileCheck %s --check-prefix=PLAIN
@@ -8,4 +9,10 @@ RUN: %t two 1000 | FileCheck %s --check-prefix=TWO
 RUN: %t skip 100 1000 | FileCheck %s --check-prefix=SKIP
 PLAIN: plain {{ *}}1000 messages, sum 500500, {{.*}} ns a message
 TWO: two {{ *}}1000 messages, sum 500500, {{.*}} ns a message
+RUN: %t any 1000 | FileCheck %s --check-prefix=ANY
+RUN: %t selector 1000 | FileCheck %s --check-prefix=SELECTOR
+RUN: %t selector-skip 100 1000 | FileCheck %s --check-prefix=SELECTOR-SKIP
 SKIP: skip 100 {{ *}}1000 messages, sum 500500, {{.*}} ns a message
+ANY: any {{ *}}1000 messages, sum 500500, {{.*}} ns a message
+SELECTOR: selector {{ *}}1000 messages, sum 500500, {{.*}} ns a message
+SELECTOR-SKIP: selector-skip 100 {{ *}}1000 messages, sum 500500, {{.*}} ns a message

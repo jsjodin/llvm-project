@@ -3,9 +3,10 @@
 % then its receive with a timeout of 20 milliseconds finds nothing
 % (docs/INPROGRESS.md, The device's side of the first slice, step 3). In
 % the region, and in every procedure of the device's compile, which all run
-% on the device, receive(Mailbox, any, Timeout, Result, !IO) is a call of
-% the runtime's merk_device_receive with the handle's cell and the
-% timeout's milliseconds, which succeeds with the oldest message as a word.
+% on the device, receive(Mailbox, any, Timeout, Result, !IO) is a plain
+% merk.receive with its ring kind, which lowering makes a call of the
+% runtime's merk_device_receive with the handle's cell and the timeout's
+% milliseconds, which succeeds with the oldest message as a word.
 % On a GPU, merk_device_receive is the device's runtime's, which reads the
 % mailbox's ring in host-pinned memory, sleeping between looks, until
 % the timeout passes by the device's clock; on the host, it is merkrt's,
@@ -56,27 +57,7 @@ main(!IO) :-
 % MERK-LABEL: merk.proc @omp_target_receive.main_2_0()
 % MERK: omp.target
 % MERK-NOT: merk.closure
-% MERK: %[[MS:.*]] = merk.switch %{{.*}} : !merk.term<"process.timeout"> -> i64 cases {{\[\[}}#merk.functor<"infinity", 0>], [#merk.functor<"after", 1>]] {
-% MERK-NEXT: %[[INF:.*]] = arith.constant -1 : i64
-% MERK-NEXT: merk.yield %[[INF]] : i64
-% MERK-NEXT: }, {
-% MERK-NEXT: %[[N:.*]] = merk.deconstruct #merk.functor<"after", 1> %{{.*}} : !merk.term<"process.timeout"> -> i64
-% MERK-NEXT: %[[ZERO:.*]] = arith.constant 0 : i64
-% MERK-NEXT: %[[MAX:.*]] = arith.maxsi %[[N]], %[[ZERO]] : i64
-% MERK-NEXT: merk.yield %[[MAX]] : i64
-% MERK-NEXT: }
-% MERK-NEXT: %[[GOT:.*]]:2 = merk.foreign_call @merk_device_receive(%{{.*}}, %[[MS]]) can_fail : (!merk.term<"process.mailbox(int)">, i64) -> (i1, !merk.word)
-% MERK-NEXT: merk.ite -> !merk.term<"process.received(int)"> {
-% MERK-NEXT: merk.guard %[[GOT]]#0
-% MERK-NEXT: merk.yield
-% MERK-NEXT: } then {
-% MERK-NEXT: %[[M:.*]] = merk.from_word %[[GOT]]#1 : i64
-% MERK-NEXT: %[[YES:.*]] = merk.construct #merk.functor<"message", 1>(%[[M]] : i64) -> !merk.term<"process.received(int)">
-% MERK-NEXT: merk.yield %[[YES]]
-% MERK-NEXT: } else {
-% MERK-NEXT: %[[NO:.*]] = merk.construct #merk.functor<"timeout", 0> -> !merk.term<"process.received(int)">
-% MERK-NEXT: merk.yield %[[NO]]
-% MERK-NEXT: }
+% MERK: merk.receive %{{.*}} with %{{.*}} plain matchers [@process.any_2_0] counts [1] on(%{{.*}} : !merk.term<"process.mailbox(int)">) infos(%{{.*}}) captured(%{{.*}} : !merk.type_info) {merk.arms_type = i64, merk.ring_kinds = array<i64: 0>} : !merk.term<"process.timeout"> -> !merk.term<"process.received(int)">
 % MERK: omp.terminator
 
 % The device's sum polls too, and makes message(N) as a value.
@@ -97,9 +78,9 @@ sum(In, !Sum, !IO) :-
     ;
         Got = timeout
     ).
-% The host's sum receives as on the host.
+% The host's sum receives as on the host, with no ring kind.
 % MERK-LABEL: merk.proc private @omp_target_receive.sum_5_0(
-% MERK: merk.call @process.receive_6_0(
+% MERK: merk.receive %{{.*}} with %{{.*}} plain matchers [@process.any_2_0] counts [1] {{.*}} {merk.arms_type = i64} :
 
 :- pred send_from(int::in, int::in, mailbox(int)::in, io::di, io::uo) is det.
 send_from(I, N, M, !IO) :-

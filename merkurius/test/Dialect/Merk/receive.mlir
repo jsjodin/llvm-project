@@ -1,5 +1,5 @@
-// merk.receive, a receive goal as desugaring made it, prints as it is
-// parsed (docs/INPROGRESS.md, Concurrency in merk, step 1). Its lowering
+// merk.receive, a receive goal as desugaring made it, or a plain receive,
+// prints as it is parsed (docs/INPROGRESS.md, Concurrency in merk, step 1). Its lowering
 // needs the process module's types, and is checked in
 // test/CodeGen/receive-goal.m.
 //
@@ -25,5 +25,23 @@ module @receives attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   merk.proc @m.p(%arg0: !merk.term<"process.timeout">, %arg1: !merk.type_info, %arg2: !merk.term<"process.mailbox(int)">, %arg3: !merk.term<"process.mailbox(string)">, %arg4: !merk.type_info, %arg5: !merk.type_info, %arg6: i64) -> !merk.term<"process.receive_result(string)"> attributes {determinism = #merk.determinism<det>} {
     %0 = merk.receive %arg0 with %arg1 matchers [@m.p$lambda0, @m.p$lambda1] counts [1, 0] on(%arg2, %arg3 : !merk.term<"process.mailbox(int)">, !merk.term<"process.mailbox(string)">) infos(%arg4, %arg5) captured(%arg6 : i64) captures [[["int/0"]], []] : !merk.term<"process.timeout"> -> !merk.term<"process.receive_result(string)">
     merk.succeed %0 : !merk.term<"process.receive_result(string)">
+  }
+
+  // A plain receive, of process.receive/5: a matcher may give another type
+  // than a word, and a unit matcher is a closure, its one captured value.
+  merk.proc private @m.q$lambda0(%arg0: i64) -> i64 attributes {determinism = #merk.determinism<semidet>} {
+    merk.succeed %arg0 : i64
+  }
+
+  // CHECK-LABEL: merk.proc @m.q
+  // CHECK: merk.receive %arg0 with %arg1 plain matchers [@m.q$lambda0] counts [0]
+  // CHECK-SAME: on(%arg2 : !merk.term<"process.mailbox(int)">) infos(%arg1) captures {{\[\[\]\]}}
+  // CHECK-SAME: {merk.arms_type = i64}
+  // CHECK: merk.receive %arg0 with %arg1 plain matchers [unit] counts [1]
+  // CHECK-SAME: on(%arg2 : !merk.term<"process.mailbox(int)">) infos(%arg1) captured(%arg3 : !merk.closure)
+  merk.proc @m.q(%arg0: !merk.term<"process.timeout">, %arg1: !merk.type_info, %arg2: !merk.term<"process.mailbox(int)">, %arg3: !merk.closure) -> !merk.term<"process.received(int)"> attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.receive %arg0 with %arg1 plain matchers [@m.q$lambda0] counts [0] on(%arg2 : !merk.term<"process.mailbox(int)">) infos(%arg1) captures [[]] {merk.arms_type = i64} : !merk.term<"process.timeout"> -> !merk.term<"process.received(int)">
+    %1 = merk.receive %arg0 with %arg1 plain matchers [unit] counts [1] on(%arg2 : !merk.term<"process.mailbox(int)">) infos(%arg1) captured(%arg3 : !merk.closure) : !merk.term<"process.timeout"> -> !merk.term<"process.received(int)">
+    merk.succeed %1 : !merk.term<"process.received(int)">
   }
 }

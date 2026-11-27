@@ -419,15 +419,19 @@ mlir::Value MerkGenerator::TimeoutMilliseconds(
 // receive(Mailbox, any, Timeout, Result, !IO) in a target region, or in
 // any procedure of the device's compile, all of which run on the device:
 // the only receive the device has so far (docs/INPROGRESS.md, The device's
-// side of the first slice, Decision 4). It is a call of merk_device_receive
-// with the handle's cell and the timeout's milliseconds, or of
-// merk_device_receive_array for an array of one-word elements, which
-// succeeds with the mailbox's oldest message as a word, or fails once the
-// timeout passes. Unlike a send, it needs nothing of the host's, so it is the same
-// in a procedure that a region calls. Outside a region, a receive that the
-// device does not have is left to the call of process.receive, which the
-// device's compile rejects only if a region calls it (false); the procedure
-// may run only on the host, such as a polymorphic one that main calls.
+// side of the first slice, Decision 4). It is a plain merk.receive whose
+// one case is any's, with the ring kind of its messages (device-ring.h),
+// which lowering makes a call of merk_device_receive with the handle's cell
+// and the timeout's milliseconds, of merk_device_receive_array for an
+// array of one-word elements, or of merk_device_receive_term for a copied
+// term, with its type_info (Lowering.cpp, ExpandDirectReceive). Unlike a
+// send, it needs nothing of the host's, so it is the same in a procedure
+// that a region calls. Outside a region, a receive that the device does
+// not have is left to the call of process.receive, which code generation
+// makes a plain merk.receive that says why the device cannot make it
+// (FormPlainReceive), and the device's compile rejects only if a region
+// calls it (false); the procedure may run only on the host, such as a
+// polymorphic one that main calls.
 bool MerkGenerator::ReceiveInTarget(const Body &goal,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body,
     bool inRegion) {
@@ -464,44 +468,42 @@ bool MerkGenerator::ReceiveInTarget(const Body &goal,
             " in target regions");
     return true;
   }
-  llvm::SmallVector<mlir::Value> operands{
-      mailbox, TimeoutMilliseconds(timeout, loc)};
-  if (copied) {
-    mlir::Value info{MessageTypeInfo(messageType, loc, at)};
-    if (!info) {
-      failed_ = true;
-      return true;
-    }
-    operands.push_back(info);
+  // any's procedure, the matcher, which takes the message's type_info,
+  // the closure's captured value.
+  auto lambda{entryLambdas_.find(closure.getEntry())};
+  merk::ProcOp any{lambda == entryLambdas_.end()
+          ? merk::ProcOp{}
+          : module_.lookupSymbol<merk::ProcOp>(lambda->second)};
+  if (!any || closure.getCaptured().size() != 1 ||
+      any.getFunctionType().getNumInputs() != 2) {
+    NotYet(at, "this closure of any");
+    return true;
   }
-  auto word{merk::WordType::get(&context_)};
-  auto received{merk::ForeignCallOp::create(builder_, loc,
-      mlir::TypeRange{builder_.getI1Type(), word},
-      array        ? "merk_device_receive_array"
-          : copied ? "merk_device_receive_term"
-                   : "merk_device_receive",
-      operands, /*can_fail=*/true)};
+  // A copied term's type_info is the one its receive copies by, as a send
+  // finds it (MessageTypeInfo, which lowering makes a C pointer); any
+  // other's is what any's closure has.
+  mlir::Value messageInfo{copied
+          ? TypeInfoOfType(messageType, loc, at)
+          : Coerce(closure.getCaptured().front(),
+                any.getFunctionType().getInput(0), loc)};
+  if (!messageInfo) {
+    failed_ = true;
+    return true;
+  }
   auto termType{mlir::cast<merk::TermType>(Represent(receivedType)->type)};
-  auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{termType})};
-  {
-    mlir::OpBuilder::InsertionGuard guard{builder_};
-    builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
-    merk::GuardOp::create(builder_, loc, received.getResult(0));
-    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
-    builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
-    mlir::Value value{merk::FromWordOp::create(
-        builder_, loc, message, received.getResult(1))};
-    merk::YieldOp::create(builder_, loc,
-        mlir::ValueRange{merk::ConstructOp::create(builder_, loc, termType,
-            merk::FunctorAttr::get(&context_, "message", 1),
-            mlir::ValueRange{value})});
-    builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
-    merk::YieldOp::create(builder_, loc,
-        mlir::ValueRange{merk::ConstructOp::create(builder_, loc, termType,
-            merk::FunctorAttr::get(&context_, "timeout", 0),
-            mlir::ValueRange{})});
-  }
-  values_[result] = ite.getResult(0);
+  auto receive{merk::ReceiveOp::create(builder_, loc, termType, timeout,
+      messageInfo, mlir::ValueRange{mailbox}, mlir::ValueRange{messageInfo},
+      mlir::ValueRange{messageInfo},
+      builder_.getArrayAttr(
+          {mlir::FlatSymbolRefAttr::get(&context_, any.getSymName())}),
+      builder_.getDenseI64ArrayAttr({1}), mlir::ArrayAttr{},
+      /*plain=*/true)};
+  // The ring kind, which makes lowering's receive the device runtime's
+  // call (Lowering.cpp, ExpandDirectReceive), anywhere.
+  receive->setAttr("merk.ring_kinds",
+      builder_.getDenseI64ArrayAttr({array ? 1 : copied ? 2 : 0}));
+  receive->setAttr("merk.arms_type", mlir::TypeAttr::get(message));
+  values_[result] = receive.getResult();
   // any's closure, which the device cannot make, is not called.
   if (closure->use_empty()) {
     values_.erase(arguments[1]);

@@ -370,15 +370,23 @@ def Merk_ClosureWordOp : Merk_Op<"closure_word", [Pure]> {
 def Merk_ReceiveOp : Merk_Op<"receive", [
     AttrSizedOperandSegments, DeclareOpInterfaceMethods<SymbolUserOpInterface>
   ]> {
-  let summary = "a receive goal: one message, which some case selects";
+  let summary = "a receive: one message, which some case selects";
   let description = [{
     A receive goal (design document, "The receive goal"), as desugaring
-    made it: a case for each of its mailboxes, in the order first written,
-    whose matcher, a semidet procedure, takes the case's captured values
-    and a message, and gives the arm and the pattern's variables as a
-    word, or fails. The result is `process.receive_result(R)`:
+    made it, or with `plain` a receive of one mailbox,
+    `process.receive/5`: a case for each of its mailboxes, in the order
+    first written, whose matcher, a semidet procedure, takes the case's
+    captured values and a message, and gives what it selected, or fails.
+    A receive goal's matcher gives the arm and the pattern's variables as
+    a word, and the result is `process.receive_result(R)`:
     `receive_message` of what a matcher gave, or `receive_nothing` at the
-    timeout. `result_info` is R's type_info.
+    timeout. A plain receive's result is `process.received(R)`, `message`
+    or `timeout`, and its mailbox closed is the library's error for one
+    mailbox. `result_info` is R's type_info.
+
+    A case's matcher is a procedure's symbol, or a unit when the selector
+    was only a value, a closure: that case's one captured value is the
+    closure, which the receive calls.
 
     `message_infos` are the type_infos of each case's messages, and
     `captured_counts` how many of `captured` each case's matcher takes,
@@ -397,11 +405,12 @@ def Merk_ReceiveOp : Merk_Op<"receive", [
   }];
   let arguments = (ins Merk_TermType:$timeout, Merk_TypeInfoType:$result_info,
       Variadic<AnyType>:$mailboxes, Variadic<Merk_TypeInfoType>:$message_infos,
-      Variadic<AnyType>:$captured, FlatSymbolRefArrayAttr:$matchers,
-      DenseI64ArrayAttr:$captured_counts, OptionalAttr<ArrayAttr>:$captures);
+      Variadic<AnyType>:$captured, ArrayAttr:$matchers,
+      DenseI64ArrayAttr:$captured_counts, OptionalAttr<ArrayAttr>:$captures,
+      UnitAttr:$plain);
   let results = (outs Merk_TermType:$result);
   let assemblyFormat = [{
-    $timeout `with` $result_info
+    $timeout `with` $result_info (`plain` $plain^)?
     `matchers` $matchers `counts` $captured_counts
     `on` `(` $mailboxes `:` type($mailboxes) `)`
     `infos` `(` $message_infos `)`
@@ -425,7 +434,10 @@ def Merk_SelectOp : Merk_Op<"select", [AttrSizedOperandSegments]> {
     terms. On the host, with no ring kinds, every mailbox closed is the
     library's error, and `message_infos` are the type_infos, which make
     what a monitor left a message. `message_types` are the types the
-    matchers take the messages in. Not made by code generation.
+    matchers take the messages in. A matcher that is a unit calls the
+    case's closure, its one captured value, as `merk.receive`'s does; with
+    `plain`, the receive is of one mailbox (`merk.receive`'s `plain`).
+    Not made by code generation.
 
     ```mlir
     %w = merk.select %ms matchers [@m.p$lambda0] counts [1] kinds [0]
@@ -435,11 +447,12 @@ def Merk_SelectOp : Merk_Op<"select", [AttrSizedOperandSegments]> {
   }];
   let arguments = (ins I64:$milliseconds, Variadic<AnyType>:$mailboxes,
       Variadic<AnyType>:$message_infos, Variadic<AnyType>:$captured,
-      FlatSymbolRefArrayAttr:$matchers, DenseI64ArrayAttr:$captured_counts,
-      DenseI64ArrayAttr:$ring_kinds, TypeArrayAttr:$message_types);
+      ArrayAttr:$matchers, DenseI64ArrayAttr:$captured_counts,
+      DenseI64ArrayAttr:$ring_kinds, TypeArrayAttr:$message_types,
+      UnitAttr:$plain);
   let results = (outs Merk_WordType:$word);
   let assemblyFormat = [{
-    $milliseconds `matchers` $matchers `counts` $captured_counts
+    $milliseconds (`plain` $plain^)? `matchers` $matchers `counts` $captured_counts
     `kinds` $ring_kinds `types` $message_types
     `on` `(` $mailboxes `:` type($mailboxes) `)`
     `infos` `(` $message_infos `:` type($message_infos) `)`

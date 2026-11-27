@@ -443,6 +443,20 @@ llvm::LogicalResult ReceiveOp::verify() {
     return emitOpError("counts ")
         << captured << " captured values, but has " << getCaptured().size();
   }
+  for (auto [matcher, count] : llvm::zip(getMatchers(), getCapturedCounts())) {
+    if (!mlir::isa<mlir::FlatSymbolRefAttr, mlir::UnitAttr>(matcher)) {
+      return emitOpError("needs each matcher to be a symbol, or a unit for "
+                         "a closure");
+    }
+    if (mlir::isa<mlir::UnitAttr>(matcher) && count != 1) {
+      return emitOpError("needs a closure, its one captured value, for each "
+                         "matcher that is a unit");
+    }
+  }
+  if (getPlain() && cases != 1) {
+    return emitOpError("is plain, of one mailbox, but has ") << cases
+                                                              << " cases";
+  }
   if (std::optional<mlir::ArrayAttr> captures{getCaptures()}) {
     if (captures->size() != cases) {
       return emitOpError("needs what each case's captured values are");
@@ -462,22 +476,32 @@ llvm::LogicalResult ReceiveOp::verifySymbolUses(
   mlir::Type word{WordType::get(getContext())};
   mlir::OperandRange captured{getCaptured()};
   std::size_t at{0};
-  for (auto [matcher, count] :
-      llvm::zip(getMatchers().getAsRange<mlir::FlatSymbolRefAttr>(),
-          getCapturedCounts())) {
+  for (auto [attr, count] : llvm::zip(getMatchers(), getCapturedCounts())) {
+    auto matcher{mlir::dyn_cast<mlir::FlatSymbolRefAttr>(attr)};
+    if (!matcher) {
+      // A closure, whose entry its merk.closure checks.
+      if (!mlir::isa<ClosureType>(captured[at].getType())) {
+        return emitOpError("needs a closure for a matcher that is a unit, "
+                           "not a value of type ")
+            << captured[at].getType();
+      }
+      ++at;
+      continue;
+    }
     auto proc{symbolTable.lookupNearestSymbolFrom<ProcOp>(*this, matcher)};
     if (!proc) {
       return emitOpError("names ") << matcher << ", which is no procedure";
     }
     mlir::FunctionType type{proc.getFunctionType()};
-    // The captured values, then the message; the arm and its variables.
+    // The captured values, then the message; what it selected: for a
+    // receive goal, the arm and its variables as a word.
     if (proc.getDeterminism() != Determinism::Semidet ||
         type.getNumInputs() != static_cast<unsigned>(count) + 1 ||
-        type.getNumResults() != 1 || type.getResult(0) != word) {
+        type.getNumResults() != 1 || (!getPlain() && type.getResult(0) != word)) {
       return emitOpError("names ")
           << matcher
           << ", which does not take its captured values and a message, "
-             "giving a word, semidet";
+             "giving one value, semidet, a word for a receive goal";
     }
     for (std::int64_t i{0}; i < count; ++i, ++at) {
       if (captured[at].getType() != type.getInput(i)) {
