@@ -9435,3 +9435,117 @@ reported as not yet implemented where the compiler meets it:
 9. **Later, not planned:** an inst for "known unbound", which would make a
    first binding `det`, and tagged small integers inside the open layout
    (design document, "Open terms", option 2).
+
+## Concurrency in merk, and what mrt is for
+
+Discussed with the user 2026-11-27; proposed, nothing decided or built.
+Two questions came up together: whether processes and messages should be
+operations of a dialect, and whether `mrt`, which is small, should stay.
+
+### Processes and messages as merk operations
+
+**Now:** `spawn`, `send`, `receive`, `new_mailbox`, `monitor` and `stop`
+are predicates of `library/process.m`, implemented by foreign procedures
+that call the runtime. A receive goal (`-freceive-goal`) becomes a call of
+`receive` with a closure that selects the messages. In `merk` they are
+`merk.call`s, `merk.foreign_call`s and closures; neither dialect has an
+operation for them. Every pass that cares recognises them by the callee.
+
+**What that means for a static analyzer,** as of deadlocks:
+- *In lib/Semantics,* it can be done. `check-receives.cpp` is a small one
+  already, warning of a mailbox whose arms leave out a constructor. The
+  calls are found by their resolved predicates, the types (`mailbox(M)`)
+  and modes are there, and the `io` state's threading orders each
+  process's communication, which C and Go do not give. But it must see
+  through the closures receive goals become, follow `spawn`'s closure to
+  the process's body, and follow mailboxes through data, and it is tied to
+  merkc's front end.
+- *On merk,* only by matching callees' names and closures: fragile, and of
+  no use to a tool outside this compiler.
+- *On LLVM IR,* not at all.
+
+**Proposed: operations in merk,** not `mrt`, as they are about meaning,
+not layout: `merk.new_mailbox`, `merk.spawn`, `merk.send`, `merk.monitor`,
+`merk.stop`, and `merk.receive` with its arms as regions instead of a
+closure. They lower to the same runtime calls as now, so the runtime does
+not change. What they would give:
+- *Analyses on merk.* The approach known for Go (from memory, to check:
+  Lange, Ng, Toninho and Yoshida, ICSE 2018) extracts each process's
+  communication from the compiler's SSA, where channel operations are
+  instructions, and model-checks it. With these operations merk would be
+  that kind of IR, and an analysis could be an MLIR pass.
+- *Selective receive on a GPU.* A GPU process cannot receive selectively
+  today, as the selector is a closure, which GPU code cannot make; so
+  serghei-swe's strips receive with `any` and sort messages by hand
+  (merkurius-serghei-swe, docs/INPROGRESS.md). With arms as regions,
+  lowering inlines them, and no closure is needed. This is the payoff
+  that exists now.
+- *Optimizations on messages:* receive arms inlined on the host too, sends
+  to one target batched, and a message's flatness and last use at the
+  operation itself; last use is a `moves` flag on `merk.foreign_call` now.
+
+**Also, cheaper:** the runtime could report a certain deadlock, as Go
+reports that all goroutines are asleep: every process of a node blocked in
+a receive with no message, no deadline and nothing in flight to it. Across
+nodes, or with GPU processes, "nothing in flight" is harder to know. The
+runtime has no such check now.
+
+**Steps, if taken:**
+1. `merk.receive` with arms as regions, made from receive goals, lowered
+   as now on the host, and inlined on a GPU, giving GPU processes
+   selective receive. Tests: the receive goal's tests, and a GPU process
+   that selects.
+2. `merk.send`, `merk.spawn`, `merk.new_mailbox`, `merk.monitor` and
+   `merk.stop`, from the library's calls, lowered to the same runtime
+   calls; the device's special cases of sends move onto `merk.send`.
+3. The runtime's check of a certain deadlock on one node.
+4. A static analysis, a merk pass, once 1 and 2 are in: first, a
+   process kind that receives from a mailbox nothing ever sends to.
+
+### mrt: make it a stage, or remove it
+
+**Now:** six operations, `mrt.alloc`, `mrt.tag`, `mrt.untag`,
+`mrt.primary_tag`, `mrt.field_load` and `mrt.field_store`, made and
+lowered in the same walk of `Lowering.cpp`. There is no `-emit-mrt`, and
+nothing works on `mrt`. Only `mrt.alloc`'s lowering does much: the bump
+pointer, the limit check and the slow path; the others wrap pointer
+arithmetic, loads and stores.
+
+**The design document's list is out of date.** It puts `mrt.safepoint`,
+`mrt.yield_check`, `mrt.spawn`, `mrt.send`, `mrt.receive`, the open terms'
+`mrt.new_var`, `mrt.deref` and `mrt.bind`, and exceptions in `mrt`. None
+went there: processes and messages are runtime calls, safepoints are
+LLVM's statepoints made by the collector's rewrite, and open terms are
+runtime calls. To be corrected whichever way is chosen, with processes and
+messages moved to merk as above.
+
+**Not folded into merk:** merk's rule is that its types are Mercury types,
+with layouts chosen only when lowering, and `mrt`'s operations take LLVM
+pointers and word offsets. In merk they would break that rule, and merk's
+passes would have to know which operations have layouts.
+
+**Two ways:**
+1. *Remove it.* Lowering emits the LLVM dialect through helpers, with
+   allocation one helper, so that the collector still hooks only its slow
+   path. Simpler, and nothing is lost now.
+2. *Make it a stage* (merk to mrt, passes on mrt, mrt to LLVM) for work
+   that needs layouts chosen but an allocation still one operation, before
+   it becomes branches and a call:
+   - *Merging allocations:* several `mrt.alloc`s in a block become one bump
+     and one limit check. LLVM cannot, as each already has its slow path
+     and safepoint by then. Expected to help code that builds terms; not
+     measured.
+   - *Immutable cells:* a cell's fields do not change once it is built, so
+     `mrt.field_load` could lower to invariant loads, which LLVM may hoist
+     and reuse across calls and stores.
+   - *Reusing cells* (compile-time garbage collection, Mazur): a cell known
+     to be dead taken for a new one instead of allocating.
+   - *A write barrier* for arrays' stores (Chunk 1: terms and allocation,
+     step 3, left for chunk 3), needed only if the collector becomes
+     generational.
+
+**Recommended: 2, starting with merging allocations,** as the one
+optimization that needs an allocation still whole. First measure: count
+the allocations in each block of the benchmarks, to see what merging could
+save, before building it. If none of these is wanted soon, 1 is cleaner
+than keeping a stage that does nothing.
