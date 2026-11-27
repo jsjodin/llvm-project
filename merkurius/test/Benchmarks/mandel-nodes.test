@@ -6,6 +6,10 @@ at random, and with partitions injected at the coordinator, it gives
 mandel-recover.m's iterations and checksum (mandel-recover.test), and every
 node that is not killed exits with 0, a worker cut off from the coordinator
 too. How many places and nodes are lost depends on when the kills come.
+Each node's runtime reports, such as its roots, go to its standard error,
+which is kept apart from the results: the nodes are separate processes,
+and a worker's report could otherwise come between two lines of the
+coordinator's.
 
 RUN: merkc -O0 -fdo-loops -fprocess-declarations %S/../../benchmarks/mandel/mandel-nodes.m -o %t0
 RUN: merkc -O2 -fdo-loops -fprocess-declarations %S/../../benchmarks/mandel/mandel-nodes.m -o %t2
@@ -25,7 +29,9 @@ NONE-DAG: node 3: exited with 0
 Two workers killed, at -O2 and -O0, with every message read or freed at
 the coordinator, and all three killed, whose places the coordinator then
 spawns at its own node.
-RUN: env HOME=%t.home MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 3 --mtbf 0.15 --count 2 -- "env MERK_CHECK_MESSAGES=1 %t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" 2>&1 | FileCheck %s --check-prefixes=MID,FREED
+RUN: env HOME=%t.home MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 3 --mtbf 0.15 --count 2 -- "env MERK_CHECK_MESSAGES=1 %t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" > %t.freed 2> %t.freed.err
+RUN: FileCheck %s --check-prefix=MID < %t.freed
+RUN: FileCheck %s --check-prefix=FREED < %t.freed.err
 RUN: env HOME=%t.home MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 4 --mtbf 0.3 --count 2 -- "%t0 coordinator 3" "%t0 worker {port}" "%t0 worker {port}" "%t0 worker {port}" | FileCheck %s --check-prefix=MID
 RUN: env HOME=%t.home MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 7 --mtbf 0.1 --count 3 -- "%t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" | FileCheck %s --check-prefix=MID
 FREED: Merkurius runtime: 0 messages are neither read nor freed
@@ -50,13 +56,13 @@ With every node collecting at each allocation and checking its roots
 reports what it checked; with workers killed, at -O2 and -O0, and with
 partitions, the results are the same and no node that is not killed fails,
 as one would on a bad root.
-RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 %kill-nodes --spare 0 --port-from 0 --seed 1 --mtbf 60 --count 0 -- "%t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" > %t.gc 2>&1
+RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 %kill-nodes --spare 0 --port-from 0 --seed 1 --mtbf 60 --count 0 -- "%t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" > %t.gc 2> %t.gc.err
 RUN: FileCheck %s --check-prefixes=SMALL,NONE < %t.gc
-RUN: FileCheck %s --check-prefix=ROOTS < %t.gc
+RUN: FileCheck %s --check-prefix=ROOTS < %t.gc.err
 ROOTS-COUNT-4: Merkurius runtime: roots: {{[1-9][0-9]*}} safepoints
-RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 3 --mtbf 0.15 --count 2 -- "%t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" 2>&1 | FileCheck %s --check-prefixes=MID,ALIVE
-RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 4 --mtbf 0.3 --count 2 -- "%t0 coordinator 3" "%t0 worker {port}" "%t0 worker {port}" "%t0 worker {port}" 2>&1 | FileCheck %s --check-prefixes=MID,ALIVE
-RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=60 %kill-nodes --spare 0 --port-from 0 --seed 1 --mtbf 60 --count 0 -- "env MERK_FAULTS='seed=2 mtbf=500 partition count=2' %t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" 2>&1 | FileCheck %s --check-prefixes=CUT,ALIVE
+RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 3 --mtbf 0.15 --count 2 -- "%t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" | FileCheck %s --check-prefixes=MID,ALIVE
+RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=30 %kill-nodes --spare 0 --port-from 0 --seed 4 --mtbf 0.3 --count 2 -- "%t0 coordinator 3" "%t0 worker {port}" "%t0 worker {port}" "%t0 worker {port}" | FileCheck %s --check-prefixes=MID,ALIVE
+RUN: env HOME=%t.home MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 MERK_TICK_TIME=1 MERK_COOKIE=nodes MANDEL_SIZE=256 MANDEL_TILE=16 MANDEL_FRAMES=60 %kill-nodes --spare 0 --port-from 0 --seed 1 --mtbf 60 --count 0 -- "env MERK_FAULTS='seed=2 mtbf=500 partition count=2' %t2 coordinator 3" "%t2 worker {port}" "%t2 worker {port}" "%t2 worker {port}" | FileCheck %s --check-prefixes=CUT,ALIVE
 ALIVE-NOT: exited with {{[1-9]}}
 
 RUN: not %t0 | FileCheck %s --check-prefix=USAGE
