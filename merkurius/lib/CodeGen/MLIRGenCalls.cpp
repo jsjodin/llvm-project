@@ -161,7 +161,7 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
     return;
   }
   Called(goal, callee, arguments, body);
-  FormReceive(goal, callee, arguments, body);
+  FormProcessOperation(goal, callee, arguments, body);
 }
 
 // process.any's procedure, a plain receive's matcher that takes every
@@ -206,11 +206,17 @@ bool IsSelectorPart(mlir::Operation *op) {
 // calls the library. Its result has the goal's type, not the library's
 // receive_result(T0), from which lowering knows its selectors', which the
 // collector needs. A call of receive_goal that is not of that shape, all
-// in one block, stays a call.
-void MerkGenerator::FormReceive(const Body &goal, const Procedure &callee,
-    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
+// in one block, stays a call. A call of send/4 or receive/5 is its
+// operation too (FormSend, FormPlainReceive).
+void MerkGenerator::FormProcessOperation(const Body &goal,
+    const Procedure &callee, llvm::ArrayRef<BodyVar> arguments,
+    const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
   if (failed_ || Terminated() || symbol.module != "process") {
+    return;
+  }
+  if (symbol.name == "send" && symbol.arity == 4) {
+    FormSend();
     return;
   }
   if (symbol.name == "receive" && symbol.arity == 6) {
@@ -434,6 +440,41 @@ void MerkGenerator::ReplaceReceiveCall(
   for (BodyVar var : gone) {
     values_.erase(var);
   }
+}
+
+// A call of process.send/4, just generated, that SendInTarget did not make
+// the device runtime's (docs/INPROGRESS.md, Concurrency in merk, step 2):
+// a merk.send of the message, to the mailbox, with the message type's
+// type_info, which the call takes first. It is the operation before the
+// insertion point, as the call has no results. On a device it says why the
+// device cannot make it, in merk.not_on_device, which lowering reports
+// where the device runs it (Lowering.cpp, RejectDeviceMessages).
+void MerkGenerator::FormSend() {
+  mlir::Block *block{builder_.getInsertionBlock()};
+  if (!block || builder_.getInsertionPoint() == block->begin()) {
+    return;
+  }
+  auto call{mlir::dyn_cast<merk::CallOp>(*std::prev(builder_.getInsertionPoint()))};
+  if (!call || !call.getCallee().starts_with("process.send_4_0") ||
+      call.getInputs().size() != 3 || call->getNumResults() != 0 ||
+      !mlir::isa<merk::TypeInfoType>(call.getInputs()[0].getType())) {
+    return;
+  }
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPoint(call);
+  mlir::Value mailbox{Uncoerced(call.getInputs()[1])};
+  if (!mlir::isa<merk::TermType>(mailbox.getType())) {
+    mailbox = call.getInputs()[1];
+  }
+  auto send{merk::SendOp::create(builder_, call.getLoc(),
+      Uncoerced(call.getInputs()[2]), mailbox, call.getInputs()[0],
+      /*key=*/nullptr, /*ring_kind=*/nullptr)};
+  if (target_.options().IsDevice()) {
+    send->setAttr("merk.not_on_device",
+        builder_.getStringAttr(
+            "sends messages of a type that a device does not send"));
+  }
+  call->erase();
 }
 
 // A call of process.receive/5, just generated, that ReceiveInTarget did

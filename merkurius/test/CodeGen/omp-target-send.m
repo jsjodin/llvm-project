@@ -59,12 +59,10 @@ main(!IO) :-
 % MERK-LABEL: merk.proc @omp_target_send.main_2_0()
 % MERK-NOT: !merk.type_info to !llvm.ptr
 % MERK: omp.target
-% MERK: %[[W:.*]] = merk.to_word %{{.*}} : i64
-% MERK-NEXT: %[[INT:.*]] = arith.constant -7556727498917921977 : i64
-% MERK-NEXT: merk.foreign_call @merk_device_send(%{{.*}}, %[[INT]], %[[W]]) : (!merk.term<"process.mailbox(int)">, i64, !merk.word) -> ()
-% MERK: merk.foreign_call @merk_device_send(%{{.*}}, %{{.*}}, %{{.*}}) : (!merk.term<"process.mailbox(float)">, i64, !merk.word) -> ()
-% MERK: merk.foreign_call @merk_device_send(%{{.*}}, %{{.*}}, %{{.*}}) : (!merk.term<"process.mailbox(character)">, i64, !merk.word) -> ()
-% MERK: merk.foreign_call @merk_device_send(%{{.*}}, %{{.*}}, %{{.*}}) : (!merk.term<"process.mailbox(omp_target_send.colour)">, i64, !merk.word) -> ()
+% MERK: merk.send %{{.*}} to %{{.*}} key -7556727498917921977 ring_kind 0 : i64, !merk.term<"process.mailbox(int)">
+% MERK: merk.send %{{.*}} to %{{.*}} key {{-?[0-9]+}} ring_kind 0 : f64, !merk.term<"process.mailbox(float)">
+% MERK: merk.send %{{.*}} to %{{.*}} key {{-?[0-9]+}} ring_kind 0 : i32, !merk.term<"process.mailbox(character)">
+% MERK: merk.send %{{.*}} to %{{.*}} key {{-?[0-9]+}} ring_kind 0 : !merk.term<"omp_target_send.colour">, !merk.term<"process.mailbox(omp_target_send.colour)">
 % MERK: omp.terminator
 
 % At start-up, each key with its type's type_info, in the keys' order.

@@ -30,7 +30,7 @@ twice(Mailbox, N, !IO) :-
 % DEVICE-LABEL: define internal void @omp_target_send_call.twice_4_0(
 % DEVICE-COUNT-2: call void @merk_device_send(ptr %{{.*}}, i64 -7556727498917921977, i64 %{{.*}})
 % MERK-LABEL: merk.proc private @omp_target_send_call.twice_4_0(
-% MERK-COUNT-2: merk.call @process.send_4_0(
+% MERK-COUNT-2: merk.send %{{.*}} to %{{.*}} with %{{.*}} : i64, !merk.term<"process.mailbox(int)">
 % MERK-NOT: merk_device_send
 % MERK-LABEL: merk.proc private @omp_target_send_call.merk_register_message_types()
 % MERK: merk.type_info "int/0"

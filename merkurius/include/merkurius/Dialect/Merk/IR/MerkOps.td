@@ -421,6 +421,37 @@ def Merk_ReceiveOp : Merk_Op<"receive", [
   let hasVerifier = 1;
 }
 
+def Merk_SendOp : Merk_Op<"send"> {
+  let summary = "a send: one message, to a mailbox";
+  let description = [{
+    `process.send/4`: the message, given the type_info of its type, is
+    copied into the mailbox. On the host, lowering makes it the runtime's
+    send, `merk_send`, with the handle's cell. With a `key` and a
+    `ring_kind`, which code generation gives a send that a device runs
+    (MLIRGenOpenMP.cpp, SendInTarget), it is the device runtime's send in
+    any compile: of a word (ring kind 0), of an array of one-word elements
+    by its pointer (1), or of a term copied with its type_info (2), each
+    with the key that the host's compile registers for the message's type.
+    Any other on a device is the library's call, in code that the device
+    does not run.
+
+    ```mlir
+    merk.send %m to %box with %ti : i64, !merk.term<"process.mailbox(int)">
+    merk.send %m to %box key 42 ring_kind 0
+        : i64, !merk.term<"process.mailbox(int)">
+    ```
+  }];
+  let arguments = (ins AnyType:$message, AnyType:$mailbox,
+      Optional<Merk_TypeInfoType>:$info, OptionalAttr<I64Attr>:$key,
+      OptionalAttr<I64Attr>:$ring_kind);
+  let assemblyFormat = [{
+    $message `to` $mailbox (`with` $info^)? (`key` $key^)?
+    (`ring_kind` $ring_kind^)? attr-dict `:` type($message) `,`
+    type($mailbox)
+  }];
+  let hasVerifier = 1;
+}
+
 def Merk_SelectOp : Merk_Op<"select", [AttrSizedOperandSegments]> {
   let summary = "a receive goal, as lowering makes it";
   let description = [{

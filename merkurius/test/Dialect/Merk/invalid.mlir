@@ -40,6 +40,10 @@
 // RUN: not merkc -fc1 -emit-merk %t/receive-unit-count.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-UNIT-COUNT
 // RUN: not merkc -fc1 -emit-merk %t/receive-unit-closure.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-UNIT-CLOSURE
 // RUN: not merkc -fc1 -emit-merk %t/receive-plain-cases.mlir 2>&1 | FileCheck %s --check-prefix=RECEIVE-PLAIN-CASES
+// RUN: not merkc -fc1 -emit-merk %t/send-key.mlir 2>&1 | FileCheck %s --check-prefix=SEND-KEY
+// RUN: not merkc -fc1 -emit-merk %t/send-kind.mlir 2>&1 | FileCheck %s --check-prefix=SEND-KIND
+// RUN: not merkc -fc1 -emit-merk %t/send-info.mlir 2>&1 | FileCheck %s --check-prefix=SEND-INFO
+// RUN: not merkc -fc1 -emit-merk %t/send-no-info.mlir 2>&1 | FileCheck %s --check-prefix=SEND-NO-INFO
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -466,5 +470,41 @@ module {
   merk.proc @p(%t: !merk.term<"process.timeout">, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">, %c: !merk.closure) -> !merk.term<"process.received(int)"> attributes {determinism = #merk.determinism<det>} {
     %0 = merk.receive %t with %i plain matchers [unit, unit] counts [1, 1] on(%b, %b : !merk.term<"process.mailbox(int)">, !merk.term<"process.mailbox(int)">) infos(%i, %i) captured(%c, %c : !merk.closure, !merk.closure) : !merk.term<"process.timeout"> -> !merk.term<"process.received(int)">
     merk.succeed %0 : !merk.term<"process.received(int)">
+  }
+}
+
+//--- send-key.mlir
+// SEND-KEY: send-key.mlir:[[@LINE+3]]:5: error: 'merk.send' op needs a ring kind with a key, and neither without
+module {
+  merk.proc @p(%m: i64, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) attributes {determinism = #merk.determinism<det>} {
+    merk.send %m to %b key 7 : i64, !merk.term<"process.mailbox(int)">
+    merk.succeed
+  }
+}
+
+//--- send-kind.mlir
+// SEND-KIND: send-kind.mlir:[[@LINE+3]]:5: error: 'merk.send' op has ring kind 3, not a word (0), an array (1) or a copied term (2)
+module {
+  merk.proc @p(%m: i64, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) attributes {determinism = #merk.determinism<det>} {
+    merk.send %m to %b key 7 ring_kind 3 : i64, !merk.term<"process.mailbox(int)">
+    merk.succeed
+  }
+}
+
+//--- send-info.mlir
+// SEND-INFO: send-info.mlir:[[@LINE+3]]:5: error: 'merk.send' op needs the message's type_info if, and only if, it is not the device runtime's send of a word or an array
+module {
+  merk.proc @p(%m: i64, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) attributes {determinism = #merk.determinism<det>} {
+    merk.send %m to %b with %i key 7 ring_kind 0 : i64, !merk.term<"process.mailbox(int)">
+    merk.succeed
+  }
+}
+
+//--- send-no-info.mlir
+// SEND-NO-INFO: send-no-info.mlir:[[@LINE+3]]:5: error: 'merk.send' op needs the message's type_info if, and only if, it is not the device runtime's send of a word or an array
+module {
+  merk.proc @p(%m: i64, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) attributes {determinism = #merk.determinism<det>} {
+    merk.send %m to %b : i64, !merk.term<"process.mailbox(int)">
+    merk.succeed
   }
 }

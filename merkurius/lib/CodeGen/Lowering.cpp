@@ -551,7 +551,7 @@ private:
   // from a target region become declare target, and a device compile keeps
   // only those and the target regions.
   llvm::LogicalResult FilterProcs();
-  bool RejectDeviceReceives();
+  bool RejectDeviceMessages();
   llvm::LogicalResult LowerOpenMP();
   // A compile of GPU processes' kernels keeps only what the kernels reach.
   llvm::LogicalResult FilterKernelProcs();
@@ -6146,6 +6146,83 @@ void ExpandDirectReceives(mlir::ModuleOp module) {
   }
 }
 
+// A merk.send (docs/INPROGRESS.md, Concurrency in merk, step 2). With a
+// key, which code generation gives a send that a device runs
+// (MLIRGenOpenMP.cpp, SendInTarget), it is the device runtime's in any
+// compile: merk_device_send of the message as a word,
+// merk_device_send_array of an array's pointer, or merk_device_send_term
+// with the type_info as a C pointer, each with the handle and the key. Any
+// other is, on the host, the runtime's merk_send with the handle's cell,
+// the type_info and the message as a word, which sends as the library's
+// send does; on a device, the library's call, process.send/4, in code
+// that the device does not run, as it rejects any that it does.
+void ExpandSend(mlir::OpBuilder &builder, merk::SendOp send, bool device) {
+  mlir::MLIRContext *context{builder.getContext()};
+  mlir::Location loc{send.getLoc()};
+  auto word{merk::WordType::get(context)};
+  auto i64{builder.getI64Type()};
+  auto pointer{mlir::LLVM::LLVMPointerType::get(context)};
+  auto mailboxType{merk::TermType::get(context, "process.mailbox(T0)")};
+  builder.setInsertionPoint(send);
+  if (std::optional<std::int64_t> kind{send.getRingKind()}) {
+    llvm::SmallVector<mlir::Value> operands{send.getMailbox(),
+        mlir::arith::ConstantOp::create(
+            builder, loc, i64, builder.getI64IntegerAttr(*send.getKey())),
+        *kind == 1 ? mlir::UnrealizedConversionCastOp::create(
+                         builder, loc, pointer, send.getMessage())
+                         .getResult(0)
+                   : CoerceTo(builder, loc, send.getMessage(), word)};
+    if (*kind == 2) {
+      operands.push_back(mlir::UnrealizedConversionCastOp::create(
+          builder, loc, pointer, send.getInfo())
+                             .getResult(0));
+    }
+    merk::ForeignCallOp::create(builder, loc, mlir::TypeRange{},
+        *kind == 1        ? "merk_device_send_array"
+            : *kind == 2 ? "merk_device_send_term"
+                         : "merk_device_send",
+        operands, /*can_fail=*/false);
+  } else if (device) {
+    auto module{send->getParentOfType<mlir::ModuleOp>()};
+    auto info{merk::TypeInfoType::get(context)};
+    merk::ProcOp library{ProcNamed(module, "process.send_4_0",
+        builder.getFunctionType({info, mailboxType, word}, {}),
+        merk::Determinism::Det)};
+    merk::CallOp::create(builder, loc, mlir::TypeRange{}, library.getSymName(),
+        mlir::ValueRange{send.getInfo(),
+            CoerceTo(builder, loc, send.getMailbox(), mailboxType),
+            CoerceTo(builder, loc, send.getMessage(), word)});
+  } else {
+    mlir::Value mailbox{send.getMailbox()};
+    if (!mlir::isa<merk::TermType>(mailbox.getType())) {
+      mailbox = CoerceTo(builder, loc, mailbox, mailboxType);
+    }
+    merk::ForeignCallOp::create(builder, loc, mlir::TypeRange{}, "merk_send",
+        mlir::ValueRange{mailbox, send.getInfo(),
+            CoerceTo(builder, loc, send.getMessage(), word)},
+        /*can_fail=*/false);
+  }
+  send->erase();
+}
+
+// Each merk.send (ExpandSend), or with `direct` only the device runtime's,
+// which go first, before omp-function-filter, as the direct receives do.
+// On a device the others go after the filter and after the sends that
+// would run there were reported (RejectDeviceMessages), as plain receives
+// do.
+void ExpandSends(mlir::ModuleOp module, bool device, bool direct) {
+  llvm::SmallVector<merk::SendOp> sends;
+  module.walk([&](merk::SendOp op) {
+    if (!direct || op.getKey()) {
+      sends.push_back(op);
+    }
+  });
+  mlir::OpBuilder builder{module.getContext()};
+  for (merk::SendOp op : sends) {
+    ExpandSend(builder, op, device);
+  }
+}
+
 // A merk.receive as a merk.select, which lowering makes a loop that calls
 // the matchers (LowerSelect), in a condition whose then part is
 // receive_message of the word a matcher gave, and whose else part, at the
@@ -6416,7 +6493,9 @@ llvm::LogicalResult Lowerer::Lower() {
   // A receive of any is the device runtime's in any compile, first, as its
   // matcher's symbol would make omp-function-filter remove it (FilterProcs).
   ExpandDirectReceives(module_);
+  ExpandSends(module_, device_, /*direct=*/true);
   if (!device_) {
+    ExpandSends(module_, /*device=*/false, /*direct=*/false);
     ExpandReceives(module_, /*device=*/false, /*processes=*/false);
   }
   // On a device nothing calls a descriptor's unify entry, since a generic
@@ -6454,11 +6533,12 @@ llvm::LogicalResult Lowerer::Lower() {
     });
     // FilterProcs checked an OpenMP module's receives.
     if (!mlir::omp::isOpenMPModule(module_)) {
-      bad = RejectDeviceReceives() || bad;
+      bad = RejectDeviceMessages() || bad;
     }
     if (bad || mlir::failed(CompileDeviceForeignCode(module_, target_, clang_))) {
       return llvm::failure();
     }
+    ExpandSends(module_, /*device=*/true, /*direct=*/false);
     ExpandReceives(module_, /*device=*/true, kernels_);
   }
   if (mlir::failed(Layouts()) || mlir::failed(MakeRecords()) ||
@@ -6796,16 +6876,22 @@ llvm::LogicalResult Lowerer::FilterKernelProcs() {
   return llvm::failure(bad);
 }
 
-// Reports each receive that would run on a device: only a GPU process
-// selects (device.cpp, merk_device_select_begin), and a plain receive says
-// why the device cannot make it. Whether there was one.
-bool Lowerer::RejectDeviceReceives() {
+// Reports each receive or send that would run on a device and that the
+// device cannot make: only a GPU process selects (device.cpp,
+// merk_device_select_begin), and a plain receive or a send says why.
+// Whether there was one.
+bool Lowerer::RejectDeviceMessages() {
   bool bad{false};
   module_.walk([&](merk::ReceiveOp op) {
     auto why{op->getAttrOfType<mlir::StringAttr>("merk.not_on_device")};
     if (!kernels_ && !op.getPlain()) {
       bad = RejectOnDevice(op, "selects messages outside a GPU process") || bad;
     } else if (why) {
+      bad = RejectOnDevice(op, why.getValue(), kernels_) || bad;
+    }
+  });
+  module_.walk([&](merk::SendOp op) {
+    if (auto why{op->getAttrOfType<mlir::StringAttr>("merk.not_on_device")}) {
       bad = RejectOnDevice(op, why.getValue(), kernels_) || bad;
     }
   });
@@ -6859,7 +6945,7 @@ llvm::LogicalResult Lowerer::FilterProcs() {
     });
     // A receive's matchers are symbols that omp-mark-declare-target does not
     // follow, so filtering would remove the receive too.
-    bad = RejectDeviceReceives() || bad;
+    bad = RejectDeviceMessages() || bad;
     if (bad) {
       return llvm::failure();
     }

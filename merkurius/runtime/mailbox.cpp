@@ -998,6 +998,16 @@ extern "C" void merk_mailbox_send(
   }
 }
 
+// A compiled send, merk.send (Lowering.cpp, ExpandSend): the mailbox is
+// process.mailbox's cell of five words (MLIRGenOpenMP.cpp, FlatCell).
+extern "C" void merk_send(const Word *handle, Word typeInfo, Word value) {
+  merk_mailbox_send(static_cast<std::int64_t>(handle[0]),
+      static_cast<std::int64_t>(handle[1]),
+      static_cast<std::int64_t>(handle[2]),
+      static_cast<std::int64_t>(handle[3]),
+      static_cast<std::int64_t>(handle[4]), typeInfo, value);
+}
+
 // When a receive of this many milliseconds stops waiting, on the monotonic
 // clock in nanoseconds, or -1 for a negative number, which waits forever.
 extern "C" std::int64_t merk_mailbox_deadline(std::int64_t milliseconds) {

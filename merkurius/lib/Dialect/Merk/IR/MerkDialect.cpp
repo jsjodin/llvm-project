@@ -471,6 +471,23 @@ llvm::LogicalResult ReceiveOp::verify() {
   return mlir::success();
 }
 
+llvm::LogicalResult SendOp::verify() {
+  std::optional<std::int64_t> kind{getRingKind()};
+  if (getKey().has_value() != kind.has_value()) {
+    return emitOpError("needs a ring kind with a key, and neither without");
+  }
+  if (kind && (*kind < 0 || *kind > 2)) {
+    return emitOpError("has ring kind ")
+        << *kind << ", not a word (0), an array (1) or a copied term (2)";
+  }
+  if ((!kind || *kind == 2) != static_cast<bool>(getInfo())) {
+    return emitOpError("needs the message's type_info if, and only if, it "
+                       "is not the device runtime's send of a word or an "
+                       "array");
+  }
+  return mlir::success();
+}
+
 llvm::LogicalResult ReceiveOp::verifySymbolUses(
     mlir::SymbolTableCollection &symbolTable) {
   mlir::Type word{WordType::get(getContext())};

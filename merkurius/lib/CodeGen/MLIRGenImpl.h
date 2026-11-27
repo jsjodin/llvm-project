@@ -938,9 +938,6 @@ private:
   // host and a device: any other ground type whose closures, if any, are not
   // in its arguments.
   bool CopiedMessage(const semantics::Type &, mlir::Type represented);
-  // The type_info of a copied message's type, as the runtime takes it.
-  mlir::Value MessageTypeInfo(
-      const semantics::Type *, mlir::Location, parser::CharBlock);
   // The message types that device code may send, by their keys.
   llvm::DenseMap<std::uint64_t, const semantics::Type *> messageTypes_;
   std::optional<std::uint64_t> MessageKey(
@@ -1049,12 +1046,14 @@ private:
       const ProcedureBody &, bool inRegion);
   bool ReceiveInTarget(const Body &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &, bool inRegion);
-  // The call of process.receive_goal that desugaring made of a receive goal,
-  // just generated, as a merk.receive of the selector's cases.
-  void FormReceive(const Body &, const Procedure &callee,
+  // A call of process.send/4, process.receive/5 or process.receive_goal,
+  // just generated, as the merk operation.
+  void FormProcessOperation(const Body &, const Procedure &callee,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   bool FormReceiveOp(
       const Body &, llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  // The call of process.send/4, just generated, as a merk.send.
+  void FormSend();
   // The call of process.receive/5, just generated, as a plain merk.receive.
   void FormPlainReceive(
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);

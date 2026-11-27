@@ -261,17 +261,6 @@ bool MerkGenerator::CopiedMessage(
       !ArrayMessage(represented);
 }
 
-mlir::Value MerkGenerator::MessageTypeInfo(
-    const semantics::Type *type, mlir::Location loc, parser::CharBlock at) {
-  mlir::Value info{TypeInfoOfType(type, loc, at)};
-  if (!info) {
-    return {};
-  }
-  return mlir::UnrealizedConversionCastOp::create(
-      builder_, loc, mlir::LLVM::LLVMPointerType::get(&context_), info)
-      .getResult(0);
-}
-
 std::optional<std::uint64_t> MerkGenerator::MessageKey(
     const semantics::Type &type, mlir::Type represented) {
   if (!Ground(type) ||
@@ -285,17 +274,18 @@ std::optional<std::uint64_t> MerkGenerator::MessageKey(
 }
 
 // process.send in a target region, or in any procedure of the device's
-// compile, all of which run on the device. It is a call of
-// merk_device_send with the handle's cell, the message type's key and the
-// message as a word, or of merk_device_send_array with the array's pointer
-// if it is an array of one-word elements. The key is a hash of the type's name, which the
-// host's compile registers with the host's type_info at start-up
-// (RegisterMessageTypes), since the host encodes the message by it if the
-// mailbox is another node's; so a procedure that a region calls sends as
-// the region does (docs/INPROGRESS.md, The device's side of the first
-// slice, step 4). Outside a region, a send that the device does not have
-// is left to the call of process.send (false), as ReceiveInTarget leaves a
-// receive.
+// compile, all of which run on the device. It is a merk.send with the
+// message type's key and its ring kind, which lowering makes the device
+// runtime's send (Lowering.cpp, ExpandDirectSends): of a word, of an array
+// of one-word elements, or of a term copied by its type_info. The key is a
+// hash of the type's name, which the host's compile registers with the
+// host's type_info at start-up (RegisterMessageTypes), since the host
+// encodes the message by it if the mailbox is another node's; so a
+// procedure that a region calls sends as the region does
+// (docs/INPROGRESS.md, The device's side of the first slice, step 4).
+// Outside a region, a send that the device does not have is left to the
+// call of process.send (false), which becomes a merk.send without a key
+// (MLIRGenCalls.cpp, FormSend), as ReceiveInTarget leaves a receive.
 bool MerkGenerator::SendInTarget(const Body &goal,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body,
     bool inRegion) {
@@ -318,28 +308,20 @@ bool MerkGenerator::SendInTarget(const Body &goal,
             " in target regions");
     return true;
   }
-  bool array{ArrayMessage(message.getType())};
-  mlir::Value word{array ? ArrayPointer(message, loc)
-                         : mlir::Value{merk::ToWordOp::create(builder_, loc,
-                               merk::WordType::get(&context_), message)}};
-  llvm::SmallVector<mlir::Value> operands{mailbox,
-      IntegerConstant(
-          builder_.getI64Type(), static_cast<std::int64_t>(*key), loc),
-      word};
   bool copied{CopiedMessage(*type, message.getType())};
+  mlir::Value info;
   if (copied) {
-    mlir::Value info{MessageTypeInfo(type, loc, at)};
+    info = TypeInfoOfType(type, loc, at);
     if (!info) {
       failed_ = true;
       return true;
     }
-    operands.push_back(info);
   }
-  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
-      array        ? "merk_device_send_array"
-          : copied ? "merk_device_send_term"
-                   : "merk_device_send",
-      operands, /*can_fail=*/false);
+  merk::SendOp::create(builder_, loc, message, mailbox, info,
+      builder_.getI64IntegerAttr(static_cast<std::int64_t>(*key)),
+      builder_.getI64IntegerAttr(ArrayMessage(message.getType()) ? 1
+              : copied                                          ? 2
+                                                                : 0));
   return true;
 }
 

@@ -9521,7 +9521,7 @@ runtime has no such check now.
        one call, `merk_select_first`, which takes the head or leaves the
        rest (timeout, closed, what a monitor left) to the loop.
      - On a device, any other is reported where it would run, before the
-       filter (`RejectDeviceReceives`); in code a device does not run it
+       filter (`RejectDeviceMessages`); in code a device does not run it
        is the library's call again (`ExpandPlainToLibrary`).
      A polymorphic receive's message stays its word, noted for the
      collector by R's type_info, as open.receive's is. Tests:
@@ -9810,6 +9810,34 @@ runtime has no such check now.
 2. `merk.send`, `merk.spawn`, `merk.new_mailbox`, `merk.monitor` and
    `merk.stop`, from the library's calls, lowered to the same runtime
    calls; the device's special cases of sends move onto `merk.send`.
+   Being built, as separate commits; started 2026-11-27:
+   - *(a) Built 2026-11-27:* `merk.send`, made from every call of
+     `send/4` (MLIRGenCalls.cpp, `FormSend`), with the message in its own
+     type, not the call's word. A send a device runs carries its key and
+     its ring kind (`SendInTarget`), and is the device runtime's send in
+     any compile, first, as a direct receive is (Lowering.cpp,
+     `ExpandSends`); the registers of every `-gpu.test` are unchanged. On
+     the host, any other is the runtime's `merk_send`, which takes the
+     handle's cell as `merk_select_case` does, with no call of the
+     library's `send`. On a device, any other says why in
+     `merk.not_on_device`, is reported where the device runs it
+     (`RejectDeviceMessages`), and is the library's call in code it does
+     not run. `send` passed as a closure stays the library's. Tests:
+     test/Dialect/Merk/send.mlir, invalid.mlir's `SEND-*`,
+     test/CodeGen/send.m, and the omp-target send tests' `MERK` checks.
+     Measured: no change to speak of (design document, "Plain receives on
+     the host").
+   - *(a') Next, decided with the user 2026-11-27:* the key leaves
+     `merk.send`, which names the message's type instead; lowering hashes
+     it, by one function shared with the host's registration of keys, so
+     the IR says what is sent, not a number to look up.
+   - *(b) Next:* `merk.new_mailbox`, `merk.close_mailbox`,
+     `merk.monitor`, `merk.demonitor` and `merk.stop`, each one runtime
+     call; `monitor`'s function stays a closure operand.
+   - *(c) To decide with the user first:* `merk.spawn`, which names the
+     kind and its arguments. A kind's spawn is desugared to its
+     `'spawn_at$Kind'`, and GPU kinds start through place kernels, so its
+     design goes here before it is built.
 3. The runtime's check of a certain deadlock on one node.
 4. A static analysis, a merk pass, once 1 and 2 are in: first, a
    process kind that receives from a mailbox nothing ever sends to.
