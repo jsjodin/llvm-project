@@ -9507,6 +9507,9 @@ runtime has no such check now.
      no closures and the runtime keeping a cursor per mailbox. Tests:
      test/CodeGen/receive-goal.m's `LLVM` checks, receive-goal-host.m,
      and the benchmark benchmarks/receive-goal.
+   - *(d) Planned 2026-11-27:* every one-mailbox receive, `receive/5`,
+     as a `merk.receive` too, with a case's matcher a procedure or a
+     closure; see "Plan for (d)" below.
 
    Decided with the user:
    - *Each case's matcher is a known procedure,* named by symbol, with
@@ -9695,6 +9698,82 @@ runtime has no such check now.
    call, keeps its positions and closures.
 
    Measurements: the design document's "Receive goals on the host".
+
+   Plan for (d), decided with the user 2026-11-27: one operation for
+   every receive. After (c), only the receive goal is a `merk.receive`.
+   `receive(Box, Selector, Timeout, Result, !IO)`, the receive that
+   SERGHEI's port, mc-transport and UTS call (`any` at 27 sites,
+   `counts_only` at one), is still the library's `scan` on the host, and
+   on a device a call of `merk_device_receive*` that code generation
+   makes (MLIRGenOpenMP.cpp, `ReceiveInTarget`). So every runtime change
+   is made twice: the cursors of (c) do not help a selector that rejects,
+   whose `scan` still reads each position from the queue's head. And an
+   analysis of who receives from which mailbox (4 below) would not see
+   most real receives. The split came from building (a) for the receive
+   goal first, not from a reason to keep it.
+   - *A case's matcher is a procedure or a closure.* Code generation
+     makes every `process.receive/5` a `merk.receive` of one case. A
+     selector that is a known predicate or lambda, as `any` and
+     `counts_only` are, is a procedure, with its captured values, as a
+     receive goal's matchers are. A selector that is only a value, from a
+     variable or an argument, is the case's closure, an operand. The
+     operation says, for each case, which it is.
+   - *No library call below the operation,* not even as a fallback: a
+     closure case's block in `LowerSelect` calls the closure
+     (`merk.call_closure`) where a known case calls its procedure, and
+     the runtime's candidates, cursors, take and skip are the same. That
+     is not (a)'s first version, which the user rejected: there the
+     library's receive was kept for every receive, so the operation said
+     everything twice. Here nothing is said twice; a closure is the only
+     form a selector value has.
+   - *The result.* `receive/5` gives `received(R)` (`message(R)` or
+     `timeout`), where the receive goal's operation gives
+     `receive_result(X)` (`receive_message` or `receive_nothing`). The
+     operation names the result's two constructors, so lowering's
+     `merk.ite` makes either type, rather than code generation adding a
+     switch from one to the other.
+   - *Fast paths in lowering.* One case whose matcher cannot fail, as
+     `any`, takes the oldest message: no loop and no matcher call. On a
+     device it is the same call of `merk_device_receive*` as now, so the
+     registers of every GPU program that receives stay as they are (the
+     register check of (b), over every `-gpu.test`, is the bar). On the
+     host it takes the head of the queue (a new `merk_select_first`, or
+     `next` and `take` with no matcher between). One case that can
+     reject, as `counts_only`, is the loop, with the cursor. Whether a
+     matcher cannot fail is the procedure's determinism (`any` is
+     semidet but always succeeds, so it is named: `process.any_2_0`, as
+     `ReceiveInTarget` already finds it).
+   - *A device keeps its limits.* A closure case is a call through a
+     pointer, which makes a GPU kernel assume the most registers, so in a
+     GPU process it is `merk.not_on_device`, reported as not yet
+     implemented, as a polymorphic receive goal is. In a target region,
+     where only `any` is received now, the rest stays not yet
+     implemented, as `ReceiveInTarget` reports it.
+   - *What stays the library's:* `receive/3` over a selector that a
+     program builds with `new_selector`, `selecting` and
+     `selecting_matching`, whose cases are a value: a selector can be
+     built in one procedure and received on in another, as
+     benchmarks/mandel's mandel-nodes.m does (`serve(Selector, ...)`).
+     Besides tests, mandel-nodes.m and mandel-recover.m build selectors,
+     each of two fixed `selecting` cases, which a receive goal would say
+     with a fixed set of cases. A chain of `selecting` calls that ends in
+     the receive's own procedure could become a `merk.receive` as (a)'s
+     chain of `selecting_matching` does; a selector passed in stays the
+     library's. Later, if a program needs it: a loop over the selector's
+     cases, or the runtime's API called from the library.
+   - *Library:* `scan` and `select` stay for `receive/3`; `receive/5`
+     keeps its declaration, as the call code generation replaces.
+
+   Tests and checks for (d): receive-goal.m and receive-goal-host.m stay
+   as they are; a receive with a selector that rejects, with a closure
+   selector, and with `any`, at -O0 and -O2 and under
+   `MERK_GC_EVERY_ALLOC`; a selector value in a GPU process reported as
+   not yet implemented. The register check over every `-gpu.test` must
+   show nothing changed; every `-gpu.test`, and mc-transport's and UTS's
+   lit tests, host and GPU. Measured with benchmarks/receive-goal and
+   benchmarks/pingpong (whose CPU cases use `any`), before and after:
+   `any` must not get slower, and a rejecting selector should get the
+   loop's cursor.
 2. `merk.send`, `merk.spawn`, `merk.new_mailbox`, `merk.monitor` and
    `merk.stop`, from the library's calls, lowered to the same runtime
    calls; the device's special cases of sends move onto `merk.send`.
