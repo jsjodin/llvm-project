@@ -1466,6 +1466,7 @@ loop(Count, Self, Downs, !IO) :-
   - **What counts as selected.** A mailbox is its term's text, as for grouping the arms, over all the clauses of the predicate, so `Self` in two clauses is one mailbox. An arm selects the constructor of its pattern's functor, whatever the arguments, so `select(Box, data(1, _))` counts for every `data/2`: the warning is for messages that nothing in the predicate is written to take, not a check that the patterns cover every value, which would warn about every receive that waits for a particular reply. An arm whose pattern is a variable of its own selects every message; a tested variable, one that occurs outside the goal, selects no constructor. A type without a known set of constructors, such as `int`, a type variable or an abstract type, is selected only by such a variable.
   - **Where.** Once per predicate and mailbox, at the mailbox of the first arm for it, listing the constructors left out in the order of the type's definition. A predicate with a type error is left out, since its arms' constructors are not known.
   - **When.** It needs the mailboxes' types, so it is a pass of its own after type checking (`lib/Semantics/check-receives.cpp`); it runs after mode analysis, whose table of the types' constructors it uses. Desugaring records each selector case's mailbox and which of its arms take every message on the case's lambda expression (`ReceiveCase`), and the pass reads the patterns' constructors from the conditions of the case's chain of if-then-elses, where type checking chose them.
+- **Compiled** (2026-11-27): code generation makes the expansion's selector and call one `merk.receive`, which names each mailbox's predicate (`INPROGRESS.md`, Concurrency in merk, step 1), and lowering makes it a loop over the runtime's candidates (`merk.select`, `Lowering.cpp`, `LowerSelect`): the runtime offers the oldest untried message, by stamp, to its mailbox's predicates in order, each called directly, and takes the first one selected; no selector or closure is made. On the host each mailbox keeps a cursor at the last message passed, so a receive looks at each queued message once (`runtime/mailbox.cpp`, `merk_select_next`); a GPU process's receive does the same over its rings, in each mailbox's order but in no order across mailboxes. `CodeGen/receive-goal-host.m` and `CodeGen/process-gpu-select.m` test them; `benchmarks/receive-goal` measures the host's (Measurements, "Receive goals on the host").
 - **Tests.** `Parser/convert/receive.m` and `receive-errors.m` read the goal and its errors, with the canonical layout and round trips in the unparser's tests; `Semantics/desugar/receive.m` checks the expansion, and `Semantics/receive/` the errors of each pass and the warning; `CodeGen/receive-goal.m` runs the counter loop above and the other cases at -O0 and -O2, its output written by hand, since mmc has no receive goal.
 - **Priority** is still the two-step receive: a `receive` with `timeout(after(0))` and only the urgent arms, whose `timeout` arm is the ordinary `receive`.
 - **Guards, a later extension.** An arm may add a guard after its pattern, `select(Box, reply(R)), R > 0 -> Goal`, as Erlang's `when` does. The guard runs inside the mailbox's `selecting_matching` predicate, after the pattern matches; if it fails, the arm does not select the message, which the mailbox's later arms may still select, or which stays queued. A guard is any pure `semidet` goal. Erlang restricts guards to a fixed set of built-ins that have no side effects, so that choosing a message cannot change the world; purity checking gives the same guarantee with ordinary predicates. A guard sees the pattern's variables and those bound before the goal, and the variables it binds go to the arm's goal with the pattern's. It needs no new operator, since `,` binds more tightly than `->`.
@@ -2175,7 +2176,7 @@ Two new dialects carry Mercury semantics until upstream dialects can take over: 
 | `merk.type_def` | A type's constructors and their arguments' types, from which lowering chooses its layout |
 | `merk.call`, `merk.call_closure`, `merk.closure` | First-order calls, higher-order calls, closure construction |
 | `merk.receive` | A receive goal: its mailboxes, each with the procedure that selects its messages, and the timeout (`INPROGRESS.md`, Concurrency in merk) |
-| `merk.select` | Internal: a GPU process's receive goal in lowering, a loop over the device runtime's candidates that calls each case's matcher directly |
+| `merk.select` | Internal: a receive goal in lowering, a loop over the runtime's candidates (the host's or a GPU process's) that calls each case's matcher directly |
 | `merk.ite`, `merk.not`, `merk.disj` | If-then-else, negation, disjunction |
 | `merk.succeed`, `merk.fail`, `merk.commit` | Produce a solution, fail, prune remaining solutions |
 | `merk.throw`, `merk.try` | Exceptions |
@@ -5043,6 +5044,30 @@ the spin:
 | --- | ---: | ---: |
 | GPU and a thread of its node | 28 to 32 | 24 to 26 |
 | GPU and node 2 | 45 to 53 | 49 to 65 |
+
+### Receive goals on the host
+
+2026-11-27, on a263b380e95c with the host's receive goals compiled as a loop
+(`INPROGRESS.md`, Concurrency in merk, step 1 (c)), the Threadripper at -O2:
+`benchmarks/receive-goal`, nanoseconds a message from main's first send to the
+consumer's sum, main and the consumer running at once. "Library" is the
+receive before (c), over a selector of closures; "loop" is (c). Three rounds
+each, alternating, the range:
+
+| Case | Messages | Library | Loop |
+| --- | ---: | ---: | ---: |
+| One mailbox | 1000000 | 351–365 | 297–314 |
+| Two mailboxes | 1000000 | 441–457 | 375–389 |
+| 100 unselected in front | 100000 | 11671–11759 | 2534–2554 |
+| 1000 unselected in front | 10000 | 1122145–1125299 | 21364–22278 |
+
+With every message selected, the loop saves 50–70 ns a message, about the
+closures and the selector the library's receive made for each receive. With
+messages left queued in front, the library's receive read each one by its
+position, walking the queue from its head, so a receive cost K² for K
+messages in front; the loop's cursor makes it K, about 22 ns a message passed,
+which each receive still pays: the matchers are tried again on every message
+left queued, as Erlang's receive does.
 
 ### Barriers between teams
 

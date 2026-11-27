@@ -18,8 +18,12 @@
 % Each receive goal is a merk.receive, which names each mailbox's matcher
 % (docs/INPROGRESS.md, Concurrency in merk, step 1): the counter loop's
 % has two cases, Self's and Downs', first written first, and no selector.
-% Lowering makes it the library's receive: a selector of a closure of each
-% matcher, the first case innermost, then process.receive_goal.
+% Lowering makes it a loop over the runtime's candidates (Lowering.cpp,
+% LowerSelect): a case for each mailbox, then for each candidate a direct
+% call of its case's matcher, with no closure, and a take or a skip. The
+% matchers' calls are safepoints whose stack maps list what is live at the
+% receive, as Self and Downs are; the library's calls make what a monitor
+% left a message, and report every mailbox closed.
 %
 % mmc has no receive goal, so the output is written by hand.
 %
@@ -30,7 +34,7 @@
 % RUN: FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace < %t2.out
 % RUN: FileCheck %s --check-prefix=ERROR < %t2.err
 % RUN: merkc -fc1 -freceive-goal -emit-merk %s -o - | FileCheck %s --check-prefix=MERK
-% RUN: merkc -fc1 -freceive-goal -O0 -emit-llvm %s -o - | FileCheck %s --check-prefix=LLVM
+% RUN: merkc -fc1 -freceive-goal -O0 -emit-llvm %s -o - | FileCheck %s --check-prefix=LLVM --implicit-check-not='call {{.*}}@process.{{selecting_matching|new_selector|receive_goal}}'
 %
 % OUTPUT:worker died: worker 1
 % OUTPUT-NEXT:idle
@@ -63,14 +67,17 @@
 % MERK-SAME: !merk.term<"receive_goal.counter_msg">) -> !merk.word
 % MERK-SAME: determinism = #merk.determinism<semidet>
 %
-% LLVM-LABEL: define {{.*}} @receive_goal.loop_5_0(
-% LLVM: %[[S0:[0-9]+]] = call {{.*}} @process.new_selector_f0_0(
-% LLVM: store ptr @"receive_goal.loop_5_0$lambda0$receive"
-% LLVM: %[[S1:[0-9]+]] = call {{.*}} @process.selecting_matching_f3_0({{.*}}, ptr addrspace(1) %[[S0]])
-% LLVM: store ptr @"receive_goal.loop_5_0$lambda1$receive"
-% LLVM: %[[S2:[0-9]+]] = call {{.*}} @process.selecting_matching_f3_0({{.*}}, ptr addrspace(1) %[[S1]])
-% LLVM: call {{.*}} @process.receive_goal_5_0({{.*}}, ptr addrspace(1) %[[S2]],
-% LLVM-LABEL: define {{.*}} @"receive_goal.loop_5_0$lambda0$receive"(
+% LLVM-LABEL: define {{.*}} @receive_goal.loop_5_0(i64 %0, ptr addrspace(1) %1, ptr addrspace(1) %2)
+% LLVM: %[[S:[0-9]+]] = call i64 @merk_select_begin(
+% LLVM-COUNT-2: call void @merk_select_case(i64 %[[S]], ptr
+% LLVM: call i64 @merk_select_next(i64 %[[S]])
+% LLVM: call tailcc void @process.select_closed_0_0()
+% LLVM: call tailcc ptr addrspace(1) @process.select_resolve_4_0({{.*}}, i64 %[[S]])
+% LLVM: call tailcc { i1, ptr addrspace(1) } @"receive_goal.loop_5_0$lambda0$select"({{.*}}) [ "deopt"(i64 {{[0-9]+}}, ptr addrspace(1) %1, i64 {{[0-9]+}}, ptr addrspace(1) %2,
+% LLVM: call void @merk_select_take(i64 %[[S]])
+% LLVM: call void @merk_select_skip(i64 %[[S]])
+% LLVM: call tailcc { i1, ptr addrspace(1) } @"receive_goal.loop_5_0$lambda1$select"({{.*}}) [ "deopt"(i64 {{[0-9]+}}, ptr addrspace(1) %1, i64 {{[0-9]+}}, ptr addrspace(1) %2,
+% LLVM-LABEL: define {{.*}} @"receive_goal.loop_5_0$lambda0$select"(
 % LLVM: call {{.*}} @"receive_goal.loop_5_0$lambda0"(
 
 :- module receive_goal.

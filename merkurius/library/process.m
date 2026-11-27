@@ -277,6 +277,14 @@
     % mailbox.
 :- pred receive_closed is erroneous.
 
+    % For a receive goal on the host, which the compiler makes a loop over
+    % the runtime's candidates (merk_select_next): the error once every
+    % mailbox is closed or another node's, as receive/4 reports it; and the
+    % message that what a monitor left becomes, by its function, which
+    % takes the candidate's place.
+:- pred select_closed is erroneous.
+:- pred select_resolve(int::in, M::out, io::di, io::uo) is det.
+
     % Where a process runs: this node's host, or one of its GPUs, by its
     % number (design document, Handles, routing and places). spawn/5
     % spawns a process at a place; only a kind declared on gpu runs on a
@@ -426,6 +434,10 @@ extern MR_Integer merk_mailbox_poll(MR_Integer node_high,
     MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
     MR_Integer secret, MR_Integer position);
 extern MR_Integer merk_mailbox_arrivals(void);
+extern MR_Integer merk_select_down(MR_Integer state, MR_Word *function,
+    MR_Integer *monitor, const char **text);
+extern void merk_select_resolve(MR_Integer state, MR_Word type_info,
+    MR_Word message);
 extern MR_Integer merk_mailbox_last_stamp(void);
 extern MR_Integer merk_mailbox_wait_arrival(MR_Integer seen,
     MR_Integer deadline);
@@ -586,6 +598,40 @@ receive(Mailbox, Selector, Timeout, Result, !IO) :-
 
 receive_closed :-
     error("receive: every mailbox is closed").
+
+select_closed :-
+    error("receive: every mailbox is closed or another node's").
+
+select_resolve(State, Message, !IO) :-
+    select_down(State, Kind, Function, Monitor, Text, !IO),
+    Message = Function(down_info(monitor_ref(Monitor),
+        down_reason(Kind, Text))),
+    select_message(State, Message, !IO).
+
+    % What a monitor left as the candidate: its kind, function, monitor and
+    % text, as read_message gives them.
+:- pred select_down(int::in, int::out, (func(down_info) = M)::out, int::out,
+    string::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    select_down(State::in, Kind::out, Function::out, Monitor::out, Text::out,
+        _IO0::di, _IO::uo),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    const char *text;
+    MR_Word function;
+    (void)TypeInfo_for_M;
+    Kind = merk_select_down(State, &function, &Monitor, &text);
+    Function = function;
+    Text = (MR_String) text;
+").
+
+:- pred select_message(int::in, M::in, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    select_message(State::in, Message::in, _IO0::di, _IO::uo),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    merk_select_resolve(State, TypeInfo_for_M, Message);
+").
 
     % The words, the last first.
 :- type gpu_words

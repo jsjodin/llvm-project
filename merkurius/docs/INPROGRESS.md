@@ -9503,6 +9503,10 @@ runtime has no such check now.
    - *(b) Built 2026-11-27:* a GPU process's receive goals. Tests:
      test/CodeGen/process-gpu-select.m, with its `-gpu.test`, and
      process-gpu-select-errors.m.
+   - *(c) Built 2026-11-27:* the host's receive goals as (b)'s loop, with
+     no closures and the runtime keeping a cursor per mailbox. Tests:
+     test/CodeGen/receive-goal.m's `LLVM` checks, receive-goal-host.m,
+     and the benchmark benchmarks/receive-goal.
 
    Decided with the user:
    - *Each case's matcher is a known procedure,* named by symbol, with
@@ -9546,9 +9550,7 @@ runtime has no such check now.
    host's code, and it made the operation say everything twice, with a
    selector an analysis had to ignore and closures kept alive where
    nothing used them. Rebuilt the same day without it. The host's receive
-   could also scan with direct calls, as (b)'s will on a GPU, without
-   closures; left until measurements show the closures cost, as it must
-   repeat the stamps' order and the wait in lowering.
+   then still made closures for the library's receive, until (c).
 
    `SpecializeKnownClosures` no longer sees the matchers' closures, as
    lowering makes them, but it never specialized these calls: it clones
@@ -9646,6 +9648,53 @@ runtime has no such check now.
    every receive goal: 80 bytes for process-gpu-select's five, on the
    deepest stack, and 620 bytes of scratch. It now returns the case, and
    the loop loads the message from the state's first word.
+
+   How (c) is made: `ExpandReceives` makes every host receive a
+   `merk.select` too, with the type_infos as they are and no ring kinds,
+   and `LowerSelect` makes the same loop with the host's runtime
+   (runtime/mailbox.cpp, `merk_select_*`). What differs from (b):
+   - *Order:* the host keeps its own rule, the oldest selected message
+     across all mailboxes. `next` gives the candidates in stamp order:
+     each mailbox's next untried message is looked at, and the oldest is
+     offered to its mailbox's cases in turn. So the first a matcher
+     selects is the oldest selected, as the library's receive found by
+     letting each case scan and keeping the oldest. The library's check
+     against the last stamp stays: a message is queued and stamped under
+     its mailbox's lock, so every message stamped up to the last stamp,
+     read before looking, is seen, and an oldest found with a later
+     stamp makes `next` look again. With one mailbox nothing is compared.
+   - *Cursors:* each mailbox's cursor is the last message its cases
+     passed, which stays queued, as only the owner removes messages; the
+     next is the cursor's `next`, and `take` unlinks the candidate there.
+     The library's receive read each message by its position, walking
+     the queue from its head each time, so a receive that looked past K
+     messages took time in K².
+   - *Monitors:* what a monitor left needs its function applied on the
+     receiver's side. `next` gives -3 less the case, and the loop calls
+     the library's `process.select_resolve` with the case's type_info,
+     which applies the function and puts the message in the candidate's
+     place, as `message_at` did; `next` then offers it again.
+   - *Every mailbox closed* gives -2, and the loop calls the library's
+     `process.select_closed`, the library's error, which a try goal can
+     catch; a timeout arm does not run then, as before. A GPU process's
+     receive gives nothing there, as (b) has it.
+   - *The collector:* the matchers' and the library's calls are
+     safepoints. `MarkSafepoints` takes `merk.select` for a call whose
+     operands, the captured values and type_infos, are live at it, and
+     `LowerSelect` gives each call a copy of the select's `merk.live`.
+     receive-goal-host.m runs with a collection at every allocation and
+     the root check on.
+   - *State:* a process's, made at its first receive goal (`Process`'s
+     `select`, freed when it ends); a thread that runs no process has its
+     own. A matcher cannot receive, so one is enough. Selected messages
+     are the collector's, so nothing is freed in the loop.
+   - `merk.arms_type` is given in every compile, and a receive whose
+     result's type code generation did not know keeps the matcher's word.
+
+   The library's `receive/4` over a selector, which a program can still
+   call, keeps its positions and closures.
+
+   Measurements: the design document's "Receive goals on the host".
 2. `merk.send`, `merk.spawn`, `merk.new_mailbox`, `merk.monitor` and
    `merk.stop`, from the library's calls, lowered to the same runtime
    calls; the device's special cases of sends move onto `merk.send`.

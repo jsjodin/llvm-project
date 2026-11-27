@@ -62,9 +62,12 @@ bool Allocates(mlir::Operation *op) {
 }
 
 // An operation that runs Merkurius code, which can collect.
+// A receive goal's merk.select calls its matchers and the library in a
+// loop (Lowering.cpp, LowerSelect).
 bool Calls(mlir::Operation *op) {
   return mlir::isa<merk::CallOp, merk::CallClosureOp, merk::CallMethodOp,
-      merk::CallContOp, merk::UnifyWordOp, merk::CompareWordOp>(op);
+      merk::CallContOp, merk::UnifyWordOp, merk::CompareWordOp,
+      merk::SelectOp>(op);
 }
 
 void Union(Live &into, const Live &from) {
@@ -210,7 +213,9 @@ void Marker::Mark(mlir::Operation *op, Live &live) {
   llvm::SmallVector<std::int64_t> counts;
   mlir::Builder builder{op->getContext()};
   llvm::SmallSetVector<mlir::Value, 8> all{live.begin(), live.end()};
-  if (Allocates(op)) {
+  // A select's matchers take its captured values at each of its calls, and
+  // the library its type_infos, though neither may be used after.
+  if (Allocates(op) || mlir::isa<merk::SelectOp>(op)) {
     all.insert(op->operand_begin(), op->operand_end());
   }
   // A call that is given an environment runs while it is in use, though it may

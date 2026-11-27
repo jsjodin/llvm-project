@@ -121,6 +121,9 @@ struct Process {
   void *gpuProcess{nullptr};
   // Its innermost try, or null (exception.cpp).
   TryFrame *tries{nullptr};
+  // Its receive goals' state, or null before its first (mailbox.cpp,
+  // merk_select_begin).
+  void *select{nullptr};
 };
 
 // Guards the timers, and a stack freed until its process has switched away.
@@ -205,6 +208,9 @@ void RequestStop(Process *, DownKind kind = kDownKilled);
 // called at the start of a send, a receive and a spawn, so that a stopped
 // process affects no other where no stack check comes first.
 void CheckStop();
+
+// mailbox.cpp: frees a process's receive goals' state.
+void FreeSelect(void *state);
 
 // gpu-processes.cpp, for a GPU process's record, as RequestStop: sets its
 // slot's stop word (place.h), which the process reads in its receives.

@@ -222,7 +222,8 @@ void MerkGenerator::FormReceive(const Body &goal, const Procedure &callee,
 // merk.ring_kinds, for lowering (Lowering.cpp, LowerSelect); or, if the
 // device cannot make the receive, why in merk.not_on_device, which lowering
 // reports where the device runs it (RejectOnDevice), as the procedure may
-// run only on the host.
+// run only on the host. In any compile, merk.arms_type is the type of what
+// the matchers give, if it is known.
 bool MerkGenerator::FormReceiveOp(const Body &goal,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   mlir::Value result{values_.lookup(arguments[2])};
@@ -341,20 +342,23 @@ bool MerkGenerator::FormReceiveOp(const Body &goal,
       call.getInputs()[2], call.getInputs()[0], mailboxes, infos, captured,
       builder_.getArrayAttr(matchers), builder_.getDenseI64ArrayAttr(counts),
       layouts ? builder_.getArrayAttr(captures) : mlir::ArrayAttr{})};
+  // The type of what a matcher gives, receive_result(X)'s X, which the
+  // receive makes of the matcher's word (Lowering.cpp,
+  // ExpandReceiveAsSelect).
+  const semantics::Type *received{body.vars[arguments[2]].type};
+  std::optional<Represented> arms;
+  if (received->kind == semantics::TypeKind::Named &&
+      received->arguments.size() == 1) {
+    arms = Represent(received->arguments.front());
+  }
+  if (arms) {
+    receive->setAttr("merk.arms_type", mlir::TypeAttr::get(arms->type));
+  }
   if (!notOnDevice.empty()) {
     receive->setAttr("merk.not_on_device", builder_.getStringAttr(notOnDevice));
   } else if (!kinds.empty()) {
-    // With the type of what a matcher gives, receive_result(X)'s X, which
-    // a GPU process's receive makes of the matcher's word.
-    const semantics::Type *received{body.vars[arguments[2]].type};
-    std::optional<Represented> arms;
-    if (received->kind == semantics::TypeKind::Named &&
-        received->arguments.size() == 1) {
-      arms = Represent(received->arguments.front());
-    }
     if (arms) {
       receive->setAttr("merk.ring_kinds", builder_.getDenseI64ArrayAttr(kinds));
-      receive->setAttr("merk.arms_type", mlir::TypeAttr::get(arms->type));
     } else {
       receive->setAttr("merk.not_on_device",
           builder_.getStringAttr("receives a result of an unknown type in a "

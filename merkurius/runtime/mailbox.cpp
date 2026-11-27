@@ -2135,3 +2135,290 @@ extern "C" std::int64_t merk_team_mailbox(std::int64_t team, Word typeInfo,
   pthread_mutex_unlock(&teamsLock);
   return table->teams;
 }
+
+// A receive goal's selection on the host (Lowering.cpp, LowerSelect): the
+// compiled code calls merk_select_begin, merk_select_case for each case,
+// first written first, then merk_select_next for each candidate, whose
+// case's matcher it calls, and merk_select_take or merk_select_skip after.
+// Each candidate is the oldest message, by stamp, that no case has tried,
+// so that the first a matcher selects is the oldest selected. Cases of one
+// mailbox are a group, which tries each message with every case in turn
+// before the next; a group's cursor is the last message it passed, which
+// stays in the mailbox, as only its owner removes messages, and taking is
+// done at the cursor. A process has one state, made at its first receive
+// goal, since a matcher cannot receive.
+namespace {
+
+constexpr std::uint32_t kNoSelectCase{~0u};
+
+struct SelectCase {
+  Handle handle;
+  // The first case of its mailbox, and the next case of the mailbox.
+  std::uint32_t leader;
+  std::uint32_t nextSame;
+  // A leader's: the last message the group passed, null before the first,
+  // and whether its mailbox was found closed.
+  Message *last;
+  bool closed;
+};
+
+struct HostSelect {
+  // The candidate's value, which the compiled code reads: first.
+  Word message;
+  SelectCase *cases;
+  std::uint32_t count;
+  std::uint32_t capacity;
+  // How many mailboxes: with one, the stamps need no comparing.
+  std::uint32_t groups;
+  // The case whose matcher tries the candidate, and whether skip moved it to
+  // the next case of the group, which tries the same message.
+  std::uint32_t current;
+  bool pending;
+  Message *candidate;
+  std::int64_t deadline;
+};
+static_assert(__builtin_offsetof(HostSelect, message) == 0);
+
+// A thread's that runs no process.
+thread_local HostSelect *threadSelect{nullptr};
+
+HostSelect *SelectState() {
+  Process *process{CurrentProcess()};
+  HostSelect **slot{process ? reinterpret_cast<HostSelect **>(&process->select)
+                            : &threadSelect};
+  if (!*slot) {
+    auto *select{static_cast<HostSelect *>(std::calloc(1, sizeof(HostSelect)))};
+    if (!select) {
+      Fail("out of memory for a receive goal", "");
+    }
+    *slot = select;
+  }
+  return *slot;
+}
+
+bool SameHandle(const Handle &a, const Handle &b) {
+  return a.nodeHigh == b.nodeHigh && a.nodeLow == b.nodeLow &&
+      a.placeAndSlot == b.placeAndSlot && a.generation == b.generation &&
+      a.secret == b.secret;
+}
+
+// The group's next message to try, with its mailbox's lock held.
+Message *NextOf(const SelectCase &group, Mailbox *mailbox) {
+  return group.last ? group.last->next : mailbox->head;
+}
+
+// Offers the group's next message, `message`, to its first case: its case,
+// or for what a monitor left, which the receiver's code makes the message
+// first (merk_select_down), -3 less the case. Unlocks the mailbox.
+std::int64_t Offer(HostSelect *select, std::uint32_t group, Mailbox *mailbox,
+    Message *message) {
+  select->current = group;
+  select->candidate = message;
+  if (message->down) {
+    Unlock(mailbox);
+    return -3 - static_cast<std::int64_t>(group);
+  }
+  GiveToReader(message);
+  select->message = message->value;
+  Unlock(mailbox);
+  return group;
+}
+
+} // namespace
+
+namespace merkurius::runtime {
+
+void FreeSelect(void *state) {
+  if (auto *select{static_cast<HostSelect *>(state)}) {
+    std::free(select->cases);
+    std::free(select);
+  }
+}
+
+} // namespace merkurius::runtime
+
+// A receive goal's state, which waits until `milliseconds` have passed, -1
+// for no end.
+extern "C" std::uint64_t merk_select_begin(std::int64_t milliseconds) {
+  CheckStop();
+  pthread_once(&once, InitializeCondition);
+  HostSelect *select{SelectState()};
+  select->count = 0;
+  select->groups = 0;
+  select->pending = false;
+  select->deadline = merk_mailbox_deadline(milliseconds);
+  return reinterpret_cast<std::uint64_t>(select);
+}
+
+// Adds a mailbox: process.mailbox's cell, of the handle's five words.
+extern "C" void merk_select_case(std::uint64_t state, const Word *handle) {
+  auto *select{reinterpret_cast<HostSelect *>(state)};
+  if (select->count == select->capacity) {
+    std::uint32_t capacity{select->capacity ? 2 * select->capacity : 8};
+    auto *cases{static_cast<SelectCase *>(
+        std::realloc(select->cases, capacity * sizeof(SelectCase)))};
+    if (!cases) {
+      Fail("out of memory for a receive goal", "");
+    }
+    select->cases = cases;
+    select->capacity = capacity;
+  }
+  std::uint32_t index{select->count++};
+  SelectCase &c{select->cases[index]};
+  c = SelectCase{
+      Handle{handle[0], handle[1], handle[2],
+          static_cast<std::int64_t>(handle[3]), handle[4]},
+      index, kNoSelectCase, nullptr, false};
+  for (std::uint32_t i{0}; i < index; ++i) {
+    SelectCase &other{select->cases[i]};
+    if (other.leader == i && SameHandle(other.handle, c.handle)) {
+      c.leader = i;
+      std::uint32_t tail{i};
+      while (select->cases[tail].nextSame != kNoSelectCase) {
+        tail = select->cases[tail].nextSame;
+      }
+      select->cases[tail].nextSame = index;
+      return;
+    }
+  }
+  ++select->groups;
+}
+
+// The next candidate's case, with its value in the state's first word; -1
+// at the deadline, -2 once every mailbox is closed or another node's, or -3
+// less the case for what a monitor left. The arrivals are counted before
+// the mailboxes are looked at, so that a message queued meanwhile is not
+// waited past. With several mailboxes, a message is queued with its stamp
+// under its mailbox's lock, so every message stamped up to the last stamp,
+// read first, is seen: an oldest found with a later stamp may have an older
+// one in a mailbox already looked at, which another look finds.
+extern "C" std::int64_t merk_select_next(std::uint64_t state) {
+  auto *select{reinterpret_cast<HostSelect *>(state)};
+  if (select->pending) {
+    select->pending = false;
+    return select->current;
+  }
+  bool several{select->groups > 1};
+  for (;;) {
+    CheckStop();
+    std::int64_t seen{merk_mailbox_arrivals()};
+    std::int64_t mark{several ? merk_mailbox_last_stamp() : 0};
+    std::uint32_t best{kNoSelectCase};
+    std::uint64_t bestStamp{0};
+    bool open{false};
+    for (std::uint32_t i{0}; i < select->count; ++i) {
+      SelectCase &group{select->cases[i]};
+      if (group.leader != i || group.closed) {
+        continue;
+      }
+      Mailbox *mailbox{Find(group.handle)};
+      if (!mailbox) {
+        group.closed = true;
+        continue;
+      }
+      CheckOwner(mailbox);
+      open = true;
+      Message *next{NextOf(group, mailbox)};
+      if (next && !several) {
+        return Offer(select, i, mailbox, next);
+      }
+      if (next && (best == kNoSelectCase || next->stamp < bestStamp)) {
+        best = i;
+        bestStamp = next->stamp;
+      }
+      Unlock(mailbox);
+    }
+    if (best != kNoSelectCase) {
+      if (bestStamp > static_cast<std::uint64_t>(mark)) {
+        continue;
+      }
+      SelectCase &group{select->cases[best]};
+      if (Mailbox *mailbox{Find(group.handle)}) {
+        return Offer(select, best, mailbox, NextOf(group, mailbox));
+      }
+      group.closed = true;
+      continue;
+    }
+    if (!open) {
+      return -2;
+    }
+    if (merk_mailbox_wait_arrival(seen, select->deadline) == 0) {
+      return -1;
+    }
+  }
+}
+
+// The candidate's case did not select it: the next case of its mailbox
+// tries it, or the group passes it.
+extern "C" void merk_select_skip(std::uint64_t state) {
+  auto *select{reinterpret_cast<HostSelect *>(state)};
+  SelectCase &c{select->cases[select->current]};
+  if (c.nextSame != kNoSelectCase) {
+    select->current = c.nextSame;
+    select->pending = true;
+    return;
+  }
+  select->cases[c.leader].last = select->candidate;
+}
+
+// The candidate's case selected it: it leaves its mailbox.
+extern "C" void merk_select_take(std::uint64_t state) {
+  auto *select{reinterpret_cast<HostSelect *>(state)};
+  SelectCase &group{select->cases[select->cases[select->current].leader]};
+  Mailbox *mailbox{Find(group.handle)};
+  if (!mailbox) {
+    return; // closed, which dropped its messages
+  }
+  Message *taken{select->candidate};
+  Message **link{group.last ? &group.last->next : &mailbox->head};
+  *link = taken->next;
+  if (mailbox->tail == &taken->next) {
+    mailbox->tail = link;
+  }
+  --mailbox->count;
+  Unpin(taken);
+  Unlock(mailbox);
+}
+
+// What a monitor left as the candidate: as merk_mailbox_read gives it.
+extern "C" std::int64_t merk_select_down(std::uint64_t state, Word *function,
+    std::int64_t *monitor, const char **text) {
+  auto *select{reinterpret_cast<HostSelect *>(state)};
+  SelectCase &group{select->cases[select->cases[select->current].leader]};
+  Mailbox *mailbox{Find(group.handle)};
+  if (!mailbox || !select->candidate->down) {
+    Fail("a monitor's message was read that is not in its mailbox", "");
+  }
+  Message *message{select->candidate};
+  GiveToReader(message);
+  *function = message->value;
+  *monitor = message->down->monitor;
+  *text = message->down->text;
+  std::int64_t kind{message->down->kind};
+  Unlock(mailbox);
+  return kind;
+}
+
+// The message the monitor's function made takes the candidate's place, as
+// merk_mailbox_resolve's does; the next merk_select_next offers it.
+extern "C" void merk_select_resolve(
+    std::uint64_t state, Word typeInfo, Word value) {
+  auto *select{reinterpret_cast<HostSelect *>(state)};
+  Fragment fragment;
+  Word copy{CopyTyped(value, Resolve(typeInfo, nullptr), fragment)};
+  SelectCase &group{select->cases[select->cases[select->current].leader]};
+  Mailbox *mailbox{Find(group.handle)};
+  if (!mailbox) {
+    FreeChunks(fragment.Take());
+    return;
+  }
+  Message *message{select->candidate};
+  message->value = copy;
+  message->down = nullptr;
+  message->chunks = fragment.Take();
+  if (message->chunks) {
+    CountHeld(1);
+    GiveToReader(message);
+  }
+  Unlock(mailbox);
+}

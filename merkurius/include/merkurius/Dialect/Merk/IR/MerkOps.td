@@ -413,16 +413,19 @@ def Merk_ReceiveOp : Merk_Op<"receive", [
 }
 
 def Merk_SelectOp : Merk_Op<"select", [AttrSizedOperandSegments]> {
-  let summary = "a GPU process's receive goal, as lowering makes it";
+  let summary = "a receive goal, as lowering makes it";
   let description = [{
-    Lowering's form of a `merk.receive` on a device, made first in lowering
-    and flattened into a loop (Lowering.cpp, ExpandReceives and
-    LowerSelect): the word that a case's matcher gave for the message it
-    selected, or failure once `milliseconds` pass (forever if negative), or
-    every mailbox is closed. `ring_kinds` are the mailboxes' ring kinds
-    (device-ring.h), `message_infos` their messages' type_infos as C
-    pointers, for copied terms, and `message_types` the types the matchers
-    take the messages in. Not made by code generation.
+    Lowering's form of a `merk.receive`, made first in lowering and
+    flattened into a loop (Lowering.cpp, ExpandReceives and LowerSelect):
+    the word that a case's matcher gave for the message it selected, or
+    failure once `milliseconds` pass (forever if negative). On a device,
+    in a GPU process, it fails too once every mailbox is closed;
+    `ring_kinds` are the mailboxes' ring kinds (device-ring.h) and
+    `message_infos` their messages' type_infos as C pointers, for copied
+    terms. On the host, with no ring kinds, every mailbox closed is the
+    library's error, and `message_infos` are the type_infos, which make
+    what a monitor left a message. `message_types` are the types the
+    matchers take the messages in. Not made by code generation.
 
     ```mlir
     %w = merk.select %ms matchers [@m.p$lambda0] counts [1] kinds [0]

@@ -18,4 +18,5 @@ by hand.
 | [`open-holes`](open-holes/README.md) | A list built through holes bound at every step, then summed as an open term: E5's shape, compiled |
 | [`open-unify`](open-unify/README.md) | Two open lists, one with holes, unified by the type's unify procedure, then summed |
 | [`pingpong`](pingpong/README.md) | Latency of a message round trip between processes, from a GPU's target region or the CPU, over TCP or within a node, beside plain C floors |
+| [`receive-goal`](receive-goal/README.md) | Throughput of receive goals between the host's processes: one mailbox, two, and messages no case selects in front |
 | [`team-barrier`](team-barrier/README.md) | Time of a barrier between the teams of a target teams region, from team mailboxes, central or a tree, on a GPU or the host's teams |

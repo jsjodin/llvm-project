@@ -485,6 +485,7 @@ Process *TakeLocal() {
   Process *next{TakeLocal()};
   RunProcess(next);
   FreeTrail(self->trail);
+  FreeSelect(self->select);
   FreeStack(self->stack);
   std::free(self);
   unlockAfterSwitch = &schedulerLock;
