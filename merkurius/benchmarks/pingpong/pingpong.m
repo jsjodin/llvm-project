@@ -255,9 +255,11 @@ extern void merk_mailbox_remove(MR_Integer, MR_Integer, MR_Integer,
 extern void merk_mailbox_send(MR_Integer, MR_Integer, MR_Integer,
     MR_Integer, MR_Integer, MR_Word type_info, MR_Word message);
 
-/* A mailbox handle is a cell of five words (library/process.m). */
+/* A mailbox handle is a cell of five words (library/process.m). The thread
+   keeps copies of them: the cell is on the collector's heap, where nothing
+   the thread holds is a root, so a collection may move or free it. */
 typedef struct {
-    MR_Word *in, *out;
+    MR_Word in[5], out[5];
     MR_Word type_info;
 } echo_args;
 
@@ -268,7 +270,7 @@ static echo_args echo;
 static void *run_echo(void *raw)
 {
     echo_args *e = raw;
-    MR_Word *i = e->in, *o = e->out;
+    const MR_Word *i = e->in, *o = e->out;
     for (;;) {
         if (merk_mailbox_wait(i[0], i[1], i[2], i[3], i[4], 0, -1) <= 0) {
             break;
@@ -324,8 +326,10 @@ static void *run_echo(void *raw)
     start_echo(In::in, Out::in, _IO0::di, _IO::uo),
     [will_not_call_merkurius, promise_pure],
 "
-    echo.in = (MR_Word *) In;
-    echo.out = (MR_Word *) Out;
+    for (int k = 0; k < 5; k++) {
+        echo.in[k] = ((MR_Word *) In)[k];
+        echo.out[k] = ((MR_Word *) Out)[k];
+    }
     echo.type_info = TypeInfo_for_T;
     pthread_create(&echo_thread, NULL, run_echo, &echo);
 ").

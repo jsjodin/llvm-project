@@ -1,11 +1,15 @@
 The ping-pong latency benchmark of benchmarks/pingpong, on few rounds, so
 that it keeps building and its answers come back in order: node 1's main
 against node 2 over TCP and against its echo thread, sequentially and with
-OpenMP on the host, where the region runs there; and the C floors.
+OpenMP on the host, where the region runs there; and the C floors. The
+echo thread runs once with a collection at every allocation, as it keeps
+the mailboxes' handles, which are on the collector's heap, by copying
+them.
 
 RUN: merkc -O2 %S/../../benchmarks/pingpong/pingpong.m -o %t.sequential
 RUN: %python %S/../../benchmarks/pingpong/pair.py %t.sequential cpu 200 | FileCheck %s --check-prefix=CPU
 RUN: %t.sequential cpu-local 200 | FileCheck %s --check-prefix=CPU-LOCAL
+RUN: env MERK_GC_EVERY_ALLOC=1 %t.sequential cpu-local 200 | FileCheck %s --check-prefix=CPU-LOCAL
 RUN: %t.sequential gpu-local 200 | FileCheck %s --check-prefix=GPU-LOCAL
 RUN: merkc -O2 -fopenmp %libomp-flags %S/../../benchmarks/pingpong/pingpong.m -o %t
 RUN: %libomp-env %python %S/../../benchmarks/pingpong/pair.py %t gpu 200 | FileCheck %s --check-prefix=GPU
