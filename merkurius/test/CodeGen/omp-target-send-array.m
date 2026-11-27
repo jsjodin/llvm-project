@@ -52,7 +52,7 @@ main(!IO) :-
     ),
 % MERK-LABEL: merk.proc @omp_target_send_array.main_2_0()
 % MERK: omp.target
-% MERK: merk.send %{{.*}} to %{{.*}} key {{-?[0-9]+}} ring_kind 1 : !merk.array<i64>, !merk.term<"process.mailbox(array.array(int))">
+% MERK: merk.send %{{.*}} to %{{.*}} as "array.array(int)" ring_kind 1 : !merk.array<i64>, !merk.term<"process.mailbox(array.array(int))">
     receive_ints(Ints, !IO),
     receive(Floats, any, after(0), F, !IO),
     (

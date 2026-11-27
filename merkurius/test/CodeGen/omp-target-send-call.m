@@ -27,6 +27,9 @@
 twice(Mailbox, N, !IO) :-
     send(Mailbox, N, !IO),
     send(Mailbox, N + 1, !IO).
+% The device's lowering gives its sends the key of "int", by
+% merk::SendOp::Key, as the host's compile registers it: the same number
+% in both.
 % DEVICE-LABEL: define internal void @omp_target_send_call.twice_4_0(
 % DEVICE-COUNT-2: call void @merk_device_send(ptr %{{.*}}, i64 -7556727498917921977, i64 %{{.*}})
 % MERK-LABEL: merk.proc private @omp_target_send_call.twice_4_0(

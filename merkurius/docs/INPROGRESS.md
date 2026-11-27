@@ -9827,10 +9827,13 @@ runtime has no such check now.
      test/CodeGen/send.m, and the omp-target send tests' `MERK` checks.
      Measured: no change to speak of (design document, "Plain receives on
      the host").
-   - *(a') Next, decided with the user 2026-11-27:* the key leaves
-     `merk.send`, which names the message's type instead; lowering hashes
-     it, by one function shared with the host's registration of keys, so
-     the IR says what is sent, not a number to look up.
+   - *(a') Built 2026-11-27, decided with the user:* the key left
+     `merk.send`, which names the message's type instead (`as "int"`);
+     lowering hashes it by `merk::SendOp::Key`, which the host's
+     registration of keys and the team mailbox's key use too, so the IR
+     says what is sent, not a number to look up. At run time nothing
+     changed: the registers of every `-gpu.test` are the same, and
+     omp-target-send-call.m checks the device's key against the host's.
    - *(b) Next:* `merk.new_mailbox`, `merk.close_mailbox`,
      `merk.monitor`, `merk.demonitor` and `merk.stop`, each one runtime
      call; `monitor`'s function stays a closure operand.

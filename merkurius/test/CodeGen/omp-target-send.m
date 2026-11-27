@@ -54,15 +54,15 @@ main(!IO) :-
     receive_all(Floats, !IO),
     receive_all(Chars, !IO),
     receive_all(Colours, !IO).
-% Nothing of the sends crosses but the mailboxes; each send has its type's
-% key.
+% Nothing of the sends crosses but the mailboxes; each send names its
+% message's type, whose key lowering gives it.
 % MERK-LABEL: merk.proc @omp_target_send.main_2_0()
 % MERK-NOT: !merk.type_info to !llvm.ptr
 % MERK: omp.target
-% MERK: merk.send %{{.*}} to %{{.*}} key -7556727498917921977 ring_kind 0 : i64, !merk.term<"process.mailbox(int)">
-% MERK: merk.send %{{.*}} to %{{.*}} key {{-?[0-9]+}} ring_kind 0 : f64, !merk.term<"process.mailbox(float)">
-% MERK: merk.send %{{.*}} to %{{.*}} key {{-?[0-9]+}} ring_kind 0 : i32, !merk.term<"process.mailbox(character)">
-% MERK: merk.send %{{.*}} to %{{.*}} key {{-?[0-9]+}} ring_kind 0 : !merk.term<"omp_target_send.colour">, !merk.term<"process.mailbox(omp_target_send.colour)">
+% MERK: merk.send %{{.*}} to %{{.*}} as "int" ring_kind 0 : i64, !merk.term<"process.mailbox(int)">
+% MERK: merk.send %{{.*}} to %{{.*}} as "float" ring_kind 0 : f64, !merk.term<"process.mailbox(float)">
+% MERK: merk.send %{{.*}} to %{{.*}} as "character" ring_kind 0 : i32, !merk.term<"process.mailbox(character)">
+% MERK: merk.send %{{.*}} to %{{.*}} as "omp_target_send.colour" ring_kind 0 : !merk.term<"omp_target_send.colour">, !merk.term<"process.mailbox(omp_target_send.colour)">
 % MERK: omp.terminator
 
 % At start-up, each key with its type's type_info, in the keys' order.

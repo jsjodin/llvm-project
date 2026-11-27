@@ -430,24 +430,32 @@ def Merk_SendOp : Merk_Op<"send"> {
     `ring_kind`, which code generation gives a send that a device runs
     (MLIRGenOpenMP.cpp, SendInTarget), it is the device runtime's send in
     any compile: of a word (ring kind 0), of an array of one-word elements
-    by its pointer (1), or of a term copied with its type_info (2), each
-    with the key that the host's compile registers for the message's type.
-    Any other on a device is the library's call, in code that the device
-    does not run.
+    by its pointer (1), or of a term copied with its type_info (2). Such a
+    send names its message's type, `message_type`, as Mercury writes it;
+    the device's message carries the name's key (`Key`), which the host's
+    compile registers with the type's type_info. Any other on a device is
+    the library's call, in code that the device does not run.
 
     ```mlir
     merk.send %m to %box with %ti : i64, !merk.term<"process.mailbox(int)">
-    merk.send %m to %box key 42 ring_kind 0
+    merk.send %m to %box as "int" ring_kind 0
         : i64, !merk.term<"process.mailbox(int)">
     ```
   }];
   let arguments = (ins AnyType:$message, AnyType:$mailbox,
-      Optional<Merk_TypeInfoType>:$info, OptionalAttr<I64Attr>:$key,
+      Optional<Merk_TypeInfoType>:$info, OptionalAttr<StrAttr>:$message_type,
       OptionalAttr<I64Attr>:$ring_kind);
   let assemblyFormat = [{
-    $message `to` $mailbox (`with` $info^)? (`key` $key^)?
+    $message `to` $mailbox (`with` $info^)? (`as` $message_type^)?
     (`ring_kind` $ring_kind^)? attr-dict `:` type($message) `,`
     type($mailbox)
+  }];
+  let extraClassDeclaration = [{
+    // The key of a message type's name, by which a device's message names
+    // its type to the host's runtime, and by which the host's compile
+    // registers the type's type_info (MLIRGenOpenMP.cpp,
+    // RegisterMessageTypes): a hash of the name.
+    static std::uint64_t Key(llvm::StringRef messageType);
   }];
   let hasVerifier = 1;
 }

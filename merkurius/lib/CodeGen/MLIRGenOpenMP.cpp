@@ -13,7 +13,6 @@
 
 #include "MLIRGenImpl.h"
 #include "Records.h"
-#include "llvm/Support/xxhash.h"
 #include "mlir/Transforms/RegionUtils.h"
 
 namespace merkurius::codegen::mlirgen {
@@ -268,24 +267,25 @@ std::optional<std::uint64_t> MerkGenerator::MessageKey(
           !CopiedMessage(type, represented))) {
     return std::nullopt;
   }
-  std::uint64_t key{llvm::xxh3_64bits(semantics::TypeToString(type))};
+  std::uint64_t key{merk::SendOp::Key(semantics::TypeToString(type))};
   messageTypes_.try_emplace(key, &type);
   return key;
 }
 
 // process.send in a target region, or in any procedure of the device's
-// compile, all of which run on the device. It is a merk.send with the
-// message type's key and its ring kind, which lowering makes the device
-// runtime's send (Lowering.cpp, ExpandDirectSends): of a word, of an array
-// of one-word elements, or of a term copied by its type_info. The key is a
-// hash of the type's name, which the host's compile registers with the
+// compile, all of which run on the device. It is a merk.send that names
+// the message's type and gives its ring kind, which lowering makes the
+// device runtime's send (Lowering.cpp, ExpandSends): of a word, of an array
+// of one-word elements, or of a term copied by its type_info. Its message
+// carries the key of the type's name (merk::SendOp::Key), which the host's
+// compile registers with the
 // host's type_info at start-up (RegisterMessageTypes), since the host
 // encodes the message by it if the mailbox is another node's; so a
 // procedure that a region calls sends as the region does
 // (docs/INPROGRESS.md, The device's side of the first slice, step 4).
 // Outside a region, a send that the device does not have is left to the
-// call of process.send (false), which becomes a merk.send without a key
-// (MLIRGenCalls.cpp, FormSend), as ReceiveInTarget leaves a receive.
+// call of process.send (false), which becomes a merk.send without a
+// message type (MLIRGenCalls.cpp, FormSend), as ReceiveInTarget leaves a receive.
 bool MerkGenerator::SendInTarget(const Body &goal,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body,
     bool inRegion) {
@@ -318,7 +318,7 @@ bool MerkGenerator::SendInTarget(const Body &goal,
     }
   }
   merk::SendOp::create(builder_, loc, message, mailbox, info,
-      builder_.getI64IntegerAttr(static_cast<std::int64_t>(*key)),
+      builder_.getStringAttr(semantics::TypeToString(*type)),
       builder_.getI64IntegerAttr(ArrayMessage(message.getType()) ? 1
               : copied                                          ? 2
                                                                 : 0));

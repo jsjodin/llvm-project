@@ -12,6 +12,7 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/FunctionImplementation.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/xxhash.h"
 
 using namespace merkurius::merk;
 
@@ -471,10 +472,15 @@ llvm::LogicalResult ReceiveOp::verify() {
   return mlir::success();
 }
 
+std::uint64_t SendOp::Key(llvm::StringRef messageType) {
+  return llvm::xxh3_64bits(messageType);
+}
+
 llvm::LogicalResult SendOp::verify() {
   std::optional<std::int64_t> kind{getRingKind()};
-  if (getKey().has_value() != kind.has_value()) {
-    return emitOpError("needs a ring kind with a key, and neither without");
+  if (getMessageType().has_value() != kind.has_value()) {
+    return emitOpError(
+        "needs a ring kind with a message type, and neither without");
   }
   if (kind && (*kind < 0 || *kind > 2)) {
     return emitOpError("has ring kind ")

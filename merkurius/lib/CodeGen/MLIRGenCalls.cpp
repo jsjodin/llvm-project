@@ -468,7 +468,7 @@ void MerkGenerator::FormSend() {
   }
   auto send{merk::SendOp::create(builder_, call.getLoc(),
       Uncoerced(call.getInputs()[2]), mailbox, call.getInputs()[0],
-      /*key=*/nullptr, /*ring_kind=*/nullptr)};
+      /*message_type=*/nullptr, /*ring_kind=*/nullptr)};
   if (target_.options().IsDevice()) {
     send->setAttr("merk.not_on_device",
         builder_.getStringAttr(

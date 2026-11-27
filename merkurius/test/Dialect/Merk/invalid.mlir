@@ -474,10 +474,10 @@ module {
 }
 
 //--- send-key.mlir
-// SEND-KEY: send-key.mlir:[[@LINE+3]]:5: error: 'merk.send' op needs a ring kind with a key, and neither without
+// SEND-KEY: send-key.mlir:[[@LINE+3]]:5: error: 'merk.send' op needs a ring kind with a message type, and neither without
 module {
   merk.proc @p(%m: i64, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) attributes {determinism = #merk.determinism<det>} {
-    merk.send %m to %b key 7 : i64, !merk.term<"process.mailbox(int)">
+    merk.send %m to %b as "int" : i64, !merk.term<"process.mailbox(int)">
     merk.succeed
   }
 }
@@ -486,7 +486,7 @@ module {
 // SEND-KIND: send-kind.mlir:[[@LINE+3]]:5: error: 'merk.send' op has ring kind 3, not a word (0), an array (1) or a copied term (2)
 module {
   merk.proc @p(%m: i64, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) attributes {determinism = #merk.determinism<det>} {
-    merk.send %m to %b key 7 ring_kind 3 : i64, !merk.term<"process.mailbox(int)">
+    merk.send %m to %b as "int" ring_kind 3 : i64, !merk.term<"process.mailbox(int)">
     merk.succeed
   }
 }
@@ -495,7 +495,7 @@ module {
 // SEND-INFO: send-info.mlir:[[@LINE+3]]:5: error: 'merk.send' op needs the message's type_info if, and only if, it is not the device runtime's send of a word or an array
 module {
   merk.proc @p(%m: i64, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) attributes {determinism = #merk.determinism<det>} {
-    merk.send %m to %b with %i key 7 ring_kind 0 : i64, !merk.term<"process.mailbox(int)">
+    merk.send %m to %b with %i as "int" ring_kind 0 : i64, !merk.term<"process.mailbox(int)">
     merk.succeed
   }
 }

@@ -6147,11 +6147,12 @@ void ExpandDirectReceives(mlir::ModuleOp module) {
 }
 
 // A merk.send (docs/INPROGRESS.md, Concurrency in merk, step 2). With a
-// key, which code generation gives a send that a device runs
+// message type, which code generation gives a send that a device runs
 // (MLIRGenOpenMP.cpp, SendInTarget), it is the device runtime's in any
 // compile: merk_device_send of the message as a word,
 // merk_device_send_array of an array's pointer, or merk_device_send_term
-// with the type_info as a C pointer, each with the handle and the key. Any
+// with the type_info as a C pointer, each with the handle and the key of
+// the type's name (merk::SendOp::Key). Any
 // other is, on the host, the runtime's merk_send with the handle's cell,
 // the type_info and the message as a word, which sends as the library's
 // send does; on a device, the library's call, process.send/4, in code
@@ -6167,7 +6168,9 @@ void ExpandSend(mlir::OpBuilder &builder, merk::SendOp send, bool device) {
   if (std::optional<std::int64_t> kind{send.getRingKind()}) {
     llvm::SmallVector<mlir::Value> operands{send.getMailbox(),
         mlir::arith::ConstantOp::create(
-            builder, loc, i64, builder.getI64IntegerAttr(*send.getKey())),
+            builder, loc, i64,
+            builder.getI64IntegerAttr(static_cast<std::int64_t>(
+                merk::SendOp::Key(*send.getMessageType())))),
         *kind == 1 ? mlir::UnrealizedConversionCastOp::create(
                          builder, loc, pointer, send.getMessage())
                          .getResult(0)
@@ -6213,7 +6216,7 @@ void ExpandSend(mlir::OpBuilder &builder, merk::SendOp send, bool device) {
 void ExpandSends(mlir::ModuleOp module, bool device, bool direct) {
   llvm::SmallVector<merk::SendOp> sends;
   module.walk([&](merk::SendOp op) {
-    if (!direct || op.getKey()) {
+    if (!direct || op.getMessageType()) {
       sends.push_back(op);
     }
   });
