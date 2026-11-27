@@ -9850,10 +9850,103 @@ runtime has no such check now.
      test/Dialect/Merk/mailboxes.mlir, test/CodeGen/mailbox-ops.m, and
      Conformance/extensions/gpu-processes/nyi-gpu-mailbox-ops.m; the
      registers of every `-gpu.test` are unchanged.
-   - *(c) To decide with the user first:* `merk.spawn`, which names the
-     kind and its arguments. A kind's spawn is desugared to its
-     `'spawn_at$Kind'`, and GPU kinds start through place kernels, so its
-     design goes here before it is built.
+   - *(c) Decided with the user 2026-11-27, (c1) built:* `merk.spawn`.
+     **Now:** nothing below the front end knows a spawn.
+     - A closure's spawn, `spawn/3`, `spawn/4` or `spawn_with_stack/4`,
+       is the library's: `start` makes the mailbox, and
+       `merk_process_spawn` copies the closure into the new process.
+     - A kind written out, `spawn(Place, counter(A1), Box, !IO)`, is a
+       call of the generated `'spawn_at$counter'(Place, A1, Box)`
+       (desugar.cpp, `SpawnedKind`; convert-processes.cpp), which
+       switches on the place at run time. At the host it is
+       `'spawn$counter'`, a closure's spawn of a lambda that calls
+       `m.counter(A1, Self)`. At a GPU, a kind declared on gpu is
+       `spawn_kernel`, which gathers the arguments' words by the
+       `gpu_argument` type class into a list, then an array, and
+       launches by the module's and the kind's names
+       (`merk_gpu_process_spawn`); any other kind is a software error.
+
+     **Proposed operation:** the spawned body as a procedure with its
+     captured values, as `merk.receive` names a matcher, so that an
+     analysis can follow a spawn to the process's code:
+
+     ```mlir
+     %box = merk.spawn body @m.counter_4_0$words (%a1 : i64) at %place
+         with %ti kind "counter" on_gpu
+         : !merk.term<"process.place"> -> !merk.term<"process.mailbox(T0)">
+     %box = merk.spawn body unit (%c : !merk.closure) stack %bytes with %ti
+         : -> !merk.term<"process.mailbox(T0)">
+     ```
+
+     - `body`: a procedure that takes the captured values, then the
+       mailbox, and gives the io state as a word, as the `$words` variant
+       of a kind's predicate or of a named body does, which a spawned
+       process runs; or a unit for a closure not known at compile time,
+       the one captured value. A kind's spawn names the kind's predicate's
+       variant itself, not the lambda of `'spawn$Kind'`. A spawn at a GPU,
+       or at another node later, needs a known body: a `unit` body's
+       closure is code of this process, which cannot leave it. This is
+       Erlang's `spawn(Module, Function, Args)` against `spawn(Fun)`,
+       with typed arguments; the source keeps Mercury's typed partial
+       application, `counter(7)`, rather than a list of arguments.
+     - Today's calls, for comparison: `process.spawn_4_0(ti, closure)`,
+       `spawn_5_0(ti, place, closure)`, `spawn_with_stack_5_0(ti, bytes,
+       closure)`, and for a kind `m.'spawn_at$counter'(place, args...)`,
+       with no type_info, as the kind fixes the message type; the io
+       state is no operand. A named body is a closure of its `$words`
+       variant with nothing captured.
+     - `at`: the place, a `process.place`, if the call has one; none is
+       the host.
+     - `stack`: the bytes of `spawn_with_stack`, if given.
+     - `with`: the type_info of the mailbox's messages.
+     - `kind` and `on_gpu`: a declared kind's name and whether it may run
+       on a GPU, which lowering needs for the GPU's path.
+
+     **Formed** in code generation from the call just made, as the other
+     operations are (MLIRGenCalls.cpp, `FormProcessOperation`): calls of
+     a kind's `'spawn_at$Kind'`, found by its process declaration, and of
+     `process.spawn/3`, `/4` and `spawn_with_stack/4`. Desugaring and the
+     generated predicates stay, as the front end checks a kind's
+     arguments' types, modes and determinism by them. On a device, which
+     cannot spawn, it is marked `merk.not_on_device`, as the others.
+
+     **Lowering, in two commits:**
+     - *(c1)* The calls they were: `'spawn_at$Kind'` for a kind, and the
+       library's spawn for a closure, made from the body and its captured
+       values as `ExpandPlainToLibrary` makes a closure. Nothing changes
+       at run time; the operation is there for analyses and for (c2).
+     - *(c2), only if a benchmark shows the cost:* without the closure or
+       the list. At the host, a known body could start without making
+       and copying a closure, as a GPU process starts by its kind's
+       number (MLIRGenProcesses.cpp, `merk_process_dispatch`), the
+       captured values copied as words; at a GPU, the arguments' words
+       written straight into the array that the kernel takes, with no
+       type class calls and no list. A benchmark of spawns a second, at
+       the host and at a GPU, comes first.
+
+     **Rejected:**
+     - *Forming it in desugaring,* in place of `'spawn_at$Kind'`: the
+       place's switch would move into lowering, and the front end would
+       lose the generated predicates by which it checks a kind's
+       arguments.
+     - *An operation for kinds only,* leaving closures' spawns as calls:
+       most programs and tests spawn closures, and an analysis that
+       follows processes needs every spawn.
+     - *The body always as a closure value:* an analysis could not see
+       which code a process runs, which is what the operation is for.
+
+     **Decided:** (c1) first, then (c2) only after a benchmark.
+
+     *(c1) Built 2026-11-27:* `merk.spawn`, formed from every call of
+     `spawn/4`, `spawn/5`, `spawn_with_stack/5` and a kind's
+     `'spawn_at$Kind'` (MLIRGenCalls.cpp, `FormSpawn`, `FormKindSpawn`);
+     lowering makes each the call it was (Lowering.cpp, `ExpandSpawn`),
+     by the closure's entry or the kind's `'spawn_at$Kind'`, kept in
+     `merk.closure_entry` and `merk.spawn_at`, marked temporary until
+     (c2). A closure that a variable still holds is kept. Tests:
+     test/Dialect/Merk/spawn.mlir, invalid.mlir's `SPAWN-*`, and
+     test/CodeGen/spawn-ops.m; the registers of every `-gpu.test` are
+     unchanged.
 3. The runtime's check of a certain deadlock on one node.
 4. A static analysis, a merk pass, once 1 and 2 are in: first, a
    process kind that receives from a mailbox nothing ever sends to.

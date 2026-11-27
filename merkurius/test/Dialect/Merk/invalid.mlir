@@ -44,6 +44,12 @@
 // RUN: not merkc -fc1 -emit-merk %t/send-kind.mlir 2>&1 | FileCheck %s --check-prefix=SEND-KIND
 // RUN: not merkc -fc1 -emit-merk %t/send-info.mlir 2>&1 | FileCheck %s --check-prefix=SEND-INFO
 // RUN: not merkc -fc1 -emit-merk %t/send-no-info.mlir 2>&1 | FileCheck %s --check-prefix=SEND-NO-INFO
+// RUN: not merkc -fc1 -emit-merk %t/spawn-body.mlir 2>&1 | FileCheck %s --check-prefix=SPAWN-BODY
+// RUN: not merkc -fc1 -emit-merk %t/spawn-unit.mlir 2>&1 | FileCheck %s --check-prefix=SPAWN-UNIT
+// RUN: not merkc -fc1 -emit-merk %t/spawn-info.mlir 2>&1 | FileCheck %s --check-prefix=SPAWN-INFO
+// RUN: not merkc -fc1 -emit-merk %t/spawn-kind-info.mlir 2>&1 | FileCheck %s --check-prefix=SPAWN-KIND-INFO
+// RUN: not merkc -fc1 -emit-merk %t/spawn-gpu.mlir 2>&1 | FileCheck %s --check-prefix=SPAWN-GPU
+// RUN: not merkc -fc1 -emit-merk %t/spawn-place-stack.mlir 2>&1 | FileCheck %s --check-prefix=SPAWN-PLACE-STACK
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -505,6 +511,60 @@ module {
 module {
   merk.proc @p(%m: i64, %i: !merk.type_info, %b: !merk.term<"process.mailbox(int)">) attributes {determinism = #merk.determinism<det>} {
     merk.send %m to %b : i64, !merk.term<"process.mailbox(int)">
+    merk.succeed
+  }
+}
+
+//--- spawn-body.mlir
+// SPAWN-BODY: spawn-body.mlir:[[@LINE+3]]:10: error: 'merk.spawn' op needs its body to be a symbol, or a unit for a closure
+module {
+  merk.proc @p(%n: i64, %c: !merk.closure, %p: !merk.term<"process.place">, %i: !merk.type_info) attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.spawn body "b"(%n : i64) with %i : !merk.term<"process.mailbox(T0)">
+    merk.succeed
+  }
+}
+
+//--- spawn-unit.mlir
+// SPAWN-UNIT: spawn-unit.mlir:[[@LINE+3]]:10: error: 'merk.spawn' op needs a closure, its one captured value, for a body that is a unit
+module {
+  merk.proc @p(%n: i64, %c: !merk.closure, %p: !merk.term<"process.place">, %i: !merk.type_info) attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.spawn body unit(%n : i64) with %i : !merk.term<"process.mailbox(T0)">
+    merk.succeed
+  }
+}
+
+//--- spawn-info.mlir
+// SPAWN-INFO: spawn-info.mlir:[[@LINE+3]]:10: error: 'merk.spawn' op needs the type_info of its messages if, and only if, it spawns no declared kind
+module {
+  merk.proc @p(%n: i64, %c: !merk.closure, %p: !merk.term<"process.place">, %i: !merk.type_info) attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.spawn body unit(%c : !merk.closure) : !merk.term<"process.mailbox(T0)">
+    merk.succeed
+  }
+}
+
+//--- spawn-kind-info.mlir
+// SPAWN-KIND-INFO: spawn-kind-info.mlir:[[@LINE+3]]:10: error: 'merk.spawn' op needs the type_info of its messages if, and only if, it spawns no declared kind
+module {
+  merk.proc @p(%n: i64, %c: !merk.closure, %p: !merk.term<"process.place">, %i: !merk.type_info) attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.spawn body @k(%n : i64) at %p : !merk.term<"process.place"> with %i kind "k" : !merk.term<"process.mailbox(T0)">
+    merk.succeed
+  }
+}
+
+//--- spawn-gpu.mlir
+// SPAWN-GPU: spawn-gpu.mlir:[[@LINE+3]]:10: error: 'merk.spawn' op may run on a GPU only as a declared kind
+module {
+  merk.proc @p(%n: i64, %c: !merk.closure, %p: !merk.term<"process.place">, %i: !merk.type_info) attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.spawn body unit(%c : !merk.closure) with %i on_gpu : !merk.term<"process.mailbox(T0)">
+    merk.succeed
+  }
+}
+
+//--- spawn-place-stack.mlir
+// SPAWN-PLACE-STACK: spawn-place-stack.mlir:[[@LINE+3]]:10: error: 'merk.spawn' op has both a place and a stack's size
+module {
+  merk.proc @p(%n: i64, %c: !merk.closure, %p: !merk.term<"process.place">, %i: !merk.type_info) attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.spawn body unit(%c : !merk.closure) at %p : !merk.term<"process.place"> stack %n with %i : !merk.term<"process.mailbox(T0)">
     merk.succeed
   }
 }

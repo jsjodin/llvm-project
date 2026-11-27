@@ -6249,8 +6249,77 @@ void ReplaceByLibraryCall(mlir::OpBuilder &builder, mlir::Operation *op,
   op->erase();
 }
 
-// The operations of mailboxes and monitors (docs/INPROGRESS.md,
-// Concurrency in merk, step 2 (b)). On the host, merk.close_mailbox and
+// A merk.spawn as the call that code generation made before there was the
+// operation (docs/INPROGRESS.md, Concurrency in merk, step 2 (c1)): a
+// kind's 'spawn_at$Kind' with the place and the kind's arguments; else the
+// library's spawn, spawn/5 with a place, spawn_with_stack/5 with a stack's
+// size, or spawn/4, with the type_info and the closure: a unit body's, or
+// one made of the known body's entry and its captured values.
+// Temporary (merk.spawn step (c1), docs/INPROGRESS.md, Concurrency in
+// merk): until lowering spawns without these calls (c2).
+void ExpandSpawn(mlir::OpBuilder &builder, merk::SpawnOp spawn) {
+  mlir::MLIRContext *context{builder.getContext()};
+  mlir::Location loc{spawn.getLoc()};
+  auto module{spawn->getParentOfType<mlir::ModuleOp>()};
+  auto word{merk::WordType::get(context)};
+  auto closureType{merk::ClosureType::get(context)};
+  auto mailbox0{merk::TermType::get(context, "process.mailbox(T0)")};
+  builder.setInsertionPoint(spawn);
+  mlir::Type result{spawn.getMailbox().getType()};
+  mlir::Value made;
+  if (auto spawnAt{
+          spawn->getAttrOfType<mlir::FlatSymbolRefAttr>("merk.spawn_at")}) {
+    llvm::SmallVector<mlir::Value> arguments{spawn.getPlace()};
+    arguments.append(spawn.getCaptured().begin(), spawn.getCaptured().end());
+    merk::ProcOp callee{ProcNamed(module, spawnAt.getValue(),
+        builder.getFunctionType(mlir::ValueRange{arguments}.getTypes(), {result}),
+        merk::Determinism::Det)};
+    made = merk::CallOp::create(builder, loc, mlir::TypeRange{result},
+        callee.getSymName(), arguments)
+               .getResult(0);
+  } else {
+    mlir::Value closure;
+    if (auto entry{spawn->getAttrOfType<mlir::FlatSymbolRefAttr>(
+            "merk.closure_entry")}) {
+      llvm::SmallVector<mlir::Value> words;
+      for (mlir::Value value : spawn.getCaptured()) {
+        words.push_back(CoerceTo(builder, loc, value, word));
+      }
+      std::optional<mlir::ArrayAttr> captures{spawn.getCaptures()};
+      closure = merk::ClosureOp::create(builder, loc, closureType, entry,
+          words, captures ? *captures : mlir::ArrayAttr{});
+    } else {
+      closure = CoerceTo(builder, loc, spawn.getCaptured().front(), closureType);
+    }
+    auto info{merk::TypeInfoType::get(context)};
+    llvm::SmallVector<mlir::Value> arguments{spawn.getInfo()};
+    llvm::SmallVector<mlir::Type> inputs{info};
+    llvm::StringRef name{"process.spawn_4_0"};
+    if (mlir::Value place{spawn.getPlace()}) {
+      name = "process.spawn_5_0";
+      auto placeType{merk::TermType::get(context, "process.place")};
+      arguments.push_back(CoerceTo(builder, loc, place, placeType));
+      inputs.push_back(placeType);
+    } else if (mlir::Value stack{spawn.getStack()}) {
+      name = "process.spawn_with_stack_5_0";
+      arguments.push_back(stack);
+      inputs.push_back(stack.getType());
+    }
+    arguments.push_back(closure);
+    inputs.push_back(closureType);
+    merk::ProcOp library{ProcNamed(module, name,
+        builder.getFunctionType(inputs, {mailbox0}), merk::Determinism::Det)};
+    made = merk::CallOp::create(builder, loc, mlir::TypeRange{mailbox0},
+        library.getSymName(), arguments)
+               .getResult(0);
+  }
+  spawn.getMailbox().replaceAllUsesWith(CoerceTo(builder, loc, made, result));
+  spawn->erase();
+}
+
+// The operations of mailboxes, monitors and spawns (docs/INPROGRESS.md,
+// Concurrency in merk, step 2 (b) and (c)); a spawn is its call
+// (ExpandSpawn). On the host, merk.close_mailbox and
 // merk.stop are the runtime's merk_close and merk_stop with the handle's
 // cell, as merk.send is merk_send; merk.new_mailbox, merk.monitor and
 // merk.demonitor are the library's calls, as a mailbox and a monitor_ref
@@ -6267,13 +6336,15 @@ void ExpandProcessOps(mlir::ModuleOp module, bool device) {
   llvm::SmallVector<mlir::Operation *> ops;
   module.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::NewMailboxOp, merk::CloseMailboxOp, merk::StopOp,
-            merk::MonitorOp, merk::DemonitorOp>(op)) {
+            merk::MonitorOp, merk::DemonitorOp, merk::SpawnOp>(op)) {
       ops.push_back(op);
     }
   });
   mlir::OpBuilder builder{context};
   for (mlir::Operation *op : ops) {
-    if (auto make{mlir::dyn_cast<merk::NewMailboxOp>(op)}) {
+    if (auto spawn{mlir::dyn_cast<merk::SpawnOp>(op)}) {
+      ExpandSpawn(builder, spawn);
+    } else if (auto make{mlir::dyn_cast<merk::NewMailboxOp>(op)}) {
       ReplaceByLibraryCall(builder, op, "process.new_mailbox_3_0", {info},
           {mailbox0});
     } else if (auto monitor{mlir::dyn_cast<merk::MonitorOp>(op)}) {
@@ -6995,7 +7066,8 @@ bool Lowerer::RejectDeviceMessages() {
   });
   module_.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::SendOp, merk::NewMailboxOp, merk::CloseMailboxOp,
-            merk::StopOp, merk::MonitorOp, merk::DemonitorOp>(op)) {
+            merk::StopOp, merk::MonitorOp, merk::DemonitorOp, merk::SpawnOp>(
+            op)) {
       if (auto why{
               op->getAttrOfType<mlir::StringAttr>("merk.not_on_device")}) {
         bad = RejectOnDevice(op, why.getValue(), kernels_) || bad;

@@ -1052,7 +1052,12 @@ private:
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   bool FormReceiveOp(
       const Body &, llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
-  merk::CallOp JustCalled(llvm::StringRef callee, unsigned inputs);
+  merk::CallOp JustCalled(
+      llvm::StringRef callee, std::optional<unsigned> inputs);
+  // A call of a library's spawn, or of a kind's 'spawn_at$Kind', just
+  // generated, as a merk.spawn.
+  void FormSpawn(bool stack, bool place);
+  void FormKindSpawn(const Procedure &callee);
   // The call of process.send/4, just generated, as a merk.send.
   void FormSend();
   // A call of a mailbox's or a monitor's predicate, just generated, as its

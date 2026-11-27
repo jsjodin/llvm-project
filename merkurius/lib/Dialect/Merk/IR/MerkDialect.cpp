@@ -472,6 +472,35 @@ llvm::LogicalResult ReceiveOp::verify() {
   return mlir::success();
 }
 
+llvm::LogicalResult SpawnOp::verify() {
+  mlir::Attribute body{getBody()};
+  if (!mlir::isa<mlir::FlatSymbolRefAttr, mlir::UnitAttr>(body)) {
+    return emitOpError("needs its body to be a symbol, or a unit for a "
+                       "closure");
+  }
+  if (mlir::isa<mlir::UnitAttr>(body) &&
+      (getCaptured().size() != 1 ||
+          !mlir::isa<ClosureType>(getCaptured().front().getType()))) {
+    return emitOpError("needs a closure, its one captured value, for a "
+                       "body that is a unit");
+  }
+  if (getKind().has_value() == static_cast<bool>(getInfo())) {
+    return emitOpError("needs the type_info of its messages if, and only "
+                       "if, it spawns no declared kind");
+  }
+  if (getOnGpu() && !getKind()) {
+    return emitOpError("may run on a GPU only as a declared kind");
+  }
+  if (getPlace() && getStack()) {
+    return emitOpError("has both a place and a stack's size");
+  }
+  if (std::optional<mlir::ArrayAttr> captures{getCaptures()};
+      captures && captures->size() != getCaptured().size()) {
+    return emitOpError("needs what each captured value is");
+  }
+  return mlir::success();
+}
+
 std::uint64_t SendOp::Key(llvm::StringRef messageType) {
   return llvm::xxh3_64bits(messageType);
 }

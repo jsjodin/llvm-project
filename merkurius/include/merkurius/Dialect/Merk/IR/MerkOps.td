@@ -557,6 +557,46 @@ def Merk_DemonitorOp : Merk_Op<"demonitor"> {
   }];
 }
 
+def Merk_SpawnOp : Merk_Op<"spawn", [AttrSizedOperandSegments]> {
+  let summary = "a new process, which runs a body on a new mailbox";
+  let description = [{
+    `process.spawn/4`, `spawn/5` and `spawn_with_stack/5`, and a process
+    kind's spawn, `spawn(Place, counter(A1), Box, !IO)`: a new process
+    runs the body on a new mailbox, which it owns and which is the result
+    (docs/INPROGRESS.md, Concurrency in merk, step 2 (c)). The body is a
+    procedure that takes the captured values, then the mailbox, and gives
+    the io state as a word, as the `$words` variant of a kind's predicate
+    or of a named body does; or a unit for a closure not known at compile
+    time, the one captured value. The procedure may be another module's.
+    `at` is the place, none being the host; `stack` the bytes of
+    `spawn_with_stack`; `with` the type_info of the mailbox's messages,
+    which a kind's spawn has not, as the kind fixes them; `kind` a
+    declared kind's name, and `on_gpu` whether it may run on a GPU.
+    `captures` says what each captured value is, as a closure's do.
+
+    ```mlir
+    %box = merk.spawn body @m.counter_4_0$words(%a1, %r : i64,
+        !merk.term<"process.mailbox(int)">) at %place
+        : !merk.term<"process.place"> kind "counter"
+        : !merk.term<"process.mailbox(m.msg)">
+    %box = merk.spawn body unit(%c : !merk.closure) stack %bytes with %ti
+        : !merk.term<"process.mailbox(T0)">
+    ```
+  }];
+  let arguments = (ins Variadic<AnyType>:$captured, Optional<AnyType>:$place,
+      Optional<I64>:$stack, Optional<Merk_TypeInfoType>:$info, AnyAttr:$body,
+      OptionalAttr<StrAttr>:$kind, UnitAttr:$on_gpu,
+      OptionalAttr<ArrayAttr>:$captures);
+  let results = (outs AnyType:$mailbox);
+  let assemblyFormat = [{
+    `body` $body `(` ($captured^ `:` type($captured))? `)`
+    (`at` $place^ `:` type($place))? (`stack` $stack^)? (`with` $info^)?
+    (`kind` $kind^)? (`on_gpu` $on_gpu^)? (`captures` $captures^)?
+    attr-dict `:` type($mailbox)
+  }];
+  let hasVerifier = 1;
+}
+
 def Merk_SelectOp : Merk_Op<"select", [AttrSizedOperandSegments]> {
   let summary = "a receive goal, as lowering makes it";
   let description = [{

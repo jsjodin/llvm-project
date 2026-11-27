@@ -213,7 +213,21 @@ void MerkGenerator::FormProcessOperation(const Body &goal,
     const Procedure &callee, llvm::ArrayRef<BodyVar> arguments,
     const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
-  if (failed_ || Terminated() || symbol.module != "process") {
+  if (failed_ || Terminated()) {
+    return;
+  }
+  if (symbol.kind == semantics::SymbolKind::Predicate &&
+      symbol.name.starts_with("spawn_at$")) {
+    FormKindSpawn(callee);
+    return;
+  }
+  if (symbol.module != "process") {
+    return;
+  }
+  if ((symbol.name == "spawn" && (symbol.arity == 4 || symbol.arity == 5)) ||
+      (symbol.name == "spawn_with_stack" && symbol.arity == 5)) {
+    bool stack{symbol.name == "spawn_with_stack"};
+    FormSpawn(stack, !stack && symbol.arity == 5);
     return;
   }
   if (symbol.name == "send" && symbol.arity == 4) {
@@ -451,11 +465,11 @@ void MerkGenerator::ReplaceReceiveCall(
   }
 }
 
-// The call of `callee`, a procedure of no more than `inputs` inputs, just
+// The call of `callee`, a procedure of `inputs` inputs if given, just
 // generated: the last operation before the insertion point but the
 // coercions of its results; or null if that is not such a call.
 merk::CallOp MerkGenerator::JustCalled(
-    llvm::StringRef callee, unsigned inputs) {
+    llvm::StringRef callee, std::optional<unsigned> inputs) {
   mlir::Block *block{builder_.getInsertionBlock()};
   if (!block) {
     return {};
@@ -467,7 +481,7 @@ merk::CallOp MerkGenerator::JustCalled(
     }
     auto call{mlir::dyn_cast<merk::CallOp>(op)};
     if (!call || call.getCallee() != callee ||
-        call.getInputs().size() != inputs) {
+        (inputs && call.getInputs().size() != *inputs)) {
       return {};
     }
     return call;
@@ -522,6 +536,149 @@ void MerkGenerator::FormSend() {
   if (target_.options().IsDevice()) {
     NotOnDevice(send, "sends messages of a type that a device does not send");
   }
+  call->erase();
+}
+
+namespace {
+// The operations that made a value and are left unused: a closure and the
+// coercions between it and a call that went, unless a variable holds one.
+void EraseUnused(
+    mlir::Value value, const llvm::DenseMap<BodyVar, mlir::Value> &values) {
+  while (mlir::Operation *op{value.getDefiningOp()}) {
+    if (!op->use_empty() ||
+        !mlir::isa<merk::ToWordOp, merk::FromWordOp, merk::ClosureOp>(op) ||
+        llvm::any_of(values, [&](const auto &entry) {
+          return entry.second == value;
+        })) {
+      return;
+    }
+    mlir::Value from{op->getNumOperands() == 1 &&
+                !mlir::isa<merk::ClosureOp>(op)
+            ? op->getOperand(0)
+            : mlir::Value{}};
+    op->erase();
+    if (!from) {
+      return;
+    }
+    value = from;
+  }
+}
+} // namespace
+
+// A call of process.spawn/4, spawn/5 or spawn_with_stack/5, just generated
+// (docs/INPROGRESS.md, Concurrency in merk, step 2 (c)): a merk.spawn. A
+// closure of a known procedure, a named predicate or a lambda expression,
+// makes that procedure the body, with the closure's captured values in the
+// types the procedure takes; any other closure is the one captured value
+// of a unit body. The closure entry, by which lowering makes the closure
+// again, is kept in merk.closure_entry.
+// Temporary (merk.spawn step (c1), docs/INPROGRESS.md, Concurrency in
+// merk): merk.closure_entry, until lowering starts a known body without a
+// closure (c2).
+void MerkGenerator::FormSpawn(bool stack, bool place) {
+  llvm::StringRef callee{stack ? "process.spawn_with_stack_5_0"
+          : place              ? "process.spawn_5_0"
+                               : "process.spawn_4_0"};
+  unsigned inputs{stack || place ? 3u : 2u};
+  merk::CallOp call{JustCalled(callee, inputs)};
+  if (!call || call->getNumResults() != 1 ||
+      !mlir::isa<merk::TypeInfoType>(call.getInputs()[0].getType())) {
+    return;
+  }
+  mlir::Location loc{call.getLoc()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPoint(call);
+  mlir::Value given{call.getInputs()[inputs - 1]};
+  auto closure{Uncoerced(given).getDefiningOp<merk::ClosureOp>()};
+  merk::ProcOp known;
+  if (closure && closure->getBlock() == call->getBlock()) {
+    auto lambda{entryLambdas_.find(closure.getEntry())};
+    if (lambda != entryLambdas_.end()) {
+      known = module_.lookupSymbol<merk::ProcOp>(lambda->second);
+    }
+    if (known &&
+        (known.getDeterminism() != merk::Determinism::Det ||
+            known.getFunctionType().getNumInputs() !=
+                closure.getCaptured().size() + 1)) {
+      known = nullptr;
+    }
+  }
+  llvm::SmallVector<mlir::Value> captured;
+  mlir::Attribute body{mlir::UnitAttr::get(&context_)};
+  if (known) {
+    mlir::FunctionType type{known.getFunctionType()};
+    for (auto [i, word] : llvm::enumerate(closure.getCaptured())) {
+      captured.push_back(Coerce(word, type.getInput(i), loc));
+    }
+    body = mlir::FlatSymbolRefAttr::get(&context_, known.getSymName());
+  } else {
+    captured.push_back(given);
+  }
+  auto spawn{merk::SpawnOp::create(builder_, loc, call.getResult(0).getType(),
+      captured, place ? call.getInputs()[1] : mlir::Value{},
+      stack ? call.getInputs()[1] : mlir::Value{}, call.getInputs()[0], body,
+      /*kind=*/nullptr, /*on_gpu=*/false,
+      known && closure.getCaptures() ? *closure.getCaptures()
+                                     : mlir::ArrayAttr{})};
+  if (known) {
+    spawn->setAttr("merk.closure_entry", closure.getEntryAttr());
+  }
+  if (target_.options().IsDevice()) {
+    NotOnDevice(spawn, "spawns a process");
+  }
+  ReplaceResult(call.getResult(0), spawn.getMailbox(), values_);
+  call->erase();
+  if (known) {
+    EraseUnused(given, values_);
+  }
+}
+
+// A call of a process kind's 'spawn_at$Kind', just generated: a merk.spawn
+// whose body is the `$words` variant of the kind's predicate, which a
+// spawned process runs, with the kind's arguments, at the call's place,
+// naming the kind, and saying whether the kind may run on a GPU if it is
+// this module's. The callee, by which lowering makes the call again, is
+// kept in merk.spawn_at.
+// Temporary (merk.spawn step (c1), docs/INPROGRESS.md, Concurrency in
+// merk): merk.spawn_at, until lowering spawns the kind itself (c2).
+void MerkGenerator::FormKindSpawn(const Procedure &callee) {
+  const semantics::Symbol &symbol{*callee.symbol};
+  llvm::StringRef kind{
+      llvm::StringRef{symbol.name}.drop_front(llvm::StringRef{"spawn_at$"}.size())};
+  merk::CallOp call{JustCalled(MangledName(callee), std::nullopt)};
+  if (!call || call->getNumResults() != 1 || call.getInputs().empty()) {
+    return;
+  }
+  const Procedure *predicate{nullptr};
+  for (const Procedure &procedure : modes_.procedures()) {
+    const semantics::Symbol &each{*procedure.symbol};
+    if (each.module == symbol.module &&
+        each.kind == semantics::SymbolKind::Predicate && each.name == kind &&
+        each.arity + 1 == symbol.arity) {
+      predicate = &procedure;
+      break;
+    }
+  }
+  if (!predicate) {
+    return;
+  }
+  bool onGpu{symbol.module == moduleName_ &&
+      llvm::any_of(gpuKinds_, [&](const parser::ProcessDecl *decl) {
+        return decl->name == kind;
+      })};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPoint(call);
+  auto spawn{merk::SpawnOp::create(builder_, call.getLoc(),
+      call.getResult(0).getType(), call.getInputs().drop_front(),
+      call.getInputs()[0], /*stack=*/mlir::Value{}, /*info=*/mlir::Value{},
+      mlir::FlatSymbolRefAttr::get(
+          &context_, MangledName(*predicate) + "$words"),
+      builder_.getStringAttr(kind), onGpu, mlir::ArrayAttr{})};
+  spawn->setAttr("merk.spawn_at", call.getCalleeAttr());
+  if (target_.options().IsDevice()) {
+    NotOnDevice(spawn, "spawns a process");
+  }
+  ReplaceResult(call.getResult(0), spawn.getMailbox(), values_);
   call->erase();
 }
 
