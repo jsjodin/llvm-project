@@ -9834,9 +9834,22 @@ runtime has no such check now.
      says what is sent, not a number to look up. At run time nothing
      changed: the registers of every `-gpu.test` are the same, and
      omp-target-send-call.m checks the device's key against the host's.
-   - *(b) Next:* `merk.new_mailbox`, `merk.close_mailbox`,
-     `merk.monitor`, `merk.demonitor` and `merk.stop`, each one runtime
-     call; `monitor`'s function stays a closure operand.
+   - *(b) Built 2026-11-27:* `merk.new_mailbox`, `merk.close_mailbox`,
+     `merk.stop`, `merk.monitor` and `merk.demonitor`, made from every
+     call of their predicates (MLIRGenCalls.cpp, `FormMailboxOperation`),
+     with the type_infos the calls take. On the host, `close_mailbox` and
+     `stop` are the runtime's `merk_close` and `merk_stop` with the
+     handle's cell, as a send is `merk_send`; `new_mailbox`, `monitor` and
+     `demonitor` are the library's calls again (Lowering.cpp,
+     `ExpandProcessOps`), since a mailbox and a `monitor_ref` are
+     abstract outside the library, which alone builds them: a module
+     that only uses mailboxes has no layout for them. On a device, which
+     has none of them, each says why in `merk.not_on_device`, and is
+     reported where it would run; `monitor` is rejected before, by the
+     front end, as its `monitor_ref` and function are not flat. Tests:
+     test/Dialect/Merk/mailboxes.mlir, test/CodeGen/mailbox-ops.m, and
+     Conformance/extensions/gpu-processes/nyi-gpu-mailbox-ops.m; the
+     registers of every `-gpu.test` are unchanged.
    - *(c) To decide with the user first:* `merk.spawn`, which names the
      kind and its arguments. A kind's spawn is desugared to its
      `'spawn_at$Kind'`, and GPU kinds start through place kernels, so its

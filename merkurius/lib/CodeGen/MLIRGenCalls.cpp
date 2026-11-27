@@ -207,7 +207,8 @@ bool IsSelectorPart(mlir::Operation *op) {
 // receive_result(T0), from which lowering knows its selectors', which the
 // collector needs. A call of receive_goal that is not of that shape, all
 // in one block, stays a call. A call of send/4 or receive/5 is its
-// operation too (FormSend, FormPlainReceive).
+// operation too (FormSend, FormPlainReceive), as are those of the
+// mailboxes and monitors (FormMailboxOperation).
 void MerkGenerator::FormProcessOperation(const Body &goal,
     const Procedure &callee, llvm::ArrayRef<BodyVar> arguments,
     const ProcedureBody &body) {
@@ -217,6 +218,14 @@ void MerkGenerator::FormProcessOperation(const Body &goal,
   }
   if (symbol.name == "send" && symbol.arity == 4) {
     FormSend();
+    return;
+  }
+  if ((symbol.arity == 3 &&
+          llvm::is_contained({"new_mailbox", "close_mailbox", "stop",
+                                 "demonitor"},
+              symbol.name)) ||
+      (symbol.arity == 6 && symbol.name == "monitor")) {
+    FormMailboxOperation(symbol.name);
     return;
   }
   if (symbol.name == "receive" && symbol.arity == 6) {
@@ -442,39 +451,156 @@ void MerkGenerator::ReplaceReceiveCall(
   }
 }
 
+// The call of `callee`, a procedure of no more than `inputs` inputs, just
+// generated: the last operation before the insertion point but the
+// coercions of its results; or null if that is not such a call.
+merk::CallOp MerkGenerator::JustCalled(
+    llvm::StringRef callee, unsigned inputs) {
+  mlir::Block *block{builder_.getInsertionBlock()};
+  if (!block) {
+    return {};
+  }
+  for (auto at{builder_.getInsertionPoint()}; at != block->begin();) {
+    mlir::Operation *op{&*--at};
+    if (mlir::isa<merk::ToWordOp, merk::FromWordOp>(op)) {
+      continue;
+    }
+    auto call{mlir::dyn_cast<merk::CallOp>(op)};
+    if (!call || call.getCallee() != callee ||
+        call.getInputs().size() != inputs) {
+      return {};
+    }
+    return call;
+  }
+  return {};
+}
+
+namespace {
+// A mailbox as its own type, before Coerce made a word of it, if that is a
+// term.
+mlir::Value MailboxTerm(mlir::Value mailbox) {
+  mlir::Value term{Uncoerced(mailbox)};
+  return mlir::isa<merk::TermType>(term.getType()) ? term : mailbox;
+}
+
+// Every use of a call's result, and every variable that has it, given
+// another value instead.
+void ReplaceResult(mlir::Value from, mlir::Value to,
+    llvm::DenseMap<BodyVar, mlir::Value> &values) {
+  from.replaceAllUsesWith(to);
+  for (auto &[var, value] : values) {
+    if (value == from) {
+      value = to;
+    }
+  }
+}
+
+// Marks a process operation that a device cannot make, saying why
+// (Lowering.cpp, RejectDeviceMessages).
+void NotOnDevice(mlir::Operation *op, llvm::StringRef why) {
+  op->setAttr(
+      "merk.not_on_device", mlir::StringAttr::get(op->getContext(), why));
+}
+} // namespace
+
 // A call of process.send/4, just generated, that SendInTarget did not make
 // the device runtime's (docs/INPROGRESS.md, Concurrency in merk, step 2):
 // a merk.send of the message, to the mailbox, with the message type's
-// type_info, which the call takes first. It is the operation before the
-// insertion point, as the call has no results. On a device it says why the
+// type_info, which the call takes first. On a device it says why the
 // device cannot make it, in merk.not_on_device, which lowering reports
 // where the device runs it (Lowering.cpp, RejectDeviceMessages).
 void MerkGenerator::FormSend() {
-  mlir::Block *block{builder_.getInsertionBlock()};
-  if (!block || builder_.getInsertionPoint() == block->begin()) {
-    return;
-  }
-  auto call{mlir::dyn_cast<merk::CallOp>(*std::prev(builder_.getInsertionPoint()))};
-  if (!call || !call.getCallee().starts_with("process.send_4_0") ||
-      call.getInputs().size() != 3 || call->getNumResults() != 0 ||
-      !mlir::isa<merk::TypeInfoType>(call.getInputs()[0].getType())) {
+  merk::CallOp call{JustCalled("process.send_4_0", 3)};
+  if (!call || call->getNumResults() != 0) {
     return;
   }
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPoint(call);
-  mlir::Value mailbox{Uncoerced(call.getInputs()[1])};
-  if (!mlir::isa<merk::TermType>(mailbox.getType())) {
-    mailbox = call.getInputs()[1];
-  }
   auto send{merk::SendOp::create(builder_, call.getLoc(),
-      Uncoerced(call.getInputs()[2]), mailbox, call.getInputs()[0],
-      /*message_type=*/nullptr, /*ring_kind=*/nullptr)};
+      Uncoerced(call.getInputs()[2]), MailboxTerm(call.getInputs()[1]),
+      call.getInputs()[0], /*message_type=*/nullptr, /*ring_kind=*/nullptr)};
   if (target_.options().IsDevice()) {
-    send->setAttr("merk.not_on_device",
-        builder_.getStringAttr(
-            "sends messages of a type that a device does not send"));
+    NotOnDevice(send, "sends messages of a type that a device does not send");
   }
   call->erase();
+}
+
+// A call of new_mailbox/3, close_mailbox/3, stop/3, monitor/6 or
+// demonitor/3, just generated, as its merk operation (docs/INPROGRESS.md,
+// Concurrency in merk, step 2 (b)), with the type_infos the call takes, so
+// that lowering can make the same call again where it must. On a device,
+// which has none of them, each says so (merk.not_on_device).
+void MerkGenerator::FormMailboxOperation(llvm::StringRef name) {
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  if (name == "new_mailbox") {
+    merk::CallOp call{JustCalled("process.new_mailbox_3_0", 1)};
+    if (!call || call->getNumResults() != 1) {
+      return;
+    }
+    builder_.setInsertionPoint(call);
+    auto op{merk::NewMailboxOp::create(builder_, call.getLoc(),
+        call.getResult(0).getType(), call.getInputs()[0])};
+    ReplaceResult(call.getResult(0), op.getMailbox(), values_);
+    call->erase();
+    if (target_.options().IsDevice()) {
+      NotOnDevice(op, "makes a mailbox");
+    }
+    return;
+  }
+  if (name == "close_mailbox" || name == "stop") {
+    merk::CallOp call{JustCalled(
+        name == "stop" ? "process.stop_3_0" : "process.close_mailbox_3_0", 2)};
+    if (!call || call->getNumResults() != 0) {
+      return;
+    }
+    builder_.setInsertionPoint(call);
+    mlir::Value mailbox{MailboxTerm(call.getInputs()[1])};
+    mlir::Operation *formed;
+    if (name == "stop") {
+      formed = merk::StopOp::create(
+          builder_, call.getLoc(), mailbox, call.getInputs()[0]);
+    } else {
+      formed = merk::CloseMailboxOp::create(
+          builder_, call.getLoc(), mailbox, call.getInputs()[0]);
+    }
+    call->erase();
+    if (target_.options().IsDevice()) {
+      NotOnDevice(formed, name == "stop" ? "stops a mailbox's owner"
+                                         : "closes a mailbox");
+    }
+    return;
+  }
+  if (name == "monitor") {
+    merk::CallOp call{JustCalled("process.monitor_6_0", 5)};
+    if (!call || call->getNumResults() != 1 ||
+        !mlir::isa<merk::ClosureType>(call.getInputs()[4].getType())) {
+      return;
+    }
+    builder_.setInsertionPoint(call);
+    auto op{merk::MonitorOp::create(builder_, call.getLoc(),
+        call.getResult(0).getType(), MailboxTerm(call.getInputs()[2]),
+        MailboxTerm(call.getInputs()[3]), call.getInputs()[4],
+        call.getInputs()[0], call.getInputs()[1])};
+    ReplaceResult(call.getResult(0), op.getRef(), values_);
+    call->erase();
+    if (target_.options().IsDevice()) {
+      NotOnDevice(op, "monitors a mailbox");
+    }
+    return;
+  }
+  if (name == "demonitor") {
+    merk::CallOp call{JustCalled("process.demonitor_3_0", 1)};
+    if (!call || call->getNumResults() != 0) {
+      return;
+    }
+    builder_.setInsertionPoint(call);
+    auto op{merk::DemonitorOp::create(
+        builder_, call.getLoc(), call.getInputs()[0])};
+    call->erase();
+    if (target_.options().IsDevice()) {
+      NotOnDevice(op, "removes a monitor");
+    }
+  }
 }
 
 // A call of process.receive/5, just generated, that ReceiveInTarget did

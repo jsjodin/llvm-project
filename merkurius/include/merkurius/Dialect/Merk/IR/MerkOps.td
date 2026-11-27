@@ -460,6 +460,103 @@ def Merk_SendOp : Merk_Op<"send"> {
   let hasVerifier = 1;
 }
 
+def Merk_NewMailboxOp : Merk_Op<"new_mailbox"> {
+  let summary = "a new mailbox";
+  let description = [{
+    `process.new_mailbox/3`: a mailbox of the current process for messages
+    whose type's type_info is given. A mailbox is abstract outside the
+    library, which alone builds one, so lowering makes it the library's
+    call (Lowering.cpp, ExpandProcessOps).
+
+    ```mlir
+    %box = merk.new_mailbox with %ti : !merk.term<"process.mailbox(T0)">
+    ```
+  }];
+  let arguments = (ins Merk_TypeInfoType:$info);
+  let results = (outs AnyType:$mailbox);
+  let assemblyFormat = [{
+    `with` $info attr-dict `:` type($mailbox)
+  }];
+}
+
+def Merk_CloseMailboxOp : Merk_Op<"close_mailbox"> {
+  let summary = "a mailbox closed";
+  let description = [{
+    `process.close_mailbox/3`, given the type_info of the mailbox's
+    messages: its queued messages are dropped, and later sends to it are
+    too. On the host, lowering makes it the runtime's `merk_close`, with
+    the handle's cell.
+
+    ```mlir
+    merk.close_mailbox %box with %ti : !merk.term<"process.mailbox(int)">
+    ```
+  }];
+  let arguments = (ins AnyType:$mailbox, Merk_TypeInfoType:$info);
+  let assemblyFormat = [{
+    $mailbox `with` $info attr-dict `:` type($mailbox)
+  }];
+}
+
+def Merk_StopOp : Merk_Op<"stop"> {
+  let summary = "the process that owns a mailbox stopped";
+  let description = [{
+    `process.stop/3`, given the type_info of the mailbox's messages: the
+    mailbox's owner is stopped. On the host, lowering makes it the
+    runtime's `merk_stop`, with the handle's cell.
+
+    ```mlir
+    merk.stop %box with %ti : !merk.term<"process.mailbox(int)">
+    ```
+  }];
+  let arguments = (ins AnyType:$mailbox, Merk_TypeInfoType:$info);
+  let assemblyFormat = [{
+    $mailbox `with` $info attr-dict `:` type($mailbox)
+  }];
+}
+
+def Merk_MonitorOp : Merk_Op<"monitor"> {
+  let summary = "a monitor of a mailbox";
+  let description = [{
+    `process.monitor/6`: when the target mailbox's owner ends, the watcher
+    is sent the function's message of why, a `down_info`. The type_infos
+    are the target's and the watcher's message types. The result, a
+    `monitor_ref`, is abstract outside the library, which alone builds
+    one, so lowering makes it the library's call.
+
+    ```mlir
+    %ref = merk.monitor %target, %watcher, %f with %ti, %wi
+        : !merk.term<"process.mailbox(int)">,
+          !merk.term<"process.mailbox(m.watch)">
+        -> !merk.term<"process.monitor_ref">
+    ```
+  }];
+  let arguments = (ins AnyType:$target, AnyType:$watcher,
+      Merk_ClosureType:$function, Merk_TypeInfoType:$target_info,
+      Merk_TypeInfoType:$watcher_info);
+  let results = (outs AnyType:$ref);
+  let assemblyFormat = [{
+    $target `,` $watcher `,` $function `with` $target_info `,` $watcher_info
+    attr-dict `:` type($target) `,` type($watcher) `->` type($ref)
+  }];
+}
+
+def Merk_DemonitorOp : Merk_Op<"demonitor"> {
+  let summary = "a monitor removed";
+  let description = [{
+    `process.demonitor/3`: the monitor sends nothing more. Its
+    `monitor_ref` is abstract outside the library, so lowering makes it
+    the library's call.
+
+    ```mlir
+    merk.demonitor %ref : !merk.term<"process.monitor_ref">
+    ```
+  }];
+  let arguments = (ins AnyType:$ref);
+  let assemblyFormat = [{
+    $ref attr-dict `:` type($ref)
+  }];
+}
+
 def Merk_SelectOp : Merk_Op<"select", [AttrSizedOperandSegments]> {
   let summary = "a receive goal, as lowering makes it";
   let description = [{

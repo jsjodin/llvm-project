@@ -1046,14 +1046,18 @@ private:
       const ProcedureBody &, bool inRegion);
   bool ReceiveInTarget(const Body &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &, bool inRegion);
-  // A call of process.send/4, process.receive/5 or process.receive_goal,
-  // just generated, as the merk operation.
+  // A call of a process predicate that has a merk operation, just
+  // generated, as that operation.
   void FormProcessOperation(const Body &, const Procedure &callee,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   bool FormReceiveOp(
       const Body &, llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  merk::CallOp JustCalled(llvm::StringRef callee, unsigned inputs);
   // The call of process.send/4, just generated, as a merk.send.
   void FormSend();
+  // A call of a mailbox's or a monitor's predicate, just generated, as its
+  // merk operation.
+  void FormMailboxOperation(llvm::StringRef name);
   // The call of process.receive/5, just generated, as a plain merk.receive.
   void FormPlainReceive(
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);

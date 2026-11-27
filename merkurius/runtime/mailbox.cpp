@@ -1008,6 +1008,17 @@ extern "C" void merk_send(const Word *handle, Word typeInfo, Word value) {
       static_cast<std::int64_t>(handle[4]), typeInfo, value);
 }
 
+// A compiled close_mailbox, merk.close_mailbox, and stop, merk.stop
+// (Lowering.cpp, ExpandProcessOps), each with the handle's cell, as
+// merk_send takes it.
+extern "C" void merk_close(const Word *handle) {
+  merk_mailbox_close(static_cast<std::int64_t>(handle[0]),
+      static_cast<std::int64_t>(handle[1]),
+      static_cast<std::int64_t>(handle[2]),
+      static_cast<std::int64_t>(handle[3]),
+      static_cast<std::int64_t>(handle[4]));
+}
+
 // When a receive of this many milliseconds stops waiting, on the monotonic
 // clock in nanoseconds, or -1 for a negative number, which waits forever.
 extern "C" std::int64_t merk_mailbox_deadline(std::int64_t milliseconds) {
@@ -1730,6 +1741,14 @@ extern "C" void merk_mailbox_stop_owner(MERK_HANDLE_PARAMETERS) {
   if (owner == CurrentProcess()) {
     CheckStop();
   }
+}
+
+extern "C" void merk_stop(const Word *handle) {
+  merk_mailbox_stop_owner(static_cast<std::int64_t>(handle[0]),
+      static_cast<std::int64_t>(handle[1]),
+      static_cast<std::int64_t>(handle[2]),
+      static_cast<std::int64_t>(handle[3]),
+      static_cast<std::int64_t>(handle[4]));
 }
 
 // Stops watching. A message already queued stays, as with Erlang's demonitor

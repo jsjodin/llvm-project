@@ -6226,6 +6226,103 @@ void ExpandSends(mlir::ModuleOp module, bool device, bool direct) {
   }
 }
 
+// The library's procedure `name`, taking the operation's operands, coerced
+// to `inputs`, and giving its results as `outputs`, which are coerced to
+// the operation's: the call that code generation made before there was
+// the operation (MLIRGenCalls.cpp, FormMailboxOperation).
+void ReplaceByLibraryCall(mlir::OpBuilder &builder, mlir::Operation *op,
+    llvm::StringRef name, mlir::TypeRange inputs, mlir::TypeRange outputs) {
+  mlir::Location loc{op->getLoc()};
+  auto module{op->getParentOfType<mlir::ModuleOp>()};
+  merk::ProcOp library{ProcNamed(module, name,
+      builder.getFunctionType(inputs, outputs), merk::Determinism::Det)};
+  builder.setInsertionPoint(op);
+  llvm::SmallVector<mlir::Value> arguments;
+  for (auto [operand, type] : llvm::zip(op->getOperands(), inputs)) {
+    arguments.push_back(CoerceTo(builder, loc, operand, type));
+  }
+  auto call{merk::CallOp::create(
+      builder, loc, outputs, library.getSymName(), arguments)};
+  for (auto [result, value] : llvm::zip(op->getResults(), call.getResults())) {
+    result.replaceAllUsesWith(CoerceTo(builder, loc, value, result.getType()));
+  }
+  op->erase();
+}
+
+// The operations of mailboxes and monitors (docs/INPROGRESS.md,
+// Concurrency in merk, step 2 (b)). On the host, merk.close_mailbox and
+// merk.stop are the runtime's merk_close and merk_stop with the handle's
+// cell, as merk.send is merk_send; merk.new_mailbox, merk.monitor and
+// merk.demonitor are the library's calls, as a mailbox and a monitor_ref
+// are abstract outside the library, which alone builds them. On a device,
+// which has none of them, each is the library's call, in code that the
+// device does not run, after those that would run there were reported
+// (RejectDeviceMessages).
+void ExpandProcessOps(mlir::ModuleOp module, bool device) {
+  mlir::MLIRContext *context{module.getContext()};
+  auto info{merk::TypeInfoType::get(context)};
+  auto mailbox0{merk::TermType::get(context, "process.mailbox(T0)")};
+  auto mailbox1{merk::TermType::get(context, "process.mailbox(T1)")};
+  auto ref{merk::TermType::get(context, "process.monitor_ref")};
+  llvm::SmallVector<mlir::Operation *> ops;
+  module.walk([&](mlir::Operation *op) {
+    if (mlir::isa<merk::NewMailboxOp, merk::CloseMailboxOp, merk::StopOp,
+            merk::MonitorOp, merk::DemonitorOp>(op)) {
+      ops.push_back(op);
+    }
+  });
+  mlir::OpBuilder builder{context};
+  for (mlir::Operation *op : ops) {
+    if (auto make{mlir::dyn_cast<merk::NewMailboxOp>(op)}) {
+      ReplaceByLibraryCall(builder, op, "process.new_mailbox_3_0", {info},
+          {mailbox0});
+    } else if (auto monitor{mlir::dyn_cast<merk::MonitorOp>(op)}) {
+      // The operation's operands are the call's, rotated.
+      builder.setInsertionPoint(op);
+      mlir::Location loc{op->getLoc()};
+      merk::ProcOp library{ProcNamed(module, "process.monitor_6_0",
+          builder.getFunctionType(
+              {info, info, mailbox0, mailbox1, merk::ClosureType::get(context)},
+              {ref}),
+          merk::Determinism::Det)};
+      auto call{merk::CallOp::create(builder, loc, mlir::TypeRange{ref},
+          library.getSymName(),
+          mlir::ValueRange{monitor.getTargetInfo(), monitor.getWatcherInfo(),
+              CoerceTo(builder, loc, monitor.getTarget(), mailbox0),
+              CoerceTo(builder, loc, monitor.getWatcher(), mailbox1),
+              monitor.getFunction()})};
+      monitor.getRef().replaceAllUsesWith(
+          CoerceTo(builder, loc, call.getResult(0), monitor.getRef().getType()));
+      op->erase();
+    } else if (mlir::isa<merk::DemonitorOp>(op)) {
+      ReplaceByLibraryCall(builder, op, "process.demonitor_3_0", {ref}, {});
+    } else {
+      bool stop{mlir::isa<merk::StopOp>(op)};
+      mlir::Value box{op->getOperand(0)};
+      mlir::Value boxInfo{op->getOperand(1)};
+      builder.setInsertionPoint(op);
+      mlir::Location loc{op->getLoc()};
+      if (device) {
+        merk::ProcOp library{ProcNamed(module,
+            stop ? "process.stop_3_0" : "process.close_mailbox_3_0",
+            builder.getFunctionType({info, mailbox0}, {}),
+            merk::Determinism::Det)};
+        merk::CallOp::create(builder, loc, mlir::TypeRange{},
+            library.getSymName(),
+            mlir::ValueRange{boxInfo, CoerceTo(builder, loc, box, mailbox0)});
+      } else {
+        if (!mlir::isa<merk::TermType>(box.getType())) {
+          box = CoerceTo(builder, loc, box, mailbox0);
+        }
+        merk::ForeignCallOp::create(builder, loc, mlir::TypeRange{},
+            stop ? "merk_stop" : "merk_close", mlir::ValueRange{box},
+            /*can_fail=*/false);
+      }
+      op->erase();
+    }
+  }
+}
+
 // A merk.receive as a merk.select, which lowering makes a loop that calls
 // the matchers (LowerSelect), in a condition whose then part is
 // receive_message of the word a matcher gave, and whose else part, at the
@@ -6499,6 +6596,7 @@ llvm::LogicalResult Lowerer::Lower() {
   ExpandSends(module_, device_, /*direct=*/true);
   if (!device_) {
     ExpandSends(module_, /*device=*/false, /*direct=*/false);
+    ExpandProcessOps(module_, /*device=*/false);
     ExpandReceives(module_, /*device=*/false, /*processes=*/false);
   }
   // On a device nothing calls a descriptor's unify entry, since a generic
@@ -6542,6 +6640,7 @@ llvm::LogicalResult Lowerer::Lower() {
       return llvm::failure();
     }
     ExpandSends(module_, /*device=*/true, /*direct=*/false);
+    ExpandProcessOps(module_, /*device=*/true);
     ExpandReceives(module_, /*device=*/true, kernels_);
   }
   if (mlir::failed(Layouts()) || mlir::failed(MakeRecords()) ||
@@ -6879,9 +6978,10 @@ llvm::LogicalResult Lowerer::FilterKernelProcs() {
   return llvm::failure(bad);
 }
 
-// Reports each receive or send that would run on a device and that the
+// Reports each process operation that would run on a device and that the
 // device cannot make: only a GPU process selects (device.cpp,
-// merk_device_select_begin), and a plain receive or a send says why.
+// merk_device_select_begin), and a plain receive, a send, or an operation
+// of mailboxes and monitors says why.
 // Whether there was one.
 bool Lowerer::RejectDeviceMessages() {
   bool bad{false};
@@ -6893,9 +6993,13 @@ bool Lowerer::RejectDeviceMessages() {
       bad = RejectOnDevice(op, why.getValue(), kernels_) || bad;
     }
   });
-  module_.walk([&](merk::SendOp op) {
-    if (auto why{op->getAttrOfType<mlir::StringAttr>("merk.not_on_device")}) {
-      bad = RejectOnDevice(op, why.getValue(), kernels_) || bad;
+  module_.walk([&](mlir::Operation *op) {
+    if (mlir::isa<merk::SendOp, merk::NewMailboxOp, merk::CloseMailboxOp,
+            merk::StopOp, merk::MonitorOp, merk::DemonitorOp>(op)) {
+      if (auto why{
+              op->getAttrOfType<mlir::StringAttr>("merk.not_on_device")}) {
+        bad = RejectOnDevice(op, why.getValue(), kernels_) || bad;
+      }
     }
   });
   return bad;
