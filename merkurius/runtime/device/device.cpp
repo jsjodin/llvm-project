@@ -262,6 +262,8 @@ struct ProcessJump {
 using merkurius::runtime::kProcessEndedFailed;
 using merkurius::runtime::kProcessEndedStopped;
 
+struct Select;
+
 struct Arena {
   Bump bump;
   RingEntry *rings[kRingCacheSlots];
@@ -277,13 +279,14 @@ struct Arena {
   uint64_t returnCount;
   uint64_t returnBytes;
   uint64_t returns[merkurius::runtime::kReturnBatch];
+  Select *select;
   ProcessJump jump;
 };
 static_assert(sizeof(Arena) == kArenaClearWords * sizeof(uint64_t));
 static_assert(sizeof(ProcessJump) ==
     merkurius::runtime::kProcessJumpWords * sizeof(uint64_t));
 Arena arena{{nullptr, 0, 0}, {}, nullptr, nullptr, 0, 0, 0, nullptr, {}, 0, 0,
-    0, 0, {}, {}};
+    0, 0, {}, nullptr, {}};
 
 // In a region's image, by the slot of each region that runs (device-ring.h):
 // where its cells are bumped from, its teams' table if it is a target teams
@@ -2694,7 +2697,7 @@ namespace {
 // Messages between the processes of a kernel through their queues
 // (DirectSend and DirectReceive, below).
 bool DirectSendWord(const uint64_t *handle, uint64_t message);
-template <typename FromHost>
+template <bool Quiet, typename FromHost>
 int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
     const void *typeInfo, uint64_t *message, FromHost fromHost);
 
@@ -2805,6 +2808,8 @@ RingEntry *RingOf(const uint64_t *handle, uint64_t kind) {
       "node's");
 }
 
+void NoteClosed();
+
 // Asks the host for the messages that did not fit in the ring.
 void Drain(const uint64_t *handle) {
   rpc::Client::Port port{__llvm_rpc_client.open<rpcDrain>()};
@@ -2819,12 +2824,19 @@ void Drain(const uint64_t *handle) {
 // One look at the ring, with no call of the host unless messages wait
 // outside it: whether it has a message, whose slot is then in `value`, and
 // the ring's entry, found once: a caller that already has it passes it in
-// `entry`, and null otherwise. The message stays until Taken.
+// `entry`, and null otherwise. The message stays until Taken. A closed
+// mailbox fails the process, or, `Quiet`, as a receive that selects polls
+// it, gives no message and says so (NoteClosed).
+template <bool Quiet>
 bool Look(
     const uint64_t *handle, uint64_t kind, RingEntry *&entry, uint64_t *value) {
   if (!entry) {
     entry = RingOf(handle, kind);
     if (!entry) {
+      if constexpr (Quiet) {
+        NoteClosed();
+        return false;
+      }
       ClosedMailbox();
     }
   }
@@ -2834,6 +2846,10 @@ bool Look(
   DeviceRing *ring{entry->ring};
   uint64_t tail{__atomic_load_n(&ring->tail, __ATOMIC_RELAXED)};
   if (tail == kRingClosed) {
+    if constexpr (Quiet) {
+      NoteClosed();
+      return false;
+    }
     ClosedMailbox();
   }
   if (entry->head == tail) {
@@ -2846,6 +2862,10 @@ bool Look(
     Drain(handle);
     tail = __atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE);
     if (tail == kRingClosed) {
+      if constexpr (Quiet) {
+        NoteClosed();
+        return false;
+      }
       ClosedMailbox();
     }
     if (entry->head == tail) {
@@ -2868,14 +2888,17 @@ void Taken(RingEntry *entry) {
 // words at `handle`, looking at its ring (device-ring.h) until it has one
 // or `milliseconds` pass, or forever if it is negative. It returns 1 with
 // the message in `message`, or 0.
-extern "C" int merk_device_receive(
+// `Quiet`, a closed mailbox gives no message (Look).
+namespace {
+template <bool Quiet>
+int ReceiveWord(
     const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
   if (IsTeamHandle(handle)) {
     return TeamReceive(handle, milliseconds, message);
   }
-  int direct{DirectReceive(handle, kRingOfWords, milliseconds, nullptr, message,
-      [&](RingEntry *&entry, uint64_t *found) {
-        if (!Look(handle, kRingOfWords, entry, found)) {
+  int direct{DirectReceive<Quiet>(handle, kRingOfWords, milliseconds, nullptr,
+      message, [&](RingEntry *&entry, uint64_t *found) {
+        if (!Look<Quiet>(handle, kRingOfWords, entry, found)) {
           return false;
         }
         Taken(entry);
@@ -2885,12 +2908,19 @@ extern "C" int merk_device_receive(
     return direct;
   }
   RingEntry *entry{nullptr};
-  if (!Wait(milliseconds,
-          [&]() { return Look(handle, kRingOfWords, entry, message); })) {
+  if (!Wait(milliseconds, [&]() {
+        return Look<Quiet>(handle, kRingOfWords, entry, message);
+      })) {
     return 0;
   }
   Taken(entry);
   return 1;
+}
+} // namespace
+
+extern "C" int merk_device_receive(
+    const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
+  return ReceiveWord<false>(handle, milliseconds, message);
 }
 
 // As merk_device_receive, for a mailbox of arrays of one-word elements: the
@@ -2988,7 +3018,9 @@ bool TakeArrayFromHost(const uint64_t *handle, RingEntry *entry,
 
 } // namespace
 
-extern "C" int merk_device_receive_array(
+namespace {
+template <bool Quiet>
+int ReceiveArray(
     const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
   if (IsTeamHandle(handle)) {
     TeamBlockFromProcess();
@@ -2996,20 +3028,27 @@ extern "C" int merk_device_receive_array(
   }
   // The slot is the array's header (array.h).
   uint64_t header{0};
-  int direct{DirectReceive(handle, kRingOfArrays, milliseconds, nullptr,
+  int direct{DirectReceive<Quiet>(handle, kRingOfArrays, milliseconds, nullptr,
       message, [&](RingEntry *&entry, uint64_t *found) {
-        return Look(handle, kRingOfArrays, entry, &header) &&
+        return Look<Quiet>(handle, kRingOfArrays, entry, &header) &&
             TakeArrayFromHost(handle, entry, header, found);
       })};
   if (direct >= 0) {
     return direct;
   }
   RingEntry *entry{nullptr};
-  if (!Wait(milliseconds,
-          [&]() { return Look(handle, kRingOfArrays, entry, &header); })) {
+  if (!Wait(milliseconds, [&]() {
+        return Look<Quiet>(handle, kRingOfArrays, entry, &header);
+      })) {
     return 0;
   }
   return TakeArrayFromHost(handle, entry, header, message) ? 1 : 0;
+}
+} // namespace
+
+extern "C" int merk_device_receive_array(
+    const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
+  return ReceiveArray<false>(handle, milliseconds, message);
 }
 
 namespace {
@@ -4393,7 +4432,7 @@ bool DirectSendWord(const uint64_t *handle, uint64_t message) {
 // receive looks at the ring first, as a process that the host feeds would
 // otherwise wait up to eight polls for each message. Once the host has closed the mailbox, a look
 // at the ring finds it so, and the receive fails (ClosedMailbox).
-template <typename FromHost>
+template <bool Quiet, typename FromHost>
 int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
     const void *typeInfo, uint64_t *message, FromHost fromHost) {
   if (!InProcess()) {
@@ -4432,6 +4471,10 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
   if (!route->entry) {
     route->entry = RingOf(handle, kind);
     if (!route->entry) {
+      if constexpr (Quiet) {
+        NoteClosed();
+        return 0;
+      }
       ClosedMailbox();
     }
   }
@@ -4444,6 +4487,10 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
     // this poll needs its own check, which reads the same word.
     if (hostLook && !route->hostFirst &&
         __atomic_load_n(&entry->ring->tail, __ATOMIC_RELAXED) == kRingClosed) {
+      if constexpr (Quiet) {
+        NoteClosed();
+        return 0;
+      }
       ClosedMailbox();
     }
     if (hostLook && route->hostFirst && fromHost(entry, message)) {
@@ -4793,27 +4840,320 @@ bool TakeTermFromHost(const uint64_t *handle, RingEntry *entry,
   return true;
 }
 
-} // namespace
-
-extern "C" int merk_device_receive_term(const uint64_t *handle,
-    int64_t milliseconds, const void *typeInfo, uint64_t *message) {
+template <bool Quiet>
+int ReceiveTerm(const uint64_t *handle, int64_t milliseconds,
+    const void *typeInfo, uint64_t *message) {
   if (IsTeamHandle(handle)) {
     TeamBlockFromProcess();
     return TeamReceive(handle, milliseconds, message);
   }
   uint64_t present{0};
-  int direct{DirectReceive(handle, kRingOfTerms, milliseconds, typeInfo,
+  int direct{DirectReceive<Quiet>(handle, kRingOfTerms, milliseconds, typeInfo,
       message, [&](RingEntry *&entry, uint64_t *found) {
-        return Look(handle, kRingOfTerms, entry, &present) &&
+        return Look<Quiet>(handle, kRingOfTerms, entry, &present) &&
             TakeTermFromHost(handle, entry, typeInfo, found);
       })};
   if (direct >= 0) {
     return direct;
   }
   RingEntry *entry{nullptr};
-  if (!Wait(milliseconds,
-          [&]() { return Look(handle, kRingOfTerms, entry, &present); })) {
+  if (!Wait(milliseconds, [&]() {
+        return Look<Quiet>(handle, kRingOfTerms, entry, &present);
+      })) {
     return 0;
   }
   return TakeTermFromHost(handle, entry, typeInfo, message) ? 1 : 0;
+}
+
+} // namespace
+
+extern "C" int merk_device_receive_term(const uint64_t *handle,
+    int64_t milliseconds, const void *typeInfo, uint64_t *message) {
+  return ReceiveTerm<false>(handle, milliseconds, typeInfo, message);
+}
+
+// A GPU process's receive that selects: a receive goal, whose merk.receive
+// lowering (Lowering.cpp, LowerSelect) asks for the messages it may take
+// one at a time, tries each with its mailbox's matcher, and takes or skips
+// it (docs/INPROGRESS.md, Concurrency in merk, step 1). A mailbox's
+// messages are tried in the order they came: first those that earlier
+// receives took off its ring or queue and did not select, then new ones.
+// Each is tried with every case of its mailbox, in the cases' order, before
+// the next is. There is no order across mailboxes, which are polled in
+// turn. A message
+// skipped stays on the process's list for the mailbox, in its arena, for a
+// later receive. The state is the process's: a receive's ends before
+// another can start, as a matcher cannot receive.
+namespace {
+
+// A message taken off a mailbox and not selected yet.
+struct SavedMessage {
+  uint64_t message;
+  SavedMessage *next;
+};
+
+// A mailbox's messages not selected yet, oldest first.
+struct SavedList {
+  uint64_t handle[5];
+  SavedMessage *first;
+  SavedMessage **last;
+  SavedList *next;
+};
+
+// The most cases of one receive; code generation reports a receive goal
+// with more as not yet implemented (MLIRGenCalls.cpp, FormReceiveOp).
+constexpr uint32_t kMostSelectCases{8};
+
+constexpr uint32_t kNoCase{~0u};
+
+// A case of a receive. The cases of one mailbox are a group, whose first
+// case, its leader, holds what is the mailbox's: its saved messages, the
+// link to the next one to try, and whether it is closed.
+struct SelectCase {
+  const uint64_t *handle;
+  uint64_t kind;
+  const void *typeInfo;
+  // The group's leader, and the group's next case, or kNoCase.
+  uint32_t leader;
+  uint32_t nextSame;
+  // A leader's.
+  uint32_t closed;
+  SavedList *saved;
+  SavedMessage **next;
+};
+
+struct Select {
+  // The message last given, which the select's code loads from the state's
+  // first word (Lowering.cpp, LowerSelect).
+  uint64_t message;
+  SelectCase cases[kMostSelectCases];
+  uint32_t count;
+  // The leader whose saved messages are tried, until it is `count`; then
+  // the case to poll next.
+  uint32_t savedCase;
+  uint32_t poll;
+  // The case of the message last given, and whether it was a saved one,
+  // whose link is `link`; `pending` once a case skipped it and the next
+  // case of its group is to try it.
+  uint32_t current;
+  uint32_t fromSaved;
+  uint32_t pending;
+  SavedMessage **link;
+  int64_t milliseconds;
+  int64_t deadline;
+  // Set by a poll that finds its mailbox closed (NoteClosed).
+  uint32_t closedSeen;
+  SavedList *lists;
+  SavedMessage *free;
+};
+static_assert(__builtin_offsetof(Select, message) == 0);
+
+// A receive that selects found a mailbox closed as it polled it (Look's
+// `Quiet`), which only a GPU process's receive that selects does.
+void NoteClosed() { CurrentArena()->select->closedSeen = 1; }
+
+// The process's list of the mailbox's messages not selected yet.
+SavedList *SavedListOf(Select *select, const uint64_t *handle) {
+  for (SavedList *list{select->lists}; list; list = list->next) {
+    if (list->handle[0] == handle[0] && list->handle[1] == handle[1] &&
+        list->handle[2] == handle[2] && list->handle[3] == handle[3] &&
+        list->handle[4] == handle[4]) {
+      return list;
+    }
+  }
+  auto *list{static_cast<SavedList *>(merk_device_alloc(sizeof(SavedList)))};
+  for (int i{0}; i < 5; ++i) {
+    list->handle[i] = handle[i];
+  }
+  list->first = nullptr;
+  list->last = &list->first;
+  list->next = select->lists;
+  select->lists = list;
+  return list;
+}
+
+// One look at a case's mailbox: 1 with a message, 0 with none, or 2 if the
+// mailbox is closed.
+// The receives' own code, apart from theirs, which a closed mailbox fails,
+// so that a GPU process that does not select keeps its registers.
+int PollCase(Select *select, SelectCase &c, uint64_t *message) {
+  select->closedSeen = 0;
+  int found{c.kind == kRingOfArrays ? ReceiveArray<true>(c.handle, 0, message)
+          : c.kind == kRingOfTerms
+          ? ReceiveTerm<true>(c.handle, 0, c.typeInfo, message)
+          : ReceiveWord<true>(c.handle, 0, message)};
+  if (found) {
+    return 1;
+  }
+  return select->closedSeen ? 2 : 0;
+}
+
+} // namespace
+
+// Starts a receive that selects, which waits `milliseconds`, or forever if
+// it is negative: its state, to which merk_device_select_case adds each
+// mailbox, first written first. Only a GPU process selects. The functions
+// are merk.foreign_calls (Lowering.cpp, LowerSelect), so the state is a
+// word, and outputs go through pointers after the inputs.
+extern "C" [[clang::noinline]] uint64_t merk_device_select_begin(
+    int64_t milliseconds) {
+  if (!InProcess()) {
+    Fail(1, "a receive goal on a device outside a GPU process");
+  }
+  Arena *own{CurrentArena()};
+  Select *select{own->select};
+  if (!select) {
+    select = static_cast<Select *>(merk_device_alloc(sizeof(Select)));
+    select->lists = nullptr;
+    select->free = nullptr;
+    own->select = select;
+  }
+  select->count = 0;
+  select->savedCase = 0;
+  select->poll = 0;
+  select->pending = 0;
+  select->milliseconds = milliseconds;
+  select->deadline = Deadline(milliseconds);
+  StopIfAsked(false);
+  return reinterpret_cast<uint64_t>(select);
+}
+
+// Adds a mailbox, whose handle is `handle`, of messages of the ring kind
+// `kind` (device-ring.h), with the type_info of a copied term's. What it
+// selects is the caller's, which frees a copied term's block (Lowering.cpp,
+// LowerSelect).
+extern "C" [[clang::noinline]] void merk_device_select_case(uint64_t state,
+    const uint64_t *handle, int64_t kind, const void *typeInfo) {
+  auto *select{reinterpret_cast<Select *>(state)};
+  if (select->count == kMostSelectCases) {
+    Fail(1, "a receive goal with too many cases");
+  }
+  uint32_t index{select->count++};
+  SelectCase &c{select->cases[index]};
+  c.handle = handle;
+  c.kind = static_cast<uint64_t>(kind);
+  c.typeInfo = typeInfo;
+  c.leader = index;
+  c.nextSame = kNoCase;
+  c.closed = 0;
+  c.saved = SavedListOf(select, handle);
+  c.next = &c.saved->first;
+  // A case of a mailbox an earlier case has joins its group, last.
+  for (uint32_t i{0}; i < index; ++i) {
+    SelectCase &other{select->cases[i]};
+    if (other.leader == i && other.saved == c.saved) {
+      c.leader = i;
+      uint32_t last{i};
+      while (select->cases[last].nextSame != kNoCase) {
+        last = select->cases[last].nextSame;
+      }
+      select->cases[last].nextSame = index;
+      break;
+    }
+  }
+}
+
+// The next message to try: its case's number, with the message in the
+// state's `message`, or -1 once the time to wait has passed, or every
+// mailbox is closed. The caller takes it or skips it before it asks again.
+// Nothing goes through a pointer to the caller's stack, which would give
+// every receive goal slots in its procedure's frame.
+extern "C" [[clang::noinline]] int64_t merk_device_select_next(uint64_t state) {
+  auto *select{reinterpret_cast<Select *>(state)};
+  // The message a case skipped, for the next case of its mailbox.
+  if (select->pending) {
+    select->pending = 0;
+    return select->current;
+  }
+  // The saved messages, each mailbox's in turn.
+  for (; select->savedCase < select->count; ++select->savedCase) {
+    SelectCase &c{select->cases[select->savedCase]};
+    if (c.leader != select->savedCase) {
+      continue;
+    }
+    if (SavedMessage * saved{*c.next}) {
+      select->current = select->savedCase;
+      select->fromSaved = 1;
+      select->link = c.next;
+      select->message = saved->message;
+      return select->savedCase;
+    }
+  }
+  // New messages, polling the open mailboxes in turn.
+  for (;;) {
+    uint32_t open{0};
+    for (uint32_t i{0}; i < select->count; ++i) {
+      uint32_t k{select->poll};
+      select->poll = (k + 1) % select->count;
+      SelectCase &c{select->cases[k]};
+      if (c.leader != k || c.closed) {
+        continue;
+      }
+      ++open;
+      int found{PollCase(select, c, &select->message)};
+      if (found == 1) {
+        select->current = k;
+        select->fromSaved = 0;
+        return k;
+      }
+      if (found == 2) {
+        c.closed = 1;
+        --open;
+      }
+    }
+    if (open == 0) {
+      return -1;
+    }
+    StopIfAsked(true);
+    if (select->milliseconds >= 0 && Now() >= select->deadline) {
+      return -1;
+    }
+    __builtin_amdgcn_s_sleep(16);
+  }
+}
+
+// The message last given is selected.
+extern "C" [[clang::noinline]] void merk_device_select_take(uint64_t state) {
+  auto *select{reinterpret_cast<Select *>(state)};
+  SelectCase &c{select->cases[select->current]};
+  if (!select->fromSaved) {
+    return;
+  }
+  SavedList *list{select->cases[c.leader].saved};
+  SavedMessage *saved{*select->link};
+  *select->link = saved->next;
+  if (list->last == &saved->next) {
+    list->last = select->link;
+  }
+  saved->next = select->free;
+  select->free = saved;
+}
+
+// The message last given is not selected by its case: the next case of
+// its mailbox tries it, and once none is left, a saved one stays, and a new
+// one is saved, after the mailbox's others.
+extern "C" [[clang::noinline]] void merk_device_select_skip(uint64_t state) {
+  auto *select{reinterpret_cast<Select *>(state)};
+  SelectCase &tried{select->cases[select->current]};
+  if (tried.nextSame != kNoCase) {
+    select->current = tried.nextSame;
+    select->pending = 1;
+    return;
+  }
+  SelectCase &c{select->cases[tried.leader]};
+  if (select->fromSaved) {
+    c.next = &(*select->link)->next;
+    return;
+  }
+  SavedMessage *saved{select->free};
+  if (saved) {
+    select->free = saved->next;
+  } else {
+    saved =
+        static_cast<SavedMessage *>(merk_device_alloc(sizeof(SavedMessage)));
+  }
+  saved->message = select->message;
+  saved->next = nullptr;
+  *c.saved->last = saved;
+  c.saved->last = &saved->next;
 }

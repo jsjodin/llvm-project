@@ -1,0 +1,12 @@
+process-gpu-select.m's process kind spawned on the machine's GPU
+(docs/INPROGRESS.md, Concurrency in merk, step 1): its receive goals take
+the same messages in the same order as the host's. No message and no device
+memory is left once it ends.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -freceive-goal -fprocess-declarations -Wno-unselected-message --offload-arch=%offload-arch %libomp-flags %S/process-gpu-select.m -o %t2
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu > %t.out 2>&1
+RUN: FileCheck %S/process-gpu-select.m --match-full-lines --strict-whitespace < %t.out
+RUN: FileCheck %s --match-full-lines < %t.out
+CHECK:Merkurius runtime: 0 messages are neither read nor freed
+CHECK-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated

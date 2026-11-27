@@ -270,6 +270,34 @@ bool GpuCodeChecker::IsInlineElement(const Type &element) {
   return IsRecord(element, path);
 }
 
+// Whether two types are the same, by their structure.
+static bool SameType(const Type &s, const Type &t) {
+  if (&s == &t) {
+    return true;
+  }
+  if (s.kind != t.kind || s.var != t.var || s.constructor != t.constructor ||
+      s.arguments.size() != t.arguments.size() || !s.result != !t.result ||
+      (s.result && !SameType(*s.result, *t.result))) {
+    return false;
+  }
+  for (auto [a, b] : llvm::zip(s.arguments, t.arguments)) {
+    if (!SameType(*a, *b)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Whether a type is one of another's arguments, or a part of one.
+static bool PartOf(const Type &part, const Type &whole) {
+  for (const Type *argument : whole.arguments) {
+    if (SameType(part, *argument) || PartOf(part, *argument)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::optional<std::string> GpuCodeChecker::NotFixed(
     const Type &type, llvm::SmallVectorImpl<const Type *> &enclosing) {
   if (type.kind == TypeKind::Variable) {
@@ -296,8 +324,13 @@ std::optional<std::string> GpuCodeChecker::NotFixed(
     }
     return std::nullopt;
   }
+  // A type in its own constructors, unless it is a part of the enclosing
+  // type's arguments, as each receive_arms(A, B) of a receive goal's arms
+  // (desugar.cpp, DesugarReceive) has a smaller one as B, ending at
+  // receive_none: then the nesting ends. list(T) in list(T) does not, nor a
+  // type that grows, as t(list(T)) in t(T).
   for (const Type *outer : enclosing) {
-    if (outer->constructor == type.constructor) {
+    if (outer->constructor == type.constructor && !PartOf(type, *outer)) {
       return std::string{TypeToString(type)} + " is recursive";
     }
   }
@@ -465,6 +498,16 @@ void GpuCodeChecker::Call(const ProcedureBody &body, const Body &goal,
   if (send && goal.arguments.size() >= 2) {
     CheckMessage(goal.tokens, body.vars[goal.arguments[1]].type);
   }
+  // A receive goal's case: its mailbox(M)'s messages, unless it is the
+  // kind's own mailbox, whose messages are checked at its declaration.
+  if (symbol.module == "process" && symbol.name == "selecting_matching" &&
+      !goal.arguments.empty() &&
+      !selves_.contains({&body, goal.arguments[0]})) {
+    const Type *mailbox{body.vars[goal.arguments[0]].type};
+    if (mailbox && mailbox->arguments.size() == 1) {
+      CheckMessage(goal.tokens, mailbox->arguments.front());
+    }
+  }
   // A kind's own mailbox's messages are checked at the kind's declaration.
   if (receive && goal.arguments.size() >= 4 &&
       !selves_.contains({&body, goal.arguments[0]})) {
@@ -574,10 +617,36 @@ void GpuCodeChecker::Walk(
 // receives' selectors, any's closures, which code generation removes
 // (MLIRGenOpenMP.cpp, ReceiveInTarget), so that the process makes none;
 // and the messages sent and received, whose types are checked as messages.
+// Of a receive goal, the selector that desugaring builds, of
+// process.new_selector and a process.selecting_matching case for each
+// mailbox, whose closures are of the mailboxes' matchers: code generation
+// makes the receive a merk.receive of the matchers, which calls them
+// directly (MLIRGenCalls.cpp, FormReceive), so that the process makes
+// neither the selector nor the closures.
 static void FindCovered(
     const Body &goal, llvm::SmallVectorImpl<BodyVar> &covered) {
-  if (goal.kind == BodyKind::Call && goal.modes && goal.modes->callee) {
+  if ((goal.kind == BodyKind::Call ||
+          (goal.kind == BodyKind::Unify && goal.unify == UnifyKind::Call)) &&
+      goal.modes && goal.modes->callee) {
     const Symbol &symbol{*goal.modes->callee->symbol};
+    if (symbol.module == "process" && symbol.name == "receive_goal" &&
+        symbol.arity == 5 && !goal.arguments.empty()) {
+      covered.push_back(goal.arguments[0]);
+    }
+    if (symbol.module == "process" &&
+        (symbol.name == "selecting_matching" ||
+            symbol.name == "new_selector")) {
+      // All but a case's mailbox: its matcher's closure, the cases before
+      // it, and the selector it gives.
+      for (auto [i, var] : llvm::enumerate(goal.arguments)) {
+        if (symbol.name == "new_selector" || i != 0) {
+          covered.push_back(var);
+        }
+      }
+      if (goal.kind == BodyKind::Unify) {
+        covered.push_back(goal.left);
+      }
+    }
     if (symbol.module == "process" && symbol.name == "receive" &&
         symbol.arity == 6 && goal.arguments.size() >= 4) {
       covered.push_back(goal.arguments[1]);

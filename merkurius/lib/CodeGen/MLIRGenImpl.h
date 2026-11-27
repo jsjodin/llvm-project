@@ -1051,8 +1051,10 @@ private:
       const ProcedureBody &, bool inRegion);
   // The call of process.receive_goal that desugaring made of a receive goal,
   // just generated, as a merk.receive of the selector's cases.
-  void FormReceive(const Procedure &callee, llvm::ArrayRef<BodyVar> arguments,
-      const ProcedureBody &);
+  void FormReceive(const Body &, const Procedure &callee,
+      llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  bool FormReceiveOp(
+      const Body &, llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // process.team_mailbox(T, Box, !IO) in the device's compile: a call of the
   // device's runtime, for the message type's key (docs/INPROGRESS.md,
   // Processes as teams, step 2).

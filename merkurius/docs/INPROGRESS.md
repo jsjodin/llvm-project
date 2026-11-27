@@ -9500,9 +9500,9 @@ runtime has no such check now.
      time. Tests: test/Dialect/Merk/receive.mlir, invalid.mlir's
      `RECEIVE-*`, and test/CodeGen/receive-goal.m's `MERK` and `LLVM`
      checks.
-   - *(b) Next:* a GPU process's list of messages taken but not selected,
-     and the GPU's lowering, which scans it, then the ring, calling each
-     case's matcher directly.
+   - *(b) Built 2026-11-27:* a GPU process's receive goals. Tests:
+     test/CodeGen/process-gpu-select.m, with its `-gpu.test`, and
+     process-gpu-select-errors.m.
 
    Decided with the user:
    - *Each case's matcher is a known procedure,* named by symbol, with
@@ -9516,8 +9516,8 @@ runtime has no such check now.
      teaching desugaring a new form. An analysis reads the matcher's
      procedure as easily as a region.
    - *A GPU's order is per mailbox:* each mailbox's messages are tried in
-     the order they arrived, the skipped ones before new ones, but there
-     is no order across mailboxes. The host takes the oldest selected
+     the order they arrived, the skipped ones before new ones, each with
+     every case of its mailbox, but there is no order across mailboxes. The host takes the oldest selected
      message across all of them, by global stamps (library/process.m,
      `receive/3`); a GPU has no shared clock that is cheap to read on
      every send, and its mailboxes are separate rings. Documented as the
@@ -9554,6 +9554,98 @@ runtime has no such check now.
    lowering makes them, but it never specialized these calls: it clones
    only a callee with a body, and `process.selecting_matching` is a
    declaration in a program's module.
+
+   How (b) is made:
+   - *The check of GPU code* (lib/Semantics/check-gpu-code.cpp) lets a
+     receive goal through: the selector's calls and the result's
+     `receive_arms` nesting are not values the process makes. The
+     flatness check took `receive_arms(A, receive_arms(B, receive_none))`
+     for a recursive type; a type in its own constructors is not
+     recursive when it is a part of the enclosing type's arguments, as
+     the nesting then ends (`PartOf`).
+   - *Code generation* (`FormReceiveOp`), in a device's compile, gives
+     each case's ring kind (a word, an array, or a copied term of a type
+     whose type_info is known), and the type of what a matcher gives,
+     the `X` of `receive_result(X)`, as `merk.ring_kinds` and
+     `merk.arms_type`; or, if the device cannot make the receive, why, as
+     `merk.not_on_device`, which lowering reports only where the device
+     runs it, as the procedure may run on the host alone.
+   - *Lowering,* after the device's filters, makes each such receive a
+     `merk.ite` around an internal `merk.select`, whose then part makes
+     `receive_message` of the matcher's word and whose else part, at the
+     timeout or once every mailbox is closed, `receive_nothing`. A case
+     whose message is not a word calls a `$select` entry of its matcher,
+     which takes the word and makes the message's type before records are
+     made, so that a flat record is unboxed as any received message is;
+     LLVM inlines it. `Flatten` lowers `merk.select` (`LowerSelect`) to
+     LLVM blocks: the runtime's `begin` and a `case` call for each case,
+     then a loop of `next`, which returns the case's number or -1 and
+     leaves the message in the state's first word, a branch on the case,
+     a direct call of its matcher, failing to its `skip`, and `take` on
+     success. No
+     closure is made and nothing is called through a pointer, which
+     would make the kernel assume the most registers.
+   - *The runtime* (runtime/device/device.cpp, `merk_device_select_*`,
+     all `noinline`) keeps the state in the process's arena (the arena's
+     `select` word, made at its first receive goal), with a list per
+     mailbox of the messages earlier receives took off the ring or queue
+     and did not select. `next` gives each mailbox's saved messages, then
+     polls the open mailboxes in turn with the receives' own functions
+     and no time to wait, sleeping between rounds, until the deadline.
+     A poll that finds a mailbox closed gives no message (`QuietlyClosed`)
+     rather than failing; the case is then closed, and once all are,
+     the receive gives nothing. As for a plain receive, a closed ring's
+     messages cannot be read. Cases of one mailbox are a group, so that
+     each message is tried with every case of its mailbox, in the cases'
+     order, before the next message is: desugaring already makes a
+     mailbox's selects one case, so a group of more than one is two
+     variables of one mailbox.
+   - *Freeing:* a selected copied message is freed by the select's code
+     after its matcher succeeds (`FreeValue`, which knows the term's
+     layout: its tag, and constants, which have no cell). That is right
+     for a flat record, whose value the matcher takes out of the block;
+     a message that holds an array or a cell may be in what the matcher
+     gives, which the merk.free pass does not follow, so it is reported
+     as not yet implemented (`CheckSelects`). A message skipped stays on
+     the list until a later receive selects it; nothing frees one never
+     selected before the process ends, when its arena goes.
+
+   Found while building (b): a first version scanned the saved list for
+   each case on its own, which with two cases of one mailbox could select
+   a later message before an earlier one that the other case matched,
+   and saved a new message one case skipped without the other trying it.
+   Cases of one mailbox became a group before the first GPU run. The
+   host's receive keeps the same order (the test's `loop`).
+
+   Not done in (b), each reported as not yet implemented:
+   - Arrays and terms of cells as selected messages, until the merk.free
+     pass follows a selected message into the matcher's result.
+   - More than 8 cases in one receive (device.cpp, `kMostSelectCases`).
+   - Receive goals outside a GPU process on a device, as in a target
+     region.
+   Not measured: that the frees keep a long-running process's blocks
+   level; no check counts a running process's blocks, and its arena is
+   freed whole when it ends.
+
+   Registers (utils/gpu/gpu-registers.py over every `-gpu.test`'s
+   program, gfx1030 and gfx90a, 2026-11-27): the 120 programs without
+   receive goals have the same registers, spills, scratch and occupancy
+   as before. That needed the receives' closed checks to be a template
+   flag (`Look<Quiet>`, `ReceiveWord<Quiet>` and the like): a first
+   version called a check of the select's state from the shared
+   receives, which changed 24 programs, by up to 2 VGPRs and a spill.
+   process-gpu-select's kernel is no larger than process-gpu-messages',
+   which receives copied terms without selecting: 114 VGPRs, occupancy 8
+   and 540 bytes of scratch on gfx1030; 79, 6 and 528 (576) on gfx90a.
+   `merk_device_select_next`, which inlines the three receives' polls,
+   takes 75 VGPRs on gfx1030 and 62 with 23 spills on gfx90a, against
+   `merk_device_receive_term`'s 53 and 50 with 20; it is not on the
+   kernel's deepest stack, which is a send's copy. At first `next` gave
+   the case and the message through pointers, as a `merk.foreign_call`'s
+   outputs go, which made two stack slots in the process's procedure for
+   every receive goal: 80 bytes for process-gpu-select's five, on the
+   deepest stack, and 620 bytes of scratch. It now returns the case, and
+   the loop loads the message from the state's first word.
 2. `merk.send`, `merk.spawn`, `merk.new_mailbox`, `merk.monitor` and
    `merk.stop`, from the library's calls, lowered to the same runtime
    calls; the device's special cases of sends move onto `merk.send`.

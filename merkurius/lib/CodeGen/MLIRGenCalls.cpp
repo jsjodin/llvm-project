@@ -161,7 +161,7 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
     return;
   }
   Called(goal, callee, arguments, body);
-  FormReceive(callee, arguments, body);
+  FormReceive(goal, callee, arguments, body);
 }
 
 namespace {
@@ -179,6 +179,16 @@ mlir::Value Uncoerced(mlir::Value value) {
   }
   return value;
 }
+
+// Whether an operation is part of a receive goal's selector: a call of
+// process.selecting_matching or process.new_selector, or a closure.
+bool IsSelectorPart(mlir::Operation *op) {
+  if (auto link{mlir::dyn_cast_or_null<merk::CallOp>(op)}) {
+    return link.getCallee().starts_with("process.selecting_matching") ||
+        link.getCallee().starts_with("process.new_selector");
+  }
+  return mlir::isa_and_nonnull<merk::ClosureOp>(op);
+}
 } // namespace
 
 // Desugaring makes a receive goal a selector of a case for each mailbox,
@@ -193,21 +203,36 @@ mlir::Value Uncoerced(mlir::Value value) {
 // receive_result(T0), from which lowering knows its selectors', which the
 // collector needs. A call of receive_goal that is not of that shape, all
 // in one block, stays a call.
-void MerkGenerator::FormReceive(const Procedure &callee,
+void MerkGenerator::FormReceive(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
   if (failed_ || Terminated() || symbol.module != "process" ||
       symbol.name != "receive_goal" || symbol.arity != 5) {
     return;
   }
+  // A call that stays is the library's, which a GPU cannot run, as its
+  // selector is closures; the device's compile rejects it where the device
+  // runs it, as other host-only library code.
+  (void)FormReceiveOp(goal, arguments, body);
+}
+
+// FormReceive's merk.receive: false if the call is not of desugaring's
+// shape. In a device's compile, the operation records each case's ring kind
+// (device-ring.h), as its sends choose it (SendInTarget), in
+// merk.ring_kinds, for lowering (Lowering.cpp, LowerSelect); or, if the
+// device cannot make the receive, why in merk.not_on_device, which lowering
+// reports where the device runs it (RejectOnDevice), as the procedure may
+// run only on the host.
+bool MerkGenerator::FormReceiveOp(const Body &goal,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   mlir::Value result{values_.lookup(arguments[2])};
   if (!result) {
-    return;
+    return false;
   }
   auto call{Uncoerced(result).getDefiningOp<merk::CallOp>()};
   if (!call || !call.getCallee().starts_with("process.receive_goal") ||
       call.getInputs().size() != 3 || call->getNumResults() != 1) {
-    return;
+    return false;
   }
   mlir::Block *block{call->getBlock()};
   struct Case {
@@ -221,7 +246,7 @@ void MerkGenerator::FormReceive(const Procedure &callee,
   for (mlir::Value at{selector};;) {
     auto link{Uncoerced(at).getDefiningOp<merk::CallOp>()};
     if (!link || link->getBlock() != block) {
-      return;
+      return false;
     }
     if (link.getCallee().starts_with("process.new_selector") &&
         link.getInputs().size() == 1) {
@@ -229,31 +254,57 @@ void MerkGenerator::FormReceive(const Procedure &callee,
     }
     if (!link.getCallee().starts_with("process.selecting_matching") ||
         link.getInputs().size() != 5) {
-      return;
+      return false;
     }
     auto closure{
         Uncoerced(link.getInputs()[3]).getDefiningOp<merk::ClosureOp>()};
     if (!closure || closure->getBlock() != block) {
-      return;
+      return false;
     }
     auto lambda{entryLambdas_.find(closure.getEntry())};
     if (lambda == entryLambdas_.end()) {
-      return;
+      return false;
     }
     auto matcher{module_.lookupSymbol<merk::ProcOp>(lambda->second)};
     if (!matcher ||
         matcher.getFunctionType().getNumInputs() !=
             closure.getCaptured().size() + 1) {
-      return;
+      return false;
     }
     cases.push_back(
         {link.getInputs()[2], link.getInputs()[0], closure, matcher});
     at = link.getInputs()[4];
   }
   if (cases.empty()) {
-    return;
+    return false;
   }
   std::reverse(cases.begin(), cases.end());
+  // On a GPU, each case's ring kind; the runtime takes a receive of a few
+  // cases (device.cpp, kMostSelectCases).
+  llvm::SmallVector<std::int64_t> kinds;
+  std::string notOnDevice;
+  if (target_.options().IsDevice()) {
+    constexpr std::size_t kMostCases{8};
+    if (cases.size() > kMostCases) {
+      notOnDevice = "selects with more than " + std::to_string(kMostCases) +
+          " cases in one receive goal";
+    }
+    for (Case &c : cases) {
+      mlir::Type message{c.matcher.getFunctionType().getInputs().back()};
+      if (WordMessage(message)) {
+        kinds.push_back(0);
+      } else if (ArrayMessage(message)) {
+        kinds.push_back(1);
+      } else if (Uncoerced(c.info).getDefiningOp<merk::TypeInfoOp>()) {
+        // A copied term, of a type whose type_info is known at compile
+        // time, as a send's must be (CopiedMessage).
+        kinds.push_back(2);
+      } else {
+        notOnDevice = "receives from a mailbox of a polymorphic type in a "
+                      "receive goal";
+      }
+    }
+  }
   mlir::Location loc{call.getLoc()};
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPoint(call);
@@ -290,6 +341,26 @@ void MerkGenerator::FormReceive(const Procedure &callee,
       call.getInputs()[2], call.getInputs()[0], mailboxes, infos, captured,
       builder_.getArrayAttr(matchers), builder_.getDenseI64ArrayAttr(counts),
       layouts ? builder_.getArrayAttr(captures) : mlir::ArrayAttr{})};
+  if (!notOnDevice.empty()) {
+    receive->setAttr("merk.not_on_device", builder_.getStringAttr(notOnDevice));
+  } else if (!kinds.empty()) {
+    // With the type of what a matcher gives, receive_result(X)'s X, which
+    // a GPU process's receive makes of the matcher's word.
+    const semantics::Type *received{body.vars[arguments[2]].type};
+    std::optional<Represented> arms;
+    if (received->kind == semantics::TypeKind::Named &&
+        received->arguments.size() == 1) {
+      arms = Represent(received->arguments.front());
+    }
+    if (arms) {
+      receive->setAttr("merk.ring_kinds", builder_.getDenseI64ArrayAttr(kinds));
+      receive->setAttr("merk.arms_type", mlir::TypeAttr::get(arms->type));
+    } else {
+      receive->setAttr("merk.not_on_device",
+          builder_.getStringAttr("receives a result of an unknown type in a "
+                                 "receive goal"));
+    }
+  }
   mlir::Value old{call.getResult(0)};
   mlir::Value got{Coerce(receive.getResult(), old.getType(), loc)};
   old.replaceAllUsesWith(got);
@@ -306,13 +377,6 @@ void MerkGenerator::FormReceive(const Procedure &callee,
   for (const auto &[var, value] : values_) {
     held.insert(value);
   }
-  auto isSelectorPart{[](mlir::Operation *op) {
-    if (auto link{mlir::dyn_cast_or_null<merk::CallOp>(op)}) {
-      return link.getCallee().starts_with("process.selecting_matching") ||
-          link.getCallee().starts_with("process.new_selector");
-    }
-    return mlir::isa_and_nonnull<merk::ClosureOp>(op);
-  }};
   llvm::SmallVector<mlir::Operation *> work{call};
   llvm::DenseSet<mlir::Value> erased;
   llvm::DenseSet<mlir::Operation *> erasedOps;
@@ -330,10 +394,10 @@ void MerkGenerator::FormReceive(const Procedure &callee,
       if (!from || from->getBlock() != block) {
         continue;
       }
-      if (isSelectorPart(from) ||
+      if (IsSelectorPart(from) ||
           (mlir::isa<merk::ToWordOp, merk::FromWordOp>(from) &&
               (!held.contains(operand) ||
-                  isSelectorPart(Uncoerced(operand).getDefiningOp())))) {
+                  IsSelectorPart(Uncoerced(operand).getDefiningOp())))) {
         work.push_back(from);
       }
     }
@@ -348,6 +412,7 @@ void MerkGenerator::FormReceive(const Procedure &callee,
   for (BodyVar var : gone) {
     values_.erase(var);
   }
+  return true;
 }
 
 void MerkGenerator::PassTypeInfo(const semantics::TypeInfo &info,

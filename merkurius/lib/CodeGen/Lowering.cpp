@@ -528,6 +528,14 @@ private:
   void Flatten(mlir::LLVM::LLVMFuncOp);
   // Flattens a block, whose goals that fail go to `fail`.
   void Flatten(mlir::Block *, mlir::Block *fail);
+  // Whether the runtime can free what each merk.select takes, as it must,
+  // since the merk.free pass does not see it; reports where not.
+  bool CheckSelects();
+  // A merk.select as a loop; the block after it, which takes its word.
+  mlir::Block *LowerSelect(merk::SelectOp, mlir::Block *fail);
+  merk::ForeignCallOp RuntimeForeignCall(llvm::StringRef callee,
+      mlir::TypeRange results, mlir::ValueRange inputs, bool canFail,
+      mlir::Location);
   // Flattens the regions of an OpenMP construct, whose goals are det.
   void FlattenRegions(mlir::Operation *);
   // OpenMP's passes after lowering, as Flang runs them: procedures called
@@ -3932,6 +3940,165 @@ merk::SucceedOp Lowerer::TailSucceed(mlir::Operation *call,
   return succeed;
 }
 
+// A merk.foreign_call of the device's runtime, made while flattening, after
+// foreignWords_ was filled: on a device, no input crosses as a word.
+merk::ForeignCallOp Lowerer::RuntimeForeignCall(llvm::StringRef callee,
+    mlir::TypeRange results, mlir::ValueRange inputs, bool canFail,
+    mlir::Location loc) {
+  auto call{merk::ForeignCallOp::create(
+      rewriter_, loc, results, callee, inputs, canFail)};
+  foreignWords_[call] = llvm::SmallVector<bool>(inputs.size(), false);
+  return call;
+}
+
+// A GPU process's select frees each copied message that it selects
+// (LowerSelect), as nothing else can: the merk.free pass sees only the word
+// a matcher gave. That is right for a copied flat record,
+// whose matcher takes its value out of the block, and a word, which holds
+// none; a message that holds blocks, an array or a term of cells, may be in
+// what the matcher gives, which only that pass could free.
+// Temporary (merk.receive step 1, docs/INPROGRESS.md, Concurrency in merk):
+// until the merk.free pass follows a selected message into the matcher's
+// result.
+bool Lowerer::CheckSelects() {
+  bool ok{true};
+  module_.walk([&](merk::SelectOp select) {
+    for (auto [kind, type] :
+        llvm::zip(select.getRingKinds(), select.getMessageTypes())) {
+      mlir::Type message{mlir::cast<mlir::TypeAttr>(type).getValue()};
+      if (kind == 1 ||
+          (kind == 2 && !mlir::isa<merk::RecordType>(RecordOf(message)))) {
+        select.emitOpError("not yet implemented: selecting messages that "
+                           "hold arrays or cells in a GPU process");
+        ok = false;
+        return;
+      }
+    }
+  });
+  return ok;
+}
+
+// A GPU process's receive goal (ExpandReceiveOnDevice) as a loop over the
+// device runtime's candidates (device.cpp, Select): the runtime gives the
+// next message to try and its case, which the case's matcher, called
+// directly, selects or not; the runtime takes or skips it. The loop ends
+// with the word a matcher gave, or goes to `fail` at the timeout or once
+// every mailbox is closed. A matcher's call is flattened as any call that
+// can fail, with failure going to its case's skip. No closure is made, and
+// nothing is called through a pointer, which on a GPU would make the
+// kernel assume the most registers.
+mlir::Block *Lowerer::LowerSelect(merk::SelectOp select, mlir::Block *fail) {
+  mlir::MLIRContext *context{select.getContext()};
+  mlir::Location loc{select.getLoc()};
+  auto i64{rewriter_.getI64Type()};
+  auto word{merk::WordType::get(context)};
+  auto pointer{mlir::LLVM::LLVMPointerType::get(context)};
+  mlir::Block *after{SplitAfter(select)};
+  mlir::Value selected{after->addArgument(Convert(word), loc)};
+  rewriter_.replaceAllUsesWith(select.getWord(), selected);
+  // The state, and each mailbox, first written first.
+  rewriter_.setInsertionPoint(select);
+  mlir::Value state{RuntimeForeignCall("merk_device_select_begin", {word},
+      {select.getMilliseconds()}, false, loc)
+          .getResult(0)};
+  auto infos{select.getMessageInfos()};
+  for (auto [i, mailbox] : llvm::enumerate(select.getMailboxes())) {
+    std::int64_t kind{select.getRingKinds()[i]};
+    mlir::Value info{kind == 2
+            ? infos[i]
+            : mlir::Value{mlir::LLVM::ZeroOp::create(rewriter_, loc, pointer)}};
+    RuntimeForeignCall("merk_device_select_case", {},
+        {state, mailbox,
+            mlir::LLVM::ConstantOp::create(
+                rewriter_, loc, i64, rewriter_.getI64IntegerAttr(kind)),
+            info},
+        false, loc);
+  }
+  mlir::Block *loop{rewriter_.createBlock(after)};
+  rewriter_.setInsertionPoint(select);
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, loop);
+  // The next candidate, or the end.
+  rewriter_.setInsertionPointToStart(loop);
+  // The case's number, or -1 at the end; the message is the state's first
+  // word, so that nothing takes a slot in the procedure's frame.
+  mlir::Value which{
+      RuntimeForeignCall("merk_device_select_next", {i64}, {state}, false, loc)
+          .getResult(0)};
+  // Each case's block, which calls its matcher, and its skip.
+  std::size_t count{select.getMatchers().size()};
+  llvm::SmallVector<mlir::Block *> tries, skips;
+  for (std::size_t i{0}; i < count; ++i) {
+    tries.push_back(rewriter_.createBlock(after));
+    skips.push_back(rewriter_.createBlock(after));
+  }
+  // Dispatch on the case: a test of each but the last, which is what is
+  // left.
+  mlir::Block *dispatch{rewriter_.createBlock(tries.front())};
+  mlir::Value message{mlir::LLVM::LoadOp::create(rewriter_, loc, i64,
+      mlir::LLVM::IntToPtrOp::create(
+          rewriter_, loc, pointer, ToBits(state, loc)))};
+  rewriter_.setInsertionPointToEnd(loop);
+  mlir::LLVM::CondBrOp::create(rewriter_, loc,
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::slt,
+          which,
+          mlir::LLVM::ConstantOp::create(
+              rewriter_, loc, i64, rewriter_.getI64IntegerAttr(0))),
+      fail, dispatch);
+  mlir::Block *test{dispatch};
+  for (std::size_t i{0}; i + 1 < count; ++i) {
+    rewriter_.setInsertionPointToEnd(test);
+    mlir::Value is{mlir::LLVM::ICmpOp::create(rewriter_, loc,
+        mlir::LLVM::ICmpPredicate::eq, which,
+        mlir::LLVM::ConstantOp::create(rewriter_, loc, i64,
+            rewriter_.getI64IntegerAttr(static_cast<std::int64_t>(i))))};
+    mlir::Block *otherwise{
+        i + 2 < count ? rewriter_.createBlock(tries[i + 1]) : tries[i + 1]};
+    rewriter_.setInsertionPointToEnd(test);
+    mlir::LLVM::CondBrOp::create(rewriter_, loc, is, tries[i], otherwise);
+    test = otherwise;
+  }
+  if (count == 1) {
+    rewriter_.setInsertionPointToEnd(dispatch);
+    mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, tries[0]);
+  }
+  mlir::OperandRange captured{select.getCaptured()};
+  std::size_t at{0};
+  for (std::size_t i{0}; i < count; ++i) {
+    llvm::StringRef matcher{
+        mlir::cast<mlir::FlatSymbolRefAttr>(select.getMatchers()[i])
+            .getValue()};
+    auto count{static_cast<std::size_t>(select.getCapturedCounts()[i])};
+    rewriter_.setInsertionPointToStart(tries[i]);
+    llvm::SmallVector<mlir::Value> inputs{captured.slice(at, count)};
+    at += count;
+    inputs.push_back(message);
+    mlir::Type result{word};
+    auto call{merk::CallOp::create(
+        rewriter_, loc, mlir::TypeRange{result}, matcher, inputs)};
+    // A copied record's block, whose value the matcher took out, is freed
+    // once it is selected; a constant has none. CheckSelects found that it
+    // is a record, whose term has a layout, so this cannot fail.
+    if (select.getRingKinds()[i] == 2) {
+      mlir::Type type{
+          mlir::cast<mlir::TypeAttr>(select.getMessageTypes()[i]).getValue()};
+      (void)FreeValue(mlir::LLVM::IntToPtrOp::create(
+                          rewriter_, loc, HeapPointer(), ToBits(message, loc)),
+          type, call);
+    }
+    RuntimeForeignCall("merk_device_select_take", {}, {state}, false, loc);
+    mlir::LLVM::BrOp::create(
+        rewriter_, loc, mlir::ValueRange{call.getResult(0)}, after);
+    rewriter_.setInsertionPointToStart(skips[i]);
+    RuntimeForeignCall("merk_device_select_skip", {}, {state}, false, loc);
+    mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, loop);
+  }
+  rewriter_.eraseOp(select);
+  for (std::size_t i{0}; i < count; ++i) {
+    Flatten(tries[i], skips[i]);
+  }
+  return after;
+}
+
 // Splits the block after `op`, and returns the block of the operations
 // after it.
 mlir::Block *Lowerer::SplitAfter(mlir::Operation *op) {
@@ -4073,6 +4240,10 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
         rewriter_.setInsertionPoint(check);
         rewriter_.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(
             check, in, next, raise);
+        break;
+      }
+      if (auto select{mlir::dyn_cast<merk::SelectOp>(op)}) {
+        next = LowerSelect(select, fail);
         break;
       }
       if (auto call{mlir::dyn_cast<merk::CallOp>(op)}) {
@@ -5686,16 +5857,153 @@ merk::ProcOp MatcherEntry(mlir::ModuleOp module, merk::ProcOp matcher) {
   return entry;
 }
 
+// A matcher as a GPU process's select calls it (LowerSelect): with its
+// captured values as it takes them, and the message's word, which it makes
+// the message's type here, before records are made, so that a flat
+// record's is unboxed from its block as any received message's is. LLVM
+// inlines it into the select's loop. The matcher itself if it takes a word.
+merk::ProcOp SelectEntry(mlir::ModuleOp module, merk::ProcOp matcher) {
+  mlir::MLIRContext *context{module.getContext()};
+  auto word{merk::WordType::get(context)};
+  mlir::FunctionType type{matcher.getFunctionType()};
+  if (type.getInputs().back() == word) {
+    return matcher;
+  }
+  std::string name{matcher.getSymName().str() + "$select"};
+  if (auto entry{module.lookupSymbol<merk::ProcOp>(name)}) {
+    return entry;
+  }
+  mlir::OpBuilder builder{module.getBodyRegion()};
+  builder.setInsertionPointToEnd(module.getBody());
+  mlir::Location loc{matcher.getLoc()};
+  llvm::SmallVector<mlir::Type> inputs{type.getInputs().drop_back()};
+  inputs.push_back(word);
+  auto entry{merk::ProcOp::create(builder, loc, name,
+      builder.getFunctionType(inputs, type.getResults()),
+      merk::Determinism::Semidet)};
+  entry.setPrivate();
+  mlir::Block *block{entry.addEntryBlock()};
+  builder.setInsertionPointToStart(block);
+  llvm::SmallVector<mlir::Value> arguments{block->getArguments().drop_back()};
+  arguments.push_back(merk::FromWordOp::create(
+      builder, loc, type.getInputs().back(), block->getArguments().back()));
+  auto call{merk::CallOp::create(
+      builder, loc, type.getResults(), matcher.getSymName(), arguments)};
+  merk::SucceedOp::create(builder, loc, call.getResults());
+  return entry;
+}
+
+// A GPU process's merk.receive, whose code generation gave each case's ring
+// kind: a merk.select, which lowering makes a loop that calls the matchers
+// (LowerSelect), in a condition whose then part is receive_message of the
+// word a matcher gave, and whose else part, at the timeout or once every
+// mailbox is closed, is receive_nothing.
+void ExpandReceiveOnDevice(mlir::OpBuilder &builder, merk::ReceiveOp receive,
+    llvm::ArrayRef<std::int64_t> kinds) {
+  mlir::MLIRContext *context{builder.getContext()};
+  mlir::Location loc{receive.getLoc()};
+  auto i64{builder.getI64Type()};
+  auto word{merk::WordType::get(context)};
+  auto pointer{mlir::LLVM::LLVMPointerType::get(context)};
+  builder.setInsertionPoint(receive);
+  // The timeout's milliseconds, -1 for infinity, as library/process.m's
+  // milliseconds has them.
+  auto timeoutCases{builder.getArrayAttr(
+      {builder.getArrayAttr({merk::FunctorAttr::get(context, "infinity", 0)}),
+          builder.getArrayAttr(
+              {merk::FunctorAttr::get(context, "after", 1)})})};
+  auto milliseconds{merk::SwitchOp::create(builder, loc, mlir::TypeRange{i64},
+      receive.getTimeout(), timeoutCases, /*canFail=*/false)};
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder};
+    builder.setInsertionPointToStart(
+        &milliseconds->getRegion(0).emplaceBlock());
+    merk::YieldOp::create(builder, loc,
+        mlir::ValueRange{mlir::arith::ConstantOp::create(
+            builder, loc, i64, builder.getI64IntegerAttr(-1))});
+    builder.setInsertionPointToStart(
+        &milliseconds->getRegion(1).emplaceBlock());
+    auto after{merk::DeconstructOp::create(builder, loc, mlir::TypeRange{i64},
+        receive.getTimeout(), merk::FunctorAttr::get(context, "after", 1))};
+    merk::YieldOp::create(builder, loc,
+        mlir::ValueRange{
+            mlir::arith::MaxSIOp::create(builder, loc, after.getResult(0),
+                mlir::arith::ConstantOp::create(
+                    builder, loc, i64, builder.getI64IntegerAttr(0)))});
+  }
+  // The type_infos as C pointers, as a GPU's receive of a copied term
+  // takes them (MLIRGenOpenMP.cpp, ReceiveInTarget).
+  llvm::SmallVector<mlir::Value> infos;
+  for (mlir::Value info : receive.getMessageInfos()) {
+    infos.push_back(
+        mlir::UnrealizedConversionCastOp::create(builder, loc, pointer, info)
+            .getResult(0));
+  }
+  auto resultType{mlir::cast<merk::TermType>(receive.getResult().getType())};
+  mlir::Type armsType{
+      receive->getAttrOfType<mlir::TypeAttr>("merk.arms_type").getValue()};
+  auto ite{merk::IteOp::create(builder, loc, mlir::TypeRange{resultType})};
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder};
+    builder.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+    llvm::SmallVector<mlir::Attribute> messageTypes, entries;
+    auto module{receive->getParentOfType<mlir::ModuleOp>()};
+    for (mlir::Attribute matcher : receive.getMatchers()) {
+      auto proc{module.lookupSymbol<merk::ProcOp>(
+          mlir::cast<mlir::FlatSymbolRefAttr>(matcher).getValue())};
+      messageTypes.push_back(
+          mlir::TypeAttr::get(proc.getFunctionType().getInputs().back()));
+      entries.push_back(mlir::FlatSymbolRefAttr::get(
+          context, SelectEntry(module, proc).getSymName()));
+    }
+    auto select{merk::SelectOp::create(builder, loc, word,
+        milliseconds->getResult(0), receive.getMailboxes(), infos,
+        receive.getCaptured(), builder.getArrayAttr(entries),
+        receive.getCapturedCountsAttr(), builder.getDenseI64ArrayAttr(kinds),
+        builder.getArrayAttr(messageTypes))};
+    merk::YieldOp::create(builder, loc, mlir::ValueRange{select.getWord()});
+    mlir::Block *then{&ite.getThenRegion().emplaceBlock()};
+    mlir::Value selected{then->addArgument(word, loc)};
+    builder.setInsertionPointToStart(then);
+    mlir::Value armValue{
+        merk::FromWordOp::create(builder, loc, armsType, selected)};
+    merk::YieldOp::create(builder, loc,
+        mlir::ValueRange{merk::ConstructOp::create(builder, loc, resultType,
+            merk::FunctorAttr::get(context, "receive_message", 1),
+            mlir::ValueRange{armValue})});
+    builder.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
+    merk::YieldOp::create(builder, loc,
+        mlir::ValueRange{merk::ConstructOp::create(builder, loc, resultType,
+            merk::FunctorAttr::get(context, "receive_nothing", 0),
+            mlir::ValueRange{})});
+  }
+  receive.getResult().replaceAllUsesWith(ite.getResult(0));
+  receive->erase();
+}
+
 // Each merk.receive, as the library's receive: a selector of a
 // selecting_matching case for each case, the first innermost, whose
 // function is a closure of the case's matcher, then a call of
-// process.receive_goal.
+// process.receive_goal. With `processes`, in a GPU process image, a
+// receive whose code generation gave its ring kinds is the device's
+// instead (ExpandReceiveOnDevice). A receive that stays the library's in a
+// device's compile is in code that the device does not run, as lowering
+// rejects any that it does (Lower).
 // Temporary (merk.receive step 1, docs/INPROGRESS.md, Concurrency in merk):
-// until a GPU process's receive is made from the cases, which also lose
-// their closures on the host if measurements show that they cost.
-void ExpandReceives(mlir::ModuleOp module) {
+// the host's, until measurements show whether its closures cost.
+void ExpandReceives(mlir::ModuleOp module, bool processes) {
+  llvm::SmallVector<merk::ReceiveOp> all;
+  module.walk([&](merk::ReceiveOp op) { all.push_back(op); });
   llvm::SmallVector<merk::ReceiveOp> receives;
-  module.walk([&](merk::ReceiveOp op) { receives.push_back(op); });
+  for (merk::ReceiveOp op : all) {
+    auto kinds{op->getAttrOfType<mlir::DenseI64ArrayAttr>("merk.ring_kinds")};
+    if (processes && kinds && op->hasAttr("merk.arms_type")) {
+      mlir::OpBuilder builder{op};
+      ExpandReceiveOnDevice(builder, op, kinds.asArrayRef());
+    } else {
+      receives.push_back(op);
+    }
+  }
   if (receives.empty()) {
     return;
   }
@@ -5780,7 +6088,9 @@ void ExpandReceives(mlir::ModuleOp module) {
 
 llvm::LogicalResult Lowerer::Lower() {
   module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect, mrt::MrtDialect>();
-  ExpandReceives(module_);
+  if (!device_) {
+    ExpandReceives(module_, /*processes=*/false);
+  }
   // On a device nothing calls a descriptor's unify entry, since a generic
   // unification is an error there, and the procedure is not compiled for it.
   // Its functors stay, by which a message is copied (runtime/copy.h).
@@ -5814,11 +6124,23 @@ llvm::LogicalResult Lowerer::Lower() {
     module_.walk([&](merk::CompareTypeInfoOp op) {
       bad = RejectOnDevice(op, "compares types", kernels_) || bad;
     });
+    // Only a GPU process selects (device.cpp, merk_device_select_begin).
+    module_.walk([&](merk::ReceiveOp op) {
+      if (!kernels_) {
+        bad =
+            RejectOnDevice(op, "selects messages outside a GPU process") || bad;
+      } else if (auto why{op->getAttrOfType<mlir::StringAttr>(
+                     "merk.not_on_device")}) {
+        bad = RejectOnDevice(op, why.getValue(), kernels_) || bad;
+      }
+    });
     if (bad || mlir::failed(CompileDeviceForeignCode(module_, target_, clang_))) {
       return llvm::failure();
     }
+    ExpandReceives(module_, kernels_);
   }
-  if (mlir::failed(Layouts()) || mlir::failed(MakeRecords())) {
+  if (mlir::failed(Layouts()) || mlir::failed(MakeRecords()) ||
+      (kernels_ && !CheckSelects())) {
     return llvm::failure();
   }
   // A GPU process's values, which nothing collects, are freed at their last

@@ -412,6 +412,39 @@ def Merk_ReceiveOp : Merk_Op<"receive", [
   let hasVerifier = 1;
 }
 
+def Merk_SelectOp : Merk_Op<"select", [AttrSizedOperandSegments]> {
+  let summary = "a GPU process's receive goal, as lowering makes it";
+  let description = [{
+    Lowering's form of a `merk.receive` on a device, made first in lowering
+    and flattened into a loop (Lowering.cpp, ExpandReceives and
+    LowerSelect): the word that a case's matcher gave for the message it
+    selected, or failure once `milliseconds` pass (forever if negative), or
+    every mailbox is closed. `ring_kinds` are the mailboxes' ring kinds
+    (device-ring.h), `message_infos` their messages' type_infos as C
+    pointers, for copied terms, and `message_types` the types the matchers
+    take the messages in. Not made by code generation.
+
+    ```mlir
+    %w = merk.select %ms matchers [@m.p$lambda0] counts [1] kinds [0]
+        on(%box : !merk.term<"process.mailbox(int)">) infos(%ti : !llvm.ptr)
+        captured(%ref : i64) : !merk.word
+    ```
+  }];
+  let arguments = (ins I64:$milliseconds, Variadic<AnyType>:$mailboxes,
+      Variadic<AnyType>:$message_infos, Variadic<AnyType>:$captured,
+      FlatSymbolRefArrayAttr:$matchers, DenseI64ArrayAttr:$captured_counts,
+      DenseI64ArrayAttr:$ring_kinds, TypeArrayAttr:$message_types);
+  let results = (outs Merk_WordType:$word);
+  let assemblyFormat = [{
+    $milliseconds `matchers` $matchers `counts` $captured_counts
+    `kinds` $ring_kinds `types` $message_types
+    `on` `(` $mailboxes `:` type($mailboxes) `)`
+    `infos` `(` $message_infos `:` type($message_infos) `)`
+    (`captured` `(` $captured^ `:` type($captured) `)`)?
+    attr-dict `:` qualified(type($word))
+  }];
+}
+
 def Merk_CallClosureOp : Merk_Op<"call_closure"> {
   let summary = "a higher-order call";
   let description = [{
