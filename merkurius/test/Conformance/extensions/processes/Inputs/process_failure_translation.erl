@@ -8,7 +8,7 @@
 -module(process_failure_translation).
 -export([main/1]).
 -mode(compile).
--include("mercury_write.hrl").
+-include("../../gpu-processes/Inputs/mercury_write.hrl").
 
 throw_exception(Text) ->
     io:format("Uncaught Merkurius exception:~n~s~n", [Text]),

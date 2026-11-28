@@ -1,27 +1,42 @@
 % MANUAL: Existentially typed data types
+% DESIGN: Sized floating point types
 % The manual's existentially typed data types: a heterogeneous list, one
 % with a showable constraint built by make_list with 'new cons' and shown
 % by process_list, the same through list(showable), and the type bar(T)
-% with several quantified variables and constraints.
+% with several quantified variables and constraints. It is a template, run
+% for float and float32.
 %
-% RUN: merkc -O0 %s -o %t0
-% RUN: %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: merkc -O2 %s -o %t2
-% RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% OUTPUT:["42", "1.0", "blah"]
-% OUTPUT-NEXT:2
-% OUTPUT-NEXT:["1", "x"]
-% OUTPUT-NEXT:["f1", "f2 2", "f3", "4 four 4", "int and string"]
-% OUTPUT-NOT:{{.}}
+% RUN: %instantiate %s float %t.float.d
+% RUN: merkc -O0 %t.float.d/run_showable_float.m -o %t.float.0
+% RUN: %t.float.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %t.float.d/run_showable_float.m -o %t.float.2
+% RUN: %t.float.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% OUTPUT-FLOAT:["42", "1.0", "blah"]
+% OUTPUT-FLOAT-NEXT:2
+% OUTPUT-FLOAT-NEXT:["1", "x"]
+% OUTPUT-FLOAT-NEXT:["f1", "f2 2", "f3", "4 four 4", "int and string"]
+% OUTPUT-FLOAT-NOT:{{.}}
+% RUN: %instantiate %s float32 %t.float32.d
+% RUN: merkc -O0 %t.float32.d/run_showable_float32.m -o %t.float32.0
+% RUN: %t.float32.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float32.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %t.float32.d/run_showable_float32.m -o %t.float32.2
+% RUN: %t.float32.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float32.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% OUTPUT-FLOAT32:["42", "1.0", "blah"]
+% OUTPUT-FLOAT32-NEXT:2
+% OUTPUT-FLOAT32-NEXT:["1", "x"]
+% OUTPUT-FLOAT32-NEXT:["f1", "f2 2", "f3", "4 four 4", "int and string"]
+% OUTPUT-FLOAT32-NOT:{{.}}
 
 :- module run_showable.
 :- interface.
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module float, list, string.
+:- import_module @TM@, list, string.
 
     % A simple heterogeneous list type.
 :- type list_of_any
@@ -51,14 +66,14 @@
     ;       some [T1, T2] f5(list(T1), T2) => foo(T1, T2).
 
 :- instance showable(int) where [ show(I) = string.int_to_string(I) ].
-:- instance showable(float) where [ show(F) = string.float_to_string(F) ].
+:- instance showable(@T@) where [ show(F) = string.@T@_to_string(F) ].
 :- instance showable(string) where [ show(S) = S ].
 :- instance foo(int, string) where [ pair_name(_, _) = "int and string" ].
 
 :- func make_list = showable_list.
 make_list = List :-
     Int = 42,
-    Float = 1.0,
+    Float = 1.0@S@,
     String = "blah",
     List =  'new cons'(Int,
         'new cons'(Float,
@@ -90,5 +105,5 @@ main(!IO) :-
     io.write_line(count_any('new cons_any'(1, 'new cons_any'("two", nil_any))),
         !IO),
     io.write_line(show_all(['new s'(1), 'new s'("x")]), !IO),
-    io.write_line(list.map(describe, [f1, f2(2), 'new f3'(3.0),
+    io.write_line(list.map(describe, [f1, f2(2), 'new f3'(3.0@S@),
         'new f4'(4, "four", 4), 'new f5'([5], "five")]), !IO).

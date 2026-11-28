@@ -5,7 +5,7 @@
 -module(mailbox_order_translation).
 -export([main/1]).
 -mode(compile).
--include("mercury_write.hrl").
+-include("../../gpu-processes/Inputs/mercury_write.hrl").
 
 drain(Tag) ->
     drain(Tag, []).

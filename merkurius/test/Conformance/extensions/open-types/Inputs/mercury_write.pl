@@ -3,7 +3,12 @@
 % compound term as f(A, B), a tuple '{}'(...) as {A, B}, a pair as A - B,
 % a string in double quotes, and each unbound variable as _1, _2 and so
 % on, numbered in the order the write meets them, depth first and left to
-% right.
+% right. A float is written as a float of the type float_type/1 names,
+% float unless the translation asserts float_type(float32), as a
+% template's translation does: then as the oracle's stand-in writes it,
+% float32_value(X), which oracle.py writes as merkc's programs do.
+
+:- dynamic float_type/1.
 
 mercury_write(Term) :-
     \+ \+ ( term_variables(Term, Vars),
@@ -39,6 +44,9 @@ write_term_m(T) :-
     compound(T), !,
     compound_name_arguments(T, Name, Args),
     write(Name), write('('), write_arguments(Args), write(')').
+write_term_m(T) :-
+    float(T), float_type(float32), !,
+    format("float32_value(~w)", [T]).
 write_term_m(T) :-
     write(T).
 

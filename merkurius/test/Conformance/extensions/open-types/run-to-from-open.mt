@@ -1,44 +1,72 @@
 % DESIGN: Open terms (Prolog-style variables) / Operations
+% DESIGN: Sized floating point types
 % to_open turns a ground term into an open one, and from_open turns it
 % back: for scalars, strings, enumerations, lists, tuples, pairs, maybe
 % and a type of the program, and through a type variable. from_open fails
 % while a hole in the term is unbound and succeeds once it is bound; var
 % and nonvar say which a term is. A closed(T) field holds a ground T, and
 % a hole of closed(T) can be taken out of a term and filled elsewhere.
-% open.string writes a term with holes.
+% open.string writes a term with holes. It is a template, run for float and
+% float32.
 % MERKC-FLAGS: -fopen-types
 % TRANSLATION: Inputs/to_from_open_translation.pl
 %
-% RUN: merkc -O0 -fopen-types %s -o %t0
-% RUN: %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: merkc -O2 -fopen-types %s -o %t2
-% RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% OUTPUT:42
-% OUTPUT-NEXT:-7
-% OUTPUT-NEXT:2.5
-% OUTPUT-NEXT:"text"
-% OUTPUT-NEXT:green
-% OUTPUT-NEXT:[1, 2, 3]
-% OUTPUT-NEXT:["x", "y"]
-% OUTPUT-NEXT:{1, "one", 1.5}
-% OUTPUT-NEXT:3 - "three"
-% OUTPUT-NEXT:yes(0.25)
-% OUTPUT-NEXT:no
-% OUTPUT-NEXT:[circle(1.0), box(2, 3), named("n", blue)]
-% OUTPUT-NEXT:[]
-% OUTPUT-NEXT:["a", "b", "c"]
-% OUTPUT-NEXT:["var", "nonvar", "not var", "nonvar"]
-% OUTPUT-NEXT:1 - closed("filled")
-% OUTPUT-NEXT:{[1, _1, 3, _1, _2], _2}
-% OUTPUT-NOT:{{.}}
+% RUN: %instantiate %s float %t.float.d
+% RUN: merkc -O0 -fopen-types %t.float.d/run_to_from_open_float.m -o %t.float.0
+% RUN: %t.float.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fopen-types %t.float.d/run_to_from_open_float.m -o %t.float.2
+% RUN: %t.float.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% OUTPUT-FLOAT:42
+% OUTPUT-FLOAT-NEXT:-7
+% OUTPUT-FLOAT-NEXT:2.5
+% OUTPUT-FLOAT-NEXT:"text"
+% OUTPUT-FLOAT-NEXT:green
+% OUTPUT-FLOAT-NEXT:[1, 2, 3]
+% OUTPUT-FLOAT-NEXT:["x", "y"]
+% OUTPUT-FLOAT-NEXT:{1, "one", 1.5}
+% OUTPUT-FLOAT-NEXT:3 - "three"
+% OUTPUT-FLOAT-NEXT:yes(0.25)
+% OUTPUT-FLOAT-NEXT:no
+% OUTPUT-FLOAT-NEXT:[circle(1.0), box(2, 3), named("n", blue)]
+% OUTPUT-FLOAT-NEXT:[]
+% OUTPUT-FLOAT-NEXT:["a", "b", "c"]
+% OUTPUT-FLOAT-NEXT:["var", "nonvar", "not var", "nonvar"]
+% OUTPUT-FLOAT-NEXT:1 - closed("filled")
+% OUTPUT-FLOAT-NEXT:{[1, _1, 3, _1, _2], _2}
+% OUTPUT-FLOAT-NOT:{{.}}
+% RUN: %instantiate %s float32 %t.float32.d
+% RUN: merkc -O0 -fopen-types %t.float32.d/run_to_from_open_float32.m -o %t.float32.0
+% RUN: %t.float32.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float32.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fopen-types %t.float32.d/run_to_from_open_float32.m -o %t.float32.2
+% RUN: %t.float32.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float32.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% OUTPUT-FLOAT32:42
+% OUTPUT-FLOAT32-NEXT:-7
+% OUTPUT-FLOAT32-NEXT:2.5f32
+% OUTPUT-FLOAT32-NEXT:"text"
+% OUTPUT-FLOAT32-NEXT:green
+% OUTPUT-FLOAT32-NEXT:[1, 2, 3]
+% OUTPUT-FLOAT32-NEXT:["x", "y"]
+% OUTPUT-FLOAT32-NEXT:{1, "one", 1.5f32}
+% OUTPUT-FLOAT32-NEXT:3 - "three"
+% OUTPUT-FLOAT32-NEXT:yes(0.25f32)
+% OUTPUT-FLOAT32-NEXT:no
+% OUTPUT-FLOAT32-NEXT:[circle(1.0f32), box(2, 3), named("n", blue)]
+% OUTPUT-FLOAT32-NEXT:[]
+% OUTPUT-FLOAT32-NEXT:["a", "b", "c"]
+% OUTPUT-FLOAT32-NEXT:["var", "nonvar", "not var", "nonvar"]
+% OUTPUT-FLOAT32-NEXT:1 - closed("filled")
+% OUTPUT-FLOAT32-NEXT:{[1, _1, 3, _1, _2], _2}
+% OUTPUT-FLOAT32-NOT:{{.}}
 :- module run_to_from_open.
 :- interface.
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module float, int, list, maybe, open, pair, string.
+:- import_module @TM@, int, list, maybe, open, pair, string.
 
 :- type colour
     --->    red
@@ -46,7 +74,7 @@
     ;       blue.
 
 :- type shape
-    --->    circle(float)
+    --->    circle(@T@)
     ;       box(int, int)
     ;       named(string, colour).
 
@@ -123,16 +151,16 @@ written(S) :-
 main(!IO) :-
     show(42, !IO),
     show(-7, !IO),
-    show(2.5, !IO),
+    show(2.5@S@, !IO),
     show("text", !IO),
     show(green, !IO),
     show([1, 2, 3], !IO),
     show(["x", "y"], !IO),
-    show({1, "one", 1.5}, !IO),
+    show({1, "one", 1.5@S@}, !IO),
     show(3 - "three", !IO),
-    show(yes(0.25), !IO),
+    show(yes(0.25@S@), !IO),
     show(no : maybe(int), !IO),
-    show([circle(1.0), box(2, 3), named("n", blue)], !IO),
+    show([circle(1.0@S@), box(2, 3), named("n", blue)], !IO),
     ( if fill_later(Before, After) then
         io.write_line(Before, !IO),
         io.write_line(After, !IO)

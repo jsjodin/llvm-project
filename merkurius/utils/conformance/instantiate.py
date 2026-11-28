@@ -28,7 +28,8 @@ string.float32_to_string is string.@T@_to_string.
 
 For mmc (--mmc), which has no float32, a float32 instance uses the stand-in
 modules in emulation/, which compute in C's float: a literal 1.5f32 becomes
-float32.lit("1.5"), outside strings and comments, and io.write_float32 and
+(float32.lit("1.5")), outside strings and comments, in parentheses so that
+-1.5f32 is still the negation of the literal, and io.write_float32 and
 string.float32_to_string become the stand-in's. What mmc's program prints
 is normalised with normalise(): the stand-in's float32_value(X) becomes X
 as merkc's programs write a float32, 1.5f32.
@@ -131,7 +132,8 @@ def for_mmc(text, type_name):
     for is_code, segment in code_segments(text):
         if is_code:
             segment = LITERAL.sub(
-                lambda m: '%s.lit("%s")' % (type_name, m.group(1)), segment)
+                lambda m: '(%s.lit("%s"))' % (type_name, m.group(1)),
+                segment)
             segment = segment.replace("io.write_" + type_name,
                                       type_name + ".write_" + type_name)
             segment = segment.replace("string.%s_to_string" % type_name,

@@ -9256,7 +9256,7 @@ tested shows.
    declared without a determinism was not checked, so one inferred multi
    was accepted and committed to its first solution. New tests reach a
    tuple of ground types in an open term passed as in
-   (`open-types/run-ground-tuples.m`), do loops in a lambda's body and
+   (`open-types/run-ground-tuples.mt`), do loops in a lambda's body and
    under negations (`do-loops/meaning/run-nested-goals.m`, the first to
    reach that part of the loops' translation), a uniqueness error that
    inferring the argument shared does not fix
@@ -9686,9 +9686,24 @@ or a NaN has none, as it has no literal.
        type with `-define(FLOAT_TYPE, @T@).`, and mercury_write.hrl then
        writes its floats as the stand-in does, `float32_value(X)`, and
        `?R(X)` rounds an operation's result to single precision.
-     - Next: the other hand-written tests of that kind, by directory
-       (type classes, existential types, open types, the standard
-       ordering, exceptions). Distribution tests
+     - The host's hand-written tests of that kind are templates too:
+       type classes (the manual's point examples), existential types,
+       open types, the standard ordering, univ, exceptions, a do loop's
+       fromto, process declarations, a type_spec pragma and a type
+       qualification. run-ordering compares infinity with 1.0e30, not
+       1.0e300, which float32 cannot hold. A Prolog TRANSLATION may be a
+       template as an Erlang one is: it asserts `float_type(@T@)` for
+       mercury_write.pl. The stand-in's literal is parenthesised,
+       `(float32.lit("1.5"))`, so that a minus before it negates it.
+     - Left as they are: tests of float syntax or of float itself
+       (syntax/tokens/run-floats, float-types/), reject-, nyi-, warn-
+       and differs- tests, which are not templates, the distribution
+       tests, which wait for NODES in templates, and
+       c-data-passing-conventions/run-primitive-types, whose C code
+       takes a double: float32 through the foreign language interface
+       is a question of its own, to decide when it comes up. CodeGen
+       tests that check IR need their own float32 checks, to decide
+       then too. Distribution tests
        wait for NODES in templates. CodeGen tests that check IR need
        their own float32 checks, to decide when they come up.
 3. `float16` and `bfloat16`, the same, arrays packed as the sized

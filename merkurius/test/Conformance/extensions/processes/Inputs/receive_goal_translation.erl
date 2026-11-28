@@ -8,7 +8,7 @@
 -mode(compile).
 %% any_first has a clause that cannot match, as the test means.
 -compile([nowarn_nomatch]).
--include("mercury_write.hrl").
+-include("../../gpu-processes/Inputs/mercury_write.hrl").
 
 send({Pid, Tag}, M) ->
     Pid ! {Tag, M}.

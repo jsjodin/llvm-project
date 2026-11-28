@@ -1,7 +1,9 @@
-% The translation of run-to-from-open.m into Prolog: to_open is the term
+% The translation of run-to-from-open.mt into Prolog: to_open is the term
 % itself, from_open checks that it is ground and acyclic, and closed(T) is
 % an ordinary term.
 :- ensure_loaded(mercury_write).
+% A template, as the test is: the instance's floats are of type @T@.
+:- assertz(float_type(@T@)).
 
 round_trip(X, Y) :-
     from_open(X, Y).

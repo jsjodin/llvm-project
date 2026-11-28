@@ -210,9 +210,9 @@ class Test:
             if self.nodes:
                 raise TestError("a template has no NODES yet")
             if self.mmc_program and not self.mmc_program.endswith(
-                    (".mt", ".erl")):
+                    (".mt", ".erl", ".pl")):
                 raise TestError("a template's TRANSLATION is a template, "
-                                ".mt, or Erlang, .erl")
+                                ".mt, or Erlang or Prolog")
             try:
                 self.types = instantiate.float_types("\n".join(self.lines))
             except ValueError as e:
@@ -350,21 +350,24 @@ def mmc_run(test, mmc, type_name=None):
 
 
 def run_translation_instance(test, interpreter, type_name):
-    """A template's translation into Erlang or Prolog, instantiated for the
-    type beside copies of the helpers in its directory, and its output as
-    merkc's program would print it."""
+    """A template's translation into Erlang or Prolog, instantiated for
+    the type in a directory of its own, with the files it includes or
+    loads named by their paths, and its output as merkc's program would
+    print it."""
     program = os.path.join(os.path.dirname(test.path), test.mmc_program)
     here = os.path.dirname(program)
     with tempfile.TemporaryDirectory() as tmp:
-        for name in os.listdir(here):
-            if name.endswith((".hrl", ".pl")) and \
-                    os.path.join(here, name) != program:
-                shutil.copy(os.path.join(here, name), tmp)
         with open(program, encoding="utf-8") as f:
             try:
                 text = instantiate.substitute(f.read(), type_name)
             except ValueError as e:
                 raise TestError(str(e))
+        text = re.sub(r'^-include\("([^"/][^"]*)"\)',
+                      lambda m: '-include("%s")' % os.path.normpath(
+                          os.path.join(here, m.group(1))), text, flags=re.M)
+        text = re.sub(r"^:- ensure_loaded\(([a-z]\w*)\)",
+                      lambda m: ":- ensure_loaded('%s')" % os.path.join(
+                          here, m.group(1)), text, flags=re.M)
         with open(os.path.join(tmp, os.path.basename(program)), "w",
                   encoding="utf-8") as f:
             f.write(text)
