@@ -82,7 +82,9 @@ every element before it reads one. The library compiles the sound stub
 (below), not `array.m`, since
 calls name a procedure by its mode number, which the stub's added modes
 change; so a program checked with `-fmmc-uniqueness` cannot call them.
-`float.m` implements its
+`float64.m` declares only `float64`, an equivalence type for `float`
+(a Merkurius extension; docs/INPROGRESS.md, Sized floating point types),
+so it needs no implementation. `float.m` implements its
 functions but `hash`, and `math.m` all of its
 functions but `solve_quadratic`, with C's math library. The arithmetic
 and comparisons of `int`, `uint`, the sized integers and `float` are

@@ -9593,7 +9593,9 @@ on the device, LLVM libc's or ocml's after `benchmarks/math` has a
 each, through the `float` (`f64`) conversion.
 
 **Steps:**
-1. `float64`, the equivalence type, with a test.
+1. `float64`, the equivalence type, with a test. *Built 2026-11-28:*
+   library/float64.m; test/Conformance/extensions/float-types/
+   run-float64.m.
 2. `float32`: the type, literals, arithmetic, comparisons, conversions,
    type_info, unify, compare and copy, foreign code, I/O, flat messages
    and records, GPU code; `math_float32`; `benchmarks/math` in `float32`,
