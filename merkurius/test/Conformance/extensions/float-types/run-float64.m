@@ -2,13 +2,15 @@
 % float64 is an equivalence type for float (library/float64.m): a float64
 % value is a float, so float's operators, conversions and comparisons apply
 % to it, it unifies with a float, and io.write writes it as a float. mmc has
-% no float64, so the output is written by hand, as mmc writes the same
-% program with float in place of float64.
+% no float64; oracle.py gives it the stand-in
+% utils/conformance/emulation/float64.m, the same equivalence.
 %
 % RUN: merkc -O0 %s -o %t0
 % RUN: %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t2
 % RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % OUTPUT:4.0
 % OUTPUT-NEXT:yes
 % OUTPUT-NEXT:[1.5, 2.25, 0.125]

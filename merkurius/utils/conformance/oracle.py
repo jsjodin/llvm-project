@@ -262,6 +262,7 @@ class Test:
         for path in self.module_paths() + [os.path.join(here, f)
                                            for f in self.files]:
             shutil.copy(path, directory)
+        copy_stand_ins(directory)
         return module
 
     def marked_lines(self, generated):
@@ -273,6 +274,22 @@ class Test:
 
     def text(self, generated):
         return "\n".join(self.authored + ["%"] + generated + self.body)
+
+
+def copy_stand_ins(directory):
+    """The stand-ins in emulation/ for the Merkurius modules that the
+    program's modules import, which mmc does not have, as float64."""
+    imported = set()
+    for name in os.listdir(directory):
+        if name.endswith(".m"):
+            with open(os.path.join(directory, name), encoding="utf-8") as f:
+                for m in re.finditer(r"^:- (?:import|use)_module ([^.]*)\.",
+                                     f.read(), re.M):
+                    imported |= {n.strip() for n in m.group(1).split(",")}
+    for name in sorted(os.listdir(instantiate.EMULATION)):
+        target = os.path.join(directory, name)
+        if name[:-2] in imported and not os.path.exists(target):
+            shutil.copy(os.path.join(instantiate.EMULATION, name), target)
 
 
 def mmc_run(test, mmc, type_name=None):
