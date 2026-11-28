@@ -10028,6 +10028,57 @@ runtime has no such check now.
    whose mailboxes do not leave the module, which needs to know where
    handles go; after (a) and (b), if they find real bugs.
 
+   **The operations the analyses need,** from the library predicates
+   that code generation still makes calls of, or recognises by name;
+   each formed from the call just made, as in step 2, and lowered back
+   to it until a direct lowering is measured. In this order:
+
+   (d) *The team operations,* `team_barrier`, `team_mailbox`,
+   `team_number`, `team_slot` and `number_of_teams`, as merk operations
+   (`team_mailbox` is now a special case in MLIRGenBuiltins.cpp). They
+   make a check of GPU code possible, the GPU's counterpart of (a)-(c):
+   a `team_barrier` reached under a branch on a value that differs
+   between lanes or teams (a lane's or team's number, or what was
+   computed from one, or a message only some received) hangs, the class
+   of the lane-0 `RunProcess` hang of 2026-11-22 (lanes must not wait on
+   another lane's branch). A warning, by a divergence analysis on merk
+   from the operations that give a lane's or team's number. The most
+   valuable of these, as such a hang resets the display's GPU.
+
+   (e) *`send_request`,* a send whose message carries the mailbox for the
+   reply, as `merk.send` with the reply's operand marked, so that (b)
+   knows which handle is the reply, not guessing from a message's
+   fields.
+
+   (f) *Names and nodes:* `register`, `register_slot`, `unregister`,
+   `lookup`, `lookup_name`, `lookup_remote`, `connect`, `connect_to`,
+   `listen` and `listen_on`. A registered handle escapes to anyone who
+   looks its name up, which (c) must know to be sound; a lookup gives a
+   handle from nowhere in the module; and `connect` or `listen` marks a
+   program distributed, which an analysis that assumes one node must
+   know. MLIRGenOpen.cpp's list of process predicates by name (which
+   read no message) would then be of operations.
+
+   (g) *Exceptions,* `merk.throw` and `merk.try`, in place of the call of
+   `exception.throw` and of the `try_*_entry` that code generation
+   chooses for a try goal's determinism (MLIRGenCalls.cpp,
+   `TryProcedure`). They allow a bottom-up analysis of which procedures
+   can throw, so that a try around a goal that cannot needs no setting
+   up, and a process body that cannot needs no path for its end by an
+   exception; on the GPU, `merk.throw` lowers to the jump of exceptions
+   step 3, in one place. For (b), a path that ends in a throw drops the
+   reply handle: whether that is a forgotten reply is to decide with
+   (g). Designed with exceptions step 4, which is still open.
+
+   **Not made operations:** io (`io.state` is already a type of no size,
+   and which procedures do I/O shows in their types); strings, whose
+   operations are C foreign procs, rare in the code that matters for
+   speed; and the rest (math, int, list), ordinary calls that LLVM
+   inlines and optimizes. Arrays, all-solutions, typeclass methods,
+   closures, type_infos, string comparison, receives and selects are
+   operations already, and atomics and parallel loops lower to the omp
+   dialect.
+
    **Later, if the cheap checks prove worth it:** a Go-style model of
    each process kind's communication, from `merk.spawn` bodies and the
    operations, model-checked; it needs to know which mailbox each handle
@@ -10048,7 +10099,8 @@ runtime has no such check now.
    to the user before any warning is kept, to see whether they find real
    bugs or only noise.
 
-   **To decide:** whether (a) and (b) first, as proposed; and whether the
+   **To decide:** whether (d), then (a) and (b) with (e), then (f) and
+   (c), and (g) with exceptions step 4, as proposed; and whether the
    warnings are on by default or only with a flag, until the runs over
    the existing programs show how noisy they are.
 
