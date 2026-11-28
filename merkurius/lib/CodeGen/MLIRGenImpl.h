@@ -321,6 +321,9 @@ private:
   // Whether a call of an integer or float module that is not built in has been
   // dealt with, which it has only if it was reported.
   bool NotBuiltIn(const Body &, const semantics::Symbol &);
+  std::optional<mlir::Value> FloatConversion(llvm::StringRef name,
+      llvm::ArrayRef<mlir::Value> in, BodyVar output, const ProcedureBody &body,
+      mlir::Location loc);
   // A sized integer module's from_int, which fails, or det_from_int, which
   // throws, for an int outside the type's range.
   bool FromInt(const Body &, const semantics::Symbol &,

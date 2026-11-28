@@ -95,6 +95,7 @@ inline Word ArrayWidthOfKind(uint8_t kind) {
     return kArrayBytes2;
   case Int32:
   case Uint32:
+  case Float32:
   case Char:
   case Enum:
     return kArrayBytes4;

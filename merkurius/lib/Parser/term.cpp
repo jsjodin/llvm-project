@@ -9,6 +9,7 @@
 #include "merkurius/Parser/term.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
 #include <cmath>
@@ -107,7 +108,8 @@ public:
       PrintInteger(llvm::cast<IntegerTerm>(term));
       return;
     case Term::Kind::Float:
-      PrintFloat(llvm::cast<FloatTerm>(term).value());
+      PrintFloat(llvm::cast<FloatTerm>(term).value(),
+          llvm::cast<FloatTerm>(term).size());
       return;
     case Term::Kind::String:
       PrintQuoted(o_, llvm::cast<StringTerm>(term).value(), '"');
@@ -252,35 +254,84 @@ private:
     }
   }
 
-  // The shortest form that reads back as the same double, always with a
-  // fraction or an exponent, so that it reads back as a float.
-  void PrintFloat(double value) {
-    if (std::isinf(value)) {
-      // There is no literal for infinity; this is one that reads as it.
-      o_ << (value < 0 ? "-1.0e+309" : "1.0e+309");
-      return;
-    }
-    char buffer[32];
-    for (int precision{1}; precision <= 17; ++precision) {
-      std::snprintf(buffer, sizeof buffer, "%.*g", precision, value);
-      if (std::strtod(buffer, nullptr) == value) {
-        break;
-      }
-    }
-    std::string text{buffer};
-    if (text.find_first_of(".en") == std::string::npos) { // n: inf and nan
-      text += ".0";
-    } else if (std::size_t e{text.find('e')};
-               e != std::string::npos && text.find('.') == std::string::npos) {
-      text.insert(e, ".0");
-    }
-    o_ << text;
+  // The shortest form that reads back as the same value of its size,
+  // always with a fraction or an exponent, so that it reads back as a
+  // float, and the size's suffix.
+  void PrintFloat(double value, FloatSize size) {
+    o_ << FloatText(value, size);
   }
 
   llvm::raw_ostream &o_;
 };
 
 } // namespace
+
+llvm::StringRef FloatSuffix(FloatSize size) {
+  switch (size) {
+  case FloatSize::Default:
+    return "";
+  case FloatSize::Bits32:
+    return "f32";
+  case FloatSize::Bits16:
+    return "f16";
+  case FloatSize::BFloat16:
+    return "bf16";
+  }
+  llvm_unreachable("a float's size");
+}
+
+const llvm::fltSemantics &FloatSemantics(FloatSize size) {
+  switch (size) {
+  case FloatSize::Default:
+    return llvm::APFloat::IEEEdouble();
+  case FloatSize::Bits32:
+    return llvm::APFloat::IEEEsingle();
+  case FloatSize::Bits16:
+    return llvm::APFloat::IEEEhalf();
+  case FloatSize::BFloat16:
+    return llvm::APFloat::BFloat();
+  }
+  llvm_unreachable("a float's size");
+}
+
+std::string FloatText(double value, FloatSize size) {
+  std::string suffix{FloatSuffix(size)};
+  if (std::isinf(value)) {
+    // There is no literal for infinity; this is one that reads as it.
+    return (value < 0 ? "-1.0e+309" : "1.0e+309") + suffix;
+  }
+  // The shortest that reads back as the value, rounded to the size.
+  char buffer[32];
+  for (int precision{1}; precision <= 17; ++precision) {
+    std::snprintf(buffer, sizeof buffer, "%.*g", precision, value);
+    if (size == FloatSize::Default) {
+      if (std::strtod(buffer, nullptr) == value) {
+        break;
+      }
+      continue;
+    }
+    llvm::APFloat back{FloatSemantics(size)};
+    if (auto status{
+            back.convertFromString(buffer, llvm::APFloat::rmNearestTiesToEven)}) {
+      bool lost;
+      back.convert(llvm::APFloat::IEEEdouble(),
+          llvm::APFloat::rmNearestTiesToEven, &lost);
+      if (back.convertToDouble() == value) {
+        break;
+      }
+    } else {
+      llvm::consumeError(status.takeError());
+    }
+  }
+  std::string text{buffer};
+  if (text.find_first_of(".en") == std::string::npos) { // n: inf and nan
+    text += ".0";
+  } else if (std::size_t e{text.find('e')};
+             e != std::string::npos && text.find('.') == std::string::npos) {
+    text.insert(e, ".0");
+  }
+  return text + suffix;
+}
 
 void PrintCanonical(llvm::raw_ostream &o, const Term &term) {
   CanonicalPrinter{o}.Print(term);

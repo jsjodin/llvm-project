@@ -52,7 +52,9 @@ end of the header. Other header lines are the author's:
                                   the file's directory, for open terms; or
                                   Inputs/translation.erl, an escript, for
                                   processes, whose first line escript
-                                  skips
+                                  skips; or Inputs/translation.c, a C
+                                  program cc builds, for the sized
+                                  floats, which are C's
   % NODES: server client          the roles of a distribution test, each
                                   a node: the program, and its Erlang
                                   translation, are run once for each, by
@@ -256,6 +258,19 @@ def mmc_run(test, mmc):
                              [os.path.basename(program)],
                              os.path.dirname(program), merge=True)
         return status, out
+    if extension == ".c":
+        program = os.path.join(os.path.dirname(test.path), test.mmc_program)
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = os.path.join(tmp, "translation")
+            # No contraction into fused multiply-adds, which merkc's
+            # programs do not make either.
+            status, out, err = run(["cc", "-std=c11", "-O2",
+                                    "-ffp-contract=off", program, "-lm",
+                                    "-o", binary], tmp)
+            if status != 0:
+                raise TestError("cc cannot compile it:\n" + out + err)
+            status, out, _ = run([binary], tmp, merge=True)
+            return status, out
     with tempfile.TemporaryDirectory() as tmp:
         module = test.copy_to(tmp)
         status, out, err = run([mmc] + test.mmc_flags + ["--make", module],

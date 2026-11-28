@@ -1300,6 +1300,7 @@ void Collector::ForwardOpen(Word *slot, Type type) {
     case Int64:
     case Uint64:
     case Float:
+    case Float32:
       CopyBox(slot);
       return;
     case String:

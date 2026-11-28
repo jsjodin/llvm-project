@@ -32,6 +32,13 @@ last `x` to the sum. A run of each loop loads its kernel; then the best of
 `MATH_REPEAT` runs (5) is timed. Each program prints a line a function:
 its name, the best time in seconds and the first run's sum.
 
+`math_loop32.*` are the same loops in single precision: `float32` and
+`math_float32` in Merkurius, `float` and `sqrtf` and the like in C and
+HIP, `real(4)` in Fortran, with the sums in single precision too, which
+`MATH_PRECISION=32` selects. On a GPU whose double precision is slow, as
+the gfx1030's is (1/16 of single), these are the ones that measure the
+libraries.
+
 Merkurius' functions also check their domain (`sqrt` and `ln` of a
 negative number throw), a comparison the others do not make; the loops'
 arguments never fail it.

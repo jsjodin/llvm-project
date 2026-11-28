@@ -19,6 +19,7 @@
 #include "merkurius/Parser/lexer.h"
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/source.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/ConvertUTF.h"
@@ -100,6 +101,7 @@ private:
   void SayUnderscore(const char *start, char next);
   bool SkipDigits(bool (*isDigit)(char));
   void SkipIntegerSuffix(const char *start, bool trailingUnderscore);
+  void SkipFloatSuffix();
   void SkipQuoted(char quote);
   void SkipEscape();
   void SkipHexDigits(const char *escape, int count);
@@ -368,6 +370,35 @@ void Lexer::SkipIntegerSuffix(const char *start, bool trailingUnderscore) {
   }
 }
 
+// The suffixes f16, f32, f64 and bf16 of a float, a Merkurius extension
+// (docs/INPROGRESS.md, Sized floating point types): 1.5f32 is a float32,
+// 1.5f64 a float. Without the extension, a name after a float is a syntax
+// error, so no program of mmc's changes meaning. Another f followed by
+// digits is an invalid suffix.
+void Lexer::SkipFloatSuffix() {
+  const char *suffix{at_};
+  const char *p{at_};
+  if (Peek() == 'b' && Peek(1) == 'f') {
+    p += 2;
+  } else if (Peek() == 'f') {
+    ++p;
+  } else {
+    return;
+  }
+  const char *digits{p};
+  while (p < end_ && IsDigit(*p)) {
+    ++p;
+  }
+  if (p == digits || (p < end_ && IsAlphanumeric(*p))) {
+    return;
+  }
+  llvm::StringRef text{suffix, static_cast<std::size_t>(p - suffix)};
+  at_ = p;
+  if (!llvm::is_contained({"f16", "f32", "f64", "bf16"}, text)) {
+    Say(suffix, at_, "invalid float suffix"_err_en_US);
+  }
+}
+
 // Whether an exponent starts here: e or E, an optional sign, and a digit.
 bool Lexer::AtExponent() const {
   return (Peek() == 'e' || Peek() == 'E') &&
@@ -458,6 +489,7 @@ TokenKind Lexer::LexNumber() {
       SayUnderscore(start, '\0');
     }
   }
+  SkipFloatSuffix();
   return TokenKind::Float;
 }
 

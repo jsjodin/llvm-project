@@ -77,7 +77,8 @@ bool IsScalar(const Type &type) {
   return name == "int" || name == "uint" || name == "int8" || name == "int16" ||
       name == "int32" || name == "int64" || name == "uint8" ||
       name == "uint16" || name == "uint32" || name == "uint64" ||
-      name == "float" || name == "char" || name == "character";
+      name == "float" || name == "float32" || name == "char" ||
+      name == "character";
 }
 
 bool IsString(const Type &type) {

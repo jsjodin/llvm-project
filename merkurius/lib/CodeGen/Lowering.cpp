@@ -473,6 +473,9 @@ private:
   void GroupPrivateNext(mlir::IntegerAttr fallback, mlir::Location);
   bool groupPrivate_{false};
   void LowerArrayElementRef(merk::ArrayElementRefOp);
+  // Each merk.array_element_ref's element width, found before any type is
+  // converted.
+  llvm::DenseMap<mlir::Operation *, std::int64_t> elementRefWidths_;
   // The struct of the records an array operation's array holds inline, or
   // null (docs/INPROGRESS.md, Flat records, step 2).
   mlir::LLVM::LLVMStructType ArrayRecord(mlir::Operation *op) const;
@@ -1131,8 +1134,9 @@ std::optional<StaticValue> Lowerer::StaticOf(mlir::Value value) {
         ":" + std::to_string(integer.getValue().getSExtValue());
   } else if (auto real{mlir::dyn_cast<mlir::FloatAttr>(result.value)}) {
     result.kind = StaticValue::Kind::Float;
-    result.key = "f:" +
-        std::to_string(real.getValue().bitcastToAPInt().getZExtValue());
+    // By its width too, as a float32's bits are a float's too.
+    result.key = "f" + std::to_string(real.getType().getIntOrFloatBitWidth()) +
+        ":" + std::to_string(real.getValue().bitcastToAPInt().getZExtValue());
   } else {
     llvm::StringRef string{mlir::cast<mlir::StringAttr>(result.value).getValue()};
     result.kind = StaticValue::Kind::String;
@@ -2020,6 +2024,9 @@ static std::string ArrayRootName(mlir::Type type) {
   if (mlir::isa<merk::ClosureType>(type)) {
     return "pred";
   }
+  if (mlir::isa<mlir::Float32Type>(type)) {
+    return "float32";
+  }
   return mlir::isa<mlir::FloatType>(type) ? "float" : "int";
 }
 
@@ -2610,7 +2617,7 @@ static std::optional<unsigned> DescriptorKind(llvm::StringRef kind) {
   static constexpr llvm::StringLiteral kinds[]{"int", "uint", "int8", "int16",
       "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float", "char",
       "string", "array", "dummy", "void", "enum", "notag", "cells", "tuple",
-      "closure", "open"};
+      "closure", "open", "float32"};
   for (auto [i, name] : llvm::enumerate(kinds)) {
     if (kind == name) {
       return i;
@@ -4635,6 +4642,13 @@ mlir::Value Lowerer::ToBits(mlir::Value value, mlir::Location loc) {
     return mlir::LLVM::PtrToIntOp::create(
         rewriter_, loc, i64, LoweredValue(value, loc));
   }
+  // A narrow float's bits, as an integer of its width, extended.
+  if (auto real{mlir::dyn_cast<mlir::FloatType>(type)};
+      real && real.getWidth() < 64) {
+    mlir::Value bits{mlir::LLVM::BitcastOp::create(rewriter_, loc,
+        rewriter_.getIntegerType(real.getWidth()), value)};
+    return mlir::LLVM::ZExtOp::create(rewriter_, loc, i64, bits);
+  }
   return mlir::LLVM::BitcastOp::create(rewriter_, loc, i64, value);
 }
 
@@ -4684,6 +4698,12 @@ mlir::Value Lowerer::FromWord(
   if (mlir::isa<mlir::LLVM::LLVMPointerType>(type)) {
     return mlir::LLVM::IntToPtrOp::create(rewriter_, loc, type, word);
   }
+  if (auto real{mlir::dyn_cast<mlir::FloatType>(type)};
+      real && real.getWidth() < 64) {
+    mlir::Value bits{mlir::LLVM::TruncOp::create(rewriter_, loc,
+        rewriter_.getIntegerType(real.getWidth()), word)};
+    return mlir::LLVM::BitcastOp::create(rewriter_, loc, type, bits);
+  }
   return mlir::LLVM::BitcastOp::create(rewriter_, loc, type, word);
 }
 
@@ -4726,19 +4746,24 @@ std::optional<std::int64_t> Lowerer::ArrayWidth(mlir::Type element) const {
     // A notag's descriptor is a notag's, whatever its argument.
     return layout->kind == TermLayout::Kind::Enum ? 3 : 0;
   }
+  // A narrow number's array is of its width: an integer's, or a narrow
+  // float's bits (docs/INPROGRESS.md, Sized floating point types).
+  unsigned bits{64};
   if (auto integer{mlir::dyn_cast<mlir::IntegerType>(element)}) {
-    switch (integer.getWidth()) {
-    case 8:
-      return 1;
-    case 16:
-      return 2;
-    case 32:
-      return 3;
-    default:
-      return 0;
-    }
+    bits = integer.getWidth();
+  } else if (auto real{mlir::dyn_cast<mlir::FloatType>(element)}) {
+    bits = real.getWidth();
   }
-  return 0;
+  switch (bits) {
+  case 8:
+    return 1;
+  case 16:
+    return 2;
+  case 32:
+    return 3;
+  default:
+    return 0;
+  }
 }
 
 mlir::Value Lowerer::MadeArrayWidth(
@@ -5060,9 +5085,10 @@ void Lowerer::PolymorphicStore(mlir::Operation *op, mlir::Value array,
 void Lowerer::LowerArrayElementRef(merk::ArrayElementRefOp op) {
   mlir::Location loc{op->getLoc()};
   rewriter_.setInsertionPoint(op);
-  // The operands, not the accessors: the array may be lowered already.
+  // The operands, not the accessors: the array may be lowered already. An
+  // array of float32s is packed, 4 bytes to an element.
   mlir::Value address{ElementAddress(LoweredValue(op->getOperand(0), loc),
-      op->getOperand(1), 0, loc)};
+      op->getOperand(1), elementRefWidths_.lookup(op), loc)};
   mlir::Type type{op->getResult(0).getType()};
   if (address.getType() != type) {
     address =
@@ -5158,9 +5184,12 @@ void Lowerer::LowerArray(mlir::Operation *op) {
               .getResult()};
       result = FromWord(word, type, loc);
     } else if (*width != 0) {
-      // Its bits, extended into an enumeration's word.
-      mlir::Value bits{mlir::LLVM::LoadOp::create(rewriter_, loc,
-          rewriter_.getIntegerType(8 << (*width - 1)),
+      // Its bits, extended into an enumeration's word; a narrow float is
+      // loaded as itself.
+      mlir::Type loaded{mlir::isa<mlir::FloatType>(type)
+              ? type
+              : mlir::Type{rewriter_.getIntegerType(8 << (*width - 1))}};
+      mlir::Value bits{mlir::LLVM::LoadOp::create(rewriter_, loc, loaded,
           ElementAddress(array, op->getOperand(1), *width, loc))};
       result = bits.getType() == type
           ? bits
@@ -5191,7 +5220,7 @@ void Lowerer::LowerArray(mlir::Operation *op) {
     } else if (*width != 0) {
       auto type{rewriter_.getIntegerType(8 << (*width - 1))};
       mlir::Value value{LoweredValue(element, loc)};
-      if (value.getType() != type) {
+      if (value.getType() != type && !mlir::isa<mlir::FloatType>(value.getType())) {
         value = mlir::LLVM::TruncOp::create(rewriter_, loc, type, value);
       }
       mlir::LLVM::StoreOp::create(rewriter_, loc, value,
@@ -6661,6 +6690,10 @@ void ExpandReceives(mlir::ModuleOp module, bool device, bool processes) {
 
 llvm::LogicalResult Lowerer::Lower() {
   module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect, mrt::MrtDialect>();
+  module_.walk([&](merk::ArrayElementRefOp ref) {
+    elementRefWidths_[ref] =
+        ArrayWidth(ref.getArray().getType().getElement()).value_or(0);
+  });
   // A receive of any is the device runtime's in any compile, first, as its
   // matcher's symbol would make omp-function-filter remove it (FilterProcs).
   ExpandDirectReceives(module_);

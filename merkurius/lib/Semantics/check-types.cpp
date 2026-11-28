@@ -2272,13 +2272,28 @@ static std::string SuperVarName(unsigned var, const Signature &own,
       : SignatureVarName(own, var);
 }
 
+// The type of a float literal, from its suffix (docs/INPROGRESS.md, Sized
+// floating point types): none or f64 is a float.
+static llvm::StringRef FloatLiteralType(llvm::StringRef text) {
+  if (text.ends_with("bf16")) {
+    return "bfloat16";
+  }
+  if (text.ends_with("f16")) {
+    return "float16";
+  }
+  if (text.ends_with("f32")) {
+    return "float32";
+  }
+  return "float";
+}
+
 // The type names reserved for the implementation (reference manual,
-// "Discriminated unions").
+// "Discriminated unions"), and float32, an extension's.
 static bool ReservedType(llvm::StringRef name) {
   static constexpr llvm::StringLiteral reserved[]{"int", "int8", "int16",
       "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64",
-      "float", "character", "string", "{}", "=", "=<", "pred", "func",
-      "pure", "semipure", "impure", ""};
+      "float", "float32", "character", "string", "{}", "=", "=<", "pred",
+      "func", "pure", "semipure", "impure", ""};
   return llvm::is_contained(reserved, name);
 }
 
@@ -3367,7 +3382,18 @@ void TypeChecker::CheckUnify(const Unify &unify) {
     if (functor.literal->kind == parser::LiteralKind::String) {
       type = Primitive("string");
     } else if (functor.literal->kind == parser::LiteralKind::Float) {
-      type = Primitive("float");
+      // A float's suffix names its type: 1.5f32 is a float32
+      // (docs/INPROGRESS.md, Sized floating point types).
+      llvm::StringRef name{FloatLiteralType(text)};
+      if (name == "float16" || name == "bfloat16") {
+        // Temporary (sized floats step 3, docs/INPROGRESS.md, Sized
+        // floating point types): until float16 and bfloat16 are types.
+        messages_->Say(Source(unify.tokens),
+            "not yet implemented: the type %s of the literal %s"_err_en_US,
+            name, text);
+        name = "float";
+      }
+      type = Primitive(name);
     } else {
       // An integer's suffix names its type: 1i8 is an int8, 2u a uint.
       std::size_t at{text.find_first_of("iu")};

@@ -137,8 +137,8 @@ llvm::LogicalResult ArraySetOp::verify() {
 llvm::LogicalResult ArrayElementRefOp::verify() {
   mlir::Type element{
       mlir::cast<ArrayType>(getArray().getType()).getElement()};
-  if (!element.isInteger(64) && !element.isF64()) {
-    return emitOpError("needs an array of ints or floats");
+  if (!element.isInteger(64) && !element.isF64() && !element.isF32()) {
+    return emitOpError("needs an array of ints, floats or float32s");
   }
   return mlir::success();
 }

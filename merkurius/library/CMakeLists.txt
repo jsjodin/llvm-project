@@ -36,7 +36,7 @@ install(FILES ${sound_array} DESTINATION lib/merkurius/sound
 # merkc for the host, as the driver links them into every program. Their
 # foreign_procs are compiled by clang, so it is built first when it is part
 # of the build.
-set(compiled_modules io float math require pair maybe list solutions
+set(compiled_modules io float float32 math math_float32 require pair maybe list solutions
   process string char array open univ exception)
 # Open types are for the host only (design document, "Open terms as built"), and
 # their module needs the flag. Temporary (docs/INPROGRESS.md, Exceptions, step

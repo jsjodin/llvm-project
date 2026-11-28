@@ -86,10 +86,13 @@ change; so a program checked with `-fmmc-uniqueness` cannot call them.
 (a Merkurius extension; docs/INPROGRESS.md, Sized floating point types),
 so it needs no implementation. `float.m` implements its
 functions but `hash`, and `math.m` all of its
-functions but `solve_quadratic`, with C's math library. The arithmetic
-and comparisons of `int`, `uint`, the sized integers and `float` are
-built into code generation, so those modules need no implementation for
-them. The build compiles the modules that have an implementation into
+functions but `solve_quadratic`, with C's math library. `float32.m` and
+`math_float32.m` are the same for `float32`, IEEE single precision, also
+an extension, with C's single-precision functions; `math_float32` has
+`math`'s names, which overload `math`'s by the argument's type. The
+arithmetic and comparisons of `int`, `uint`, the sized integers, `float`
+and `float32` are built into code generation, so those modules need no
+implementation for them. The build compiles the modules that have an implementation into
 `libmerkstd.a` (the list is in `CMakeLists.txt`), which the driver links
 into every program. `exception.m` implements `throw`, `try`, `try_io`,
 `try_all`, `finally` and `rethrow` on the runtime's entries

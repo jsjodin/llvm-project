@@ -11,6 +11,7 @@
 #include "merkurius/Parser/operators.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/ConvertUTF.h"
+#include "llvm/Support/Error.h"
 #include <algorithm>
 #include <cstdlib>
 
@@ -689,16 +690,44 @@ const Term *TermReader::MakeLiteral(
   if (tokens_.tokens[token].kind == TokenKind::Integer) {
     return MakeInteger(first, token, negative);
   }
+  llvm::StringRef spelling{tokens_.tokens[token].spelling};
+  // The suffix, if any, names its size; the value is rounded to it once,
+  // from the digits, not through a double.
+  FloatSize size{FloatSize::Default};
+  if (spelling.consume_back("bf16")) {
+    size = FloatSize::BFloat16;
+  } else if (spelling.consume_back("f16")) {
+    size = FloatSize::Bits16;
+  } else if (spelling.consume_back("f32")) {
+    size = FloatSize::Bits32;
+  } else {
+    spelling.consume_back("f64");
+  }
   std::string digits;
-  for (char ch : tokens_.tokens[token].spelling) {
+  for (char ch : spelling) {
     if (ch != '_') {
       digits += ch;
     }
   }
-  double value{std::strtod(digits.c_str(), nullptr)};
+  double value;
+  if (size == FloatSize::Default) {
+    value = std::strtod(digits.c_str(), nullptr);
+  } else {
+    llvm::APFloat rounded{FloatSemantics(size)};
+    if (auto status{rounded.convertFromString(
+            digits, llvm::APFloat::rmNearestTiesToEven)}) {
+      bool lost;
+      rounded.convert(llvm::APFloat::IEEEdouble(),
+          llvm::APFloat::rmNearestTiesToEven, &lost);
+      value = rounded.convertToDouble();
+    } else {
+      llvm::consumeError(status.takeError());
+      value = std::strtod(digits.c_str(), nullptr);
+    }
+  }
   // As in mmc, a negated zero is zero, not negative zero.
   return arena_.Make<FloatTerm>(
-      Range(first), negative && value != 0 ? -value : value);
+      Range(first), negative && value != 0 ? -value : value, size);
 }
 
 // The value of an integer literal, of any size; the lexer has checked its

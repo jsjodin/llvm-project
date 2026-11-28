@@ -176,6 +176,7 @@ OpenEncoding OpenEncodingOf(const TypeCtor &type) {
   case Int64:
   case Uint64:
   case Float:
+  case Float32:
   case String:
     return OpenEncoding::Boxed;
   case Cells:
@@ -474,6 +475,12 @@ bool BoxesEqual(const TypeCtor *ctor, Word a, Word b) {
     std::memcpy(&q, &y, sizeof q);
     return p == q;
   }
+  case Float32: {
+    float p, q;
+    std::memcpy(&p, &x, sizeof p);
+    std::memcpy(&q, &y, sizeof q);
+    return p == q;
+  }
   case String:
     return std::strcmp(reinterpret_cast<const char *>(x),
                reinterpret_cast<const char *>(y)) == 0;
@@ -507,6 +514,7 @@ bool GroundEqual(const Type &type, Word a, Word b) {
     }
     switch (type.ctor->kind) {
     case Float:
+    case Float32:
     case String:
       return BoxesEqual(
           type.ctor, reinterpret_cast<Word>(&a), reinterpret_cast<Word>(&b));

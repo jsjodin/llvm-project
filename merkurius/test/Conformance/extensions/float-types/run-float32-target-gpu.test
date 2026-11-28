@@ -1,0 +1,8 @@
+The program of run-float32-target.m, run on the machine's GPU: its float32
+loops, reductions and atomic update on the device, and math_float32's
+sqrt as the device library's sqrtf.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/run-float32-target.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t 2>&1 \
+RUN:   | FileCheck %S/run-float32-target.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

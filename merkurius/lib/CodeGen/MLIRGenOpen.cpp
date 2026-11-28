@@ -436,7 +436,10 @@ std::optional<MerkGenerator::ScalarEncoding> MerkGenerator::OpenScalar(
   llvm::StringRef name{type->constructor->name};
   if (type->constructor->module.empty()) {
     if (name == "int" || name == "uint" || name == "int64" ||
-        name == "uint64" || name == "float" || name == "string") {
+        name == "uint64" || name == "float" || name == "float32" ||
+        name == "string") {
+      // A float32 is boxed, as float is, so that unification compares it
+      // as a float, not by its bits (runtime/open.cpp, BoxesEqual).
       return ScalarEncoding{Kind::Boxed};
     }
     if (name == "int8" || name == "uint8") {

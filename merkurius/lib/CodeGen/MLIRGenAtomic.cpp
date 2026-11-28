@@ -60,10 +60,10 @@ static bool IsWriteName(llvm::StringRef name) {
       {"set", "unsafe_set", "elem :=", "unsafe_elem :="}, name);
 }
 
-// The operators of OpenMP's atomic update that the int and float modules
-// have as functions, built in.
+// The operators of OpenMP's atomic update that the int, float and float32
+// modules have as functions, built in.
 static bool IsAtomicOperator(llvm::StringRef module, llvm::StringRef name) {
-  if (module == "float") {
+  if (module == "float" || module == "float32") {
     return llvm::is_contained({"+", "-", "*"}, name);
   }
   return module == "int" &&
@@ -322,7 +322,8 @@ void MerkGenerator::OmpAtomic(const Body &goal, const ProcedureBody &body) {
   }
   mlir::Type type{mlir::cast<merk::ArrayType>(array.getType()).getElement()};
   if (!(type.isInteger(64) && opSymbol.module == "int") &&
-      !(type.isF64() && opSymbol.module == "float")) {
+      !(type.isF64() && opSymbol.module == "float") &&
+      !(type.isF32() && opSymbol.module == "float32")) {
     NotYet(at, "atomic updates of arrays other than of ints and floats");
     return;
   }

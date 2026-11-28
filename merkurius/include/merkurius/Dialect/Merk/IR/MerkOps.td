@@ -1043,7 +1043,8 @@ def Merk_ArraySetOp : Merk_Op<"array_set", [
 def Merk_ArrayElementRefOp : Merk_Op<"array_element_ref"> {
   let summary = "the address of an array's element, for an atomic operation";
   let description = [{
-    The address of element `index` of an array of words, of ints or floats,
+    The address of element `index` of an array of ints or floats, which
+    are words, or of float32s, which are packed 4 bytes to an element,
     which an OpenMP atomic operation updates in place (`%$omp atomic`,
     docs/INPROGRESS.md, Atomic updates of array elements). It is a generic
     pointer, or in the target's address space for atomic operations

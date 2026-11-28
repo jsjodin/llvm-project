@@ -85,6 +85,10 @@
 :- pred write_float(float::in, io::di, io::uo) is det.
 :- pred write_float(io.text_output_stream::in, float::in, io::di, io::uo)
     is det.
+    % A Merkurius extension (docs/INPROGRESS.md, Sized floating point
+    % types): a float32 as write_float writes a float, with the fewest
+    % digits that read back as the same float32.
+:- pred write_float32(float32::in, io::di, io::uo) is det.
 :- pred write_string(string::in, io::di, io::uo) is det.
 :- pred write_string(io.text_output_stream::in, string::in, io::di, io::uo)
     is det.
@@ -161,6 +165,7 @@
 #include <string.h>
 #include <math.h>
 extern void merk_write_float(double);
+extern void merk_write_float32(float);
 extern void merk_write(MR_Word, MR_Word, MR_Word);
 extern MR_Integer merk_argument_count(void);
 extern MR_String merk_argument(MR_Integer);
@@ -343,6 +348,13 @@ write_uint32(N, !IO) :- write_uint(uint32.cast_to_uint(N), !IO).
     [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_write_float(F);
+").
+
+:- pragma foreign_proc("C",
+    write_float32(F::in, _IO0::di, _IO::uo),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    merk_write_float32(F);
 ").
 
 % A value by its type_info, in runtime/write.cpp. Its third argument's bits

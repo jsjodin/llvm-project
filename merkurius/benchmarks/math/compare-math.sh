@@ -12,6 +12,8 @@
 # rounds, each a run of all four, 3 by default. ROCM_PATH is /opt/rocm by
 # default. MATH_N (elements, 2^20), MATH_K (applications an element, 1000)
 # and MATH_REPEAT (timed runs a function, the best kept, 5) pass through.
+# MATH_PRECISION=32 compares the float32 versions, math_loop32.*, whose
+# Merkurius program uses math_float32; 64, the default, math_loop.*.
 # The CU mask is LIBOMPTARGET_AMDGPU_CU_MASK's, else half of the GPU's if
 # it drives a display, as pipeline/sweep.sh's, and HIP's HSA_CU_MASK the
 # same. On a machine that others share, run it through
@@ -23,6 +25,11 @@ arch="${2:-$("$build/bin/amdgpu-arch" 2>/dev/null | head -n1)}"
 [[ -n "$arch" ]] || { echo "$0: found no GPU; give its offload-arch" >&2; exit 1; }
 rounds="${3:-3}"
 rocm="${ROCM_PATH:-/opt/rocm}"
+case "${MATH_PRECISION:-64}" in
+  64) base=math_loop ;;
+  32) base=math_loop32 ;;
+  *) echo "$0: MATH_PRECISION is 32 or 64" >&2; exit 1 ;;
+esac
 out="${MATH_OUT:-$(mktemp -d)}"
 omp="$build/runtimes/runtimes-bins/openmp/runtime/src"
 libs=("$omp" "$build/lib" "$build/lib/x86_64-unknown-linux-gnu")
@@ -37,14 +44,14 @@ if [[ -n "$mask" ]]; then
 fi
 
 "$build/bin/merkc" -O2 -fopenmp -fdo-loops --offload-arch="$arch" \
-  "${flags[@]}" "$here/math_loop.m" -o "$out/merkurius"
+  "${flags[@]}" "$here/$base.m" -o "$out/merkurius"
 "$build/bin/clang" -O2 -fopenmp --offload-arch="$arch" "${flags[@]}" \
-  "$here/math_loop.c" -lm -o "$out/c"
+  "$here/$base.c" -lm -o "$out/c"
 "$build/bin/clang" -x hip -O2 --offload-arch="$arch" --rocm-path="$rocm" \
-  "$here/math_loop.hip" -L"$rocm/lib" -lamdhip64 -lm \
+  "$here/$base.hip" -L"$rocm/lib" -lamdhip64 -lm \
   -Wl,-rpath,"$rocm/lib" -o "$out/hip"
 "$build/bin/flang" -O2 -fopenmp --offload-arch="$arch" "${flags[@]}" \
-  "$here/math_loop.f90" -o "$out/fortran"
+  "$here/$base.f90" -o "$out/fortran"
 
 progs=(merkurius c hip fortran)
 : > "$out/results"

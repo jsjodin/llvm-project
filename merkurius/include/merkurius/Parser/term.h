@@ -19,12 +19,14 @@
 #include "merkurius/Common/arena.h"
 #include "merkurius/Parser/char-block.h"
 #include "merkurius/Parser/token.h"
+#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
+#include <string>
 #include <type_traits>
 
 namespace merkurius::parser {
@@ -110,15 +112,34 @@ private:
   IntegerSize size_;
 };
 
+// A float's type, from its suffix (docs/INPROGRESS.md, Sized floating point
+// types): none or f64 is a float, f32 a float32, f16 a float16 and bf16 a
+// bfloat16.
+enum class FloatSize { Default, Bits32, Bits16, BFloat16 };
+
+// The suffix that names the size's type, empty for a float.
+llvm::StringRef FloatSuffix(FloatSize size);
+
+// The size's semantics, for rounding and printing its values.
+const llvm::fltSemantics &FloatSemantics(FloatSize size);
+
+// A float of the size as a literal: the shortest digits that read back as
+// it, with a fraction or an exponent, and the size's suffix.
+std::string FloatText(double value, FloatSize size);
+
+// A float of any size. Its value, a double, is rounded to its size, which a
+// double holds exactly.
 class FloatTerm : public Term {
 public:
-  FloatTerm(TokenRange tokens, double value)
-      : Term{Kind::Float, tokens}, value_{value} {}
+  FloatTerm(TokenRange tokens, double value, FloatSize size = FloatSize::Default)
+      : Term{Kind::Float, tokens}, value_{value}, size_{size} {}
   double value() const { return value_; }
+  FloatSize size() const { return size_; }
   static bool classof(const Term *t) { return t->kind() == Kind::Float; }
 
 private:
   double value_;
+  FloatSize size_;
 };
 
 class StringTerm : public Term {

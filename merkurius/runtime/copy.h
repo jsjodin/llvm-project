@@ -147,6 +147,7 @@ inline bool CopiedAsItIs(const TypeCtor *ctor) {
   case Uint8:
   case Uint16:
   case Uint32:
+  case Float32:
   case Uint64:
   case Float:
   case Char:
@@ -371,6 +372,7 @@ Word CopyOpen(Word value, const Type &type, WordMap &copies, Memory &memory) {
     case Int64:
     case Uint64:
     case Float:
+    case Float32:
       *slot = CopyBox(*reinterpret_cast<const Word *>(value), memory);
       return result;
     case String:
@@ -471,6 +473,7 @@ Word CopyTyped(Word value, const Type &type, Memory &memory) {
   case Uint8:
   case Uint16:
   case Uint32:
+  case Float32:
   case Uint64:
   case Float:
   case Char:

@@ -41,6 +41,7 @@ inline bool IsFlatField(const Type &type) {
   case Uint8:
   case Uint16:
   case Uint32:
+  case Float32:
   case Uint64:
   case Float:
   case Char:
@@ -101,6 +102,7 @@ inline Layout FieldLayout(const Type &type) {
     return {2, 2};
   case Int32:
   case Uint32:
+  case Float32:
   case Char:
   case Enum:
     return {4, 4};
@@ -153,6 +155,7 @@ Word FieldWord(
   }
   case Int32:
   case Uint32:
+  case Float32:
   case Char:
   case Enum: {
     uint32_t value;
@@ -210,6 +213,7 @@ inline void StoreField(const Type &type, Word value, unsigned char *bytes) {
   }
   case Int32:
   case Uint32:
+  case Float32:
   case Char:
   case Enum: {
     auto narrow{static_cast<uint32_t>(value)};

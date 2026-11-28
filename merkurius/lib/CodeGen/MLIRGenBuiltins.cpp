@@ -334,11 +334,46 @@ static std::string DomainError(llvm::StringRef module, llvm::StringRef what,
   return ("domain_error(\"" + module + "." + what + ": " + problem + "\")").str();
 }
 
-// What is not built in is called: float's functions are the compiled library's;
-// the integer modules have no implementation yet.
+// What is not built in is called: float's and float32's functions are the
+// compiled library's; the integer modules have no implementation yet.
 bool MerkGenerator::NotBuiltIn(
     const Body &goal, const semantics::Symbol &symbol) {
-  return symbol.module != "float" && LibraryCallNotYet(goal, symbol);
+  return symbol.module != "float" && symbol.module != "float32" &&
+      LibraryCallNotYet(goal, symbol);
+}
+
+// The conversions between float and the sized floats (docs/INPROGRESS.md,
+// Sized floating point types), as a module's from_float, to_float and
+// cast_from_int: rounding to nearest even to a narrower type, exact to a
+// wider one, and an int rounded to the type.
+std::optional<mlir::Value> MerkGenerator::FloatConversion(llvm::StringRef name,
+    llvm::ArrayRef<mlir::Value> in, BodyVar output, const ProcedureBody &body,
+    mlir::Location loc) {
+  namespace arith = mlir::arith;
+  if (in.size() != 1) {
+    return std::nullopt;
+  }
+  std::optional<Represented> represented{Represent(body.vars[output].type)};
+  auto to{represented ? mlir::dyn_cast<mlir::FloatType>(represented->type)
+                      : mlir::FloatType{}};
+  if (!to) {
+    return std::nullopt;
+  }
+  mlir::Value x{in[0]};
+  if (name == "cast_from_int" && mlir::isa<mlir::IntegerType>(x.getType())) {
+    return arith::SIToFPOp::create(builder_, loc, to, x).getResult();
+  }
+  auto from{mlir::dyn_cast<mlir::FloatType>(x.getType())};
+  if (!from || (name != "from_float" && name != "to_float")) {
+    return std::nullopt;
+  }
+  if (from == to) {
+    return x;
+  }
+  if (from.getWidth() > to.getWidth()) {
+    return arith::TruncFOp::create(builder_, loc, to, x).getResult();
+  }
+  return arith::ExtFOp::create(builder_, loc, to, x).getResult();
 }
 
 bool MerkGenerator::LibraryCallNotYet(
@@ -664,7 +699,7 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   if (module == "bool") {
     return LibraryCallNotYet(goal, symbol);
   }
-  bool isFloat{module == "float"};
+  bool isFloat{module == "float" || module == "float32"};
   bool isUnsigned{module.starts_with("uint")};
   bool isInteger{
       llvm::is_contained({"int", "uint", "int8", "int16", "int32", "int64",
@@ -797,6 +832,9 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
         mlir::isa<mlir::IntegerType>(in[0].getType())) {
       result =
           arith::SIToFPOp::create(builder_, loc, builder_.getF64Type(), in[0]);
+    } else if (std::optional<mlir::Value> converted{
+                   FloatConversion(name, in, output, body, loc)}) {
+      result = *converted;
     } else {
       return NotBuiltIn(goal, symbol);
     }

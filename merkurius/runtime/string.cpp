@@ -413,6 +413,14 @@ extern "C" char *merk_string_from_float(double value) {
   return Copy(buffer, std::strlen(buffer));
 }
 
+extern "C" void merk_format_float32(float number, char *buffer);
+
+extern "C" char *merk_string_from_float32(float value) {
+  char buffer[64];
+  merk_format_float32(value, buffer);
+  return Copy(buffer, std::strlen(buffer));
+}
+
 // string.format's conversions of integers, d, i, o, x, X, u and p, of a value
 // of `bits` bits: sign-extended for d and i, which only the signed types
 // take, and as an unsigned value of its bits for the others, as C's are.

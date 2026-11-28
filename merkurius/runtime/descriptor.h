@@ -79,6 +79,10 @@ enum Kind : uint8_t {
   Closure,
   // open(T)'s, whose values have T's open layout (open.h).
   Open,
+  // IEEE single precision, a Merkurius extension (docs/INPROGRESS.md, Sized
+  // floating point types): its bits in a word's low 32. Last, so that the
+  // kinds before it keep their numbers.
+  Float32,
 };
 
 // A TypeCtor's flags: a term type's whose values are flat records, or flat

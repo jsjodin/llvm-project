@@ -9486,7 +9486,8 @@ explained yet.
 
 ## Sized floating point types
 
-*Proposed 2026-11-28, to decide with the user.* `float64`, `float32`,
+*Proposed 2026-11-28; steps 1 and 2 built 2026-11-28, step 3 next.*
+`float64`, `float32`,
 `float16` and `bfloat16`, beside `float`, which is the only floating
 point type now (`f64`); `float128` and 8-bit floats deferred (below).
 Not in the manual and not in mmc: an extension, with its tests under
@@ -9550,7 +9551,7 @@ compare and copy (MLIRGenTypeInfo.cpp, insts.cpp):
 | Type | MLIR | Arithmetic | GPU | C type in foreign code |
 | --- | --- | --- | --- | --- |
 | `float64` | `f64` | `float`'s | yes | `MR_Float` |
-| `float32` | `f32` | native | yes | `float` |
+| `float32` | `f32` | native | yes | `MR_Float32`, `float` |
 | `float16` | `f16` | the backend's, as `bfloat16` | yes | `_Float16` |
 | `bfloat16` | `bf16` | the backend's: native where the target has it, else promoted to `f32` | yes | `__bf16` |
 
@@ -9589,8 +9590,14 @@ library has them, else on the `f32` function with conversions around it;
 on the device, LLVM libc's or ocml's after `benchmarks/math` has a
 `float32` version that measures them (Math on the GPU).
 
-**I/O and strings:** `io.write_float` and `string.float_to_string` for
-each, through the `float` (`f64`) conversion.
+**I/O and strings:** `io.write_float32` and `string.float32_to_string`,
+and the like for each, print the fewest digits that read back as the same
+value of the type: 6 to 9 for `float32`, as `float`'s 15 to 17
+(runtime/write.cpp, `merk_format_float32`), not through the `float`
+conversion, which would print 0.1f32 as 0.10000000149011612. `io.write`
+adds the literal's suffix, `0.1f32`, as it does for the sized integers'
+`3i8`, so that what it writes reads back as the same type; an infinity
+or a NaN has none, as it has no literal.
 
 **Steps:**
 1. `float64`, the equivalence type, with a test. *Built 2026-11-28:*
@@ -9599,7 +9606,37 @@ each, through the `float` (`f64`) conversion.
 2. `float32`: the type, literals, arithmetic, comparisons, conversions,
    type_info, unify, compare and copy, foreign code, I/O, flat messages
    and records, GPU code; `math_float32`; `benchmarks/math` in `float32`,
-   which then measures libc against ocml on the gfx1030 too.
+   which then measures libc against ocml on the gfx1030 too. *Built
+   2026-11-28:*
+   - Front end: the lexer takes the suffixes (`SkipFloatSuffix`); a
+     literal rounds once to its type with APFloat (term-reader.cpp); the
+     type checker types it by its suffix. `float16` and `bfloat16`
+     literals are a NYI error until step 3, marked temporary.
+   - Code generation: `f32`; `float32`'s operators, comparisons and
+     conversions built in (MLIRGenBuiltins.cpp, `FloatConversion`); a
+     word holds its bits in the low 32 (Lowering.cpp, `ToBits`,
+     `FromWord`); arrays packed 4 bytes to an element, loaded and stored
+     as `f32` (`ArrayWidth`); static constants keyed by width too, so
+     a `float32` and a `float` of the same bits stay apart.
+   - Runtime: the descriptor kind `Float32` (descriptor.h), a 4-byte flat
+     field (record.h), 32 bits on the wire (encode.cpp), and boxed in the
+     open layout, as `float` is, so that unification compares values,
+     0.0f32 = -0.0f32, not bits (open.cpp, MLIRGenOpen.cpp).
+   - OpenMP: reductions and atomic updates of `float32`
+     (MLIRGenOpenMP.cpp, MLIRGenAtomic.cpp); `merk.array_element_ref`
+     addresses a packed element, by a width found before lowering
+     converts the types.
+   - Library: library/float32.m, library/math_float32.m (math's
+     functions but `solve_quadratic`, on `sqrtf` and the like),
+     `io.write_float32`, `string.float32_to_string`.
+   - Tests in test/Conformance/extensions/float-types/: run-float32,
+     run-float32-target (host threads, sequential, and the GPU),
+     run-float32-processes (a GPU process), reject-float32 and
+     reject-float-suffix. Their oracle is a C translation, which
+     utils/conformance/oracle.py now builds with cc, since `float32` is
+     C's `float`.
+   - benchmarks/math/math_loop32.* and `MATH_PRECISION=32` in
+     compare-math.sh: built, not yet measured.
 3. `float16` and `bfloat16`, the same, arrays packed as the sized
    integers' are, arithmetic left to the backend; the driver's `-march`
    and `-mcpu` for the host, passed to `-fc1`'s `-target-cpu` and
@@ -9664,8 +9701,8 @@ exponent bias differ.
 - Implicit widening in mixed arithmetic: Mercury has none for integers,
   and silent rounding is a source of bugs.
 
-**To decide:** the literal suffixes; the math modules' names; and
-whether to begin with step 2 once step 1 is in.
+The literal suffixes and the math modules' names were built as proposed
+above.
 
 ## Booleans: what is left
 

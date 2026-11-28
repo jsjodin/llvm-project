@@ -1088,8 +1088,10 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
             at, "%s is named in two reduction clauses"_err_en_US, value->name);
         return;
       }
-      // The primitive int and float.
-      bool real{IsNamedType(*ThreadedType(body, *call, *value), "", "float")};
+      // The primitive int, float and float32.
+      const semantics::Type &threaded{*ThreadedType(body, *call, *value)};
+      bool single{IsNamedType(threaded, "", "float32")};
+      bool real{single || IsNamedType(threaded, "", "float")};
       if (!real &&
           !IsNamedType(*ThreadedType(body, *call, *value), "", "int")) {
         NotYet(at,
@@ -1107,7 +1109,8 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
       }
       // A qualified operator is the type's own, int.max of an int.
       if (!opName.qualifiers.empty() &&
-          opName.qualifiers.front() != (real ? "float" : "int")) {
+          opName.qualifiers.front() !=
+              (single ? "float32" : real ? "float" : "int")) {
         Error(at,
             real
                 ? "the reduction operator %s is not defined on floats"_err_en_US

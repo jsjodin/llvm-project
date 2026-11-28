@@ -132,6 +132,9 @@ static std::string CType(const semantics::Type &type) {
   if (name == "float") {
     return "MR_Float";
   }
+  if (name == "float32") {
+    return "MR_Float32";
+  }
   if (name == "character") {
     return "MR_Char";
   }
@@ -168,6 +171,7 @@ static constexpr llvm::StringLiteral kForeignPrelude{R"(/* Foreign code, written
 typedef intptr_t MR_Integer;
 typedef uintptr_t MR_Unsigned;
 typedef double MR_Float;
+typedef float MR_Float32;
 typedef int32_t MR_Char;
 typedef char *MR_String;
 typedef const char *MR_ConstString;
@@ -255,6 +259,9 @@ std::optional<Represented> MerkGenerator::Represent(
     }
     if (name == "float") {
       return Represented{builder_.getF64Type()};
+    }
+    if (name == "float32") {
+      return Represented{builder_.getF32Type()};
     }
     if (name == "character") {
       return Represented{builder_.getIntegerType(32)};
@@ -1107,7 +1114,13 @@ mlir::Value MerkGenerator::Constant(const Body &goal, const ProcedureBody &body)
       break;
     case parser::LiteralKind::Float:
       if (auto f{mlir::dyn_cast<mlir::FloatType>(mlirType)}) {
-        std::string digits{text};
+        // Without its size's suffix, which typing has read.
+        llvm::StringRef number{text};
+        if (!number.consume_back("bf16") && !number.consume_back("f16") &&
+            !number.consume_back("f32")) {
+          number.consume_back("f64");
+        }
+        std::string digits{number};
         llvm::erase(digits, '_');
         llvm::APFloat v{f.getFloatSemantics()};
         if (auto status{v.convertFromString(

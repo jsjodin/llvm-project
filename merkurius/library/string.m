@@ -109,6 +109,10 @@
 :- func from_int(int::in) = (string::uo) is det.
 :- func float_to_string(float::in) = (string::uo) is det.
 :- pred float_to_string(float::in, string::uo) is det.
+    % A Merkurius extension (docs/INPROGRESS.md, Sized floating point
+    % types): a float32 as float_to_string gives a float, with the fewest
+    % digits that read back as the same float32.
+:- func float32_to_string(float32::in) = (string::uo) is det.
 :- func from_float(float::in) = (string::uo) is det.
 :- func string(T) = string.
 :- type poly_type
@@ -167,6 +171,7 @@ extern MR_Integer merk_string_to_int(MR_ConstString text, MR_Integer *value);
 extern MR_Integer merk_string_to_float(MR_ConstString text, double *value);
 extern MR_String merk_string_from_int(MR_Integer value);
 extern MR_String merk_string_from_float(MR_Float value);
+extern MR_String merk_string_from_float32(MR_Float32 value);
 extern MR_String merk_string_of(MR_Word type_info, MR_Word value);
 extern MR_String merk_format_integer(MR_ConstString flags, MR_Integer width,
     MR_Integer precision, MR_Char conversion, int64_t value,
@@ -1029,6 +1034,13 @@ float_to_string(F) = S :-
 ").
 
 from_float(F) = float_to_string(F).
+
+:- pragma foreign_proc("C",
+    float32_to_string(F::in) = (S::uo),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    S = merk_string_from_float32(F);
+").
 
 %---------------------------------------------------------------------------%
 % Values as strings.

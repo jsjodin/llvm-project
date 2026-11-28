@@ -40,6 +40,7 @@
 #include <string_view>
 
 extern "C" void merk_format_float(double number, char *buffer);
+extern "C" void merk_format_float32(float number, char *buffer);
 extern "C" char *merk_string_new(std::int64_t bytes);
 
 namespace {
@@ -592,6 +593,7 @@ void WriteOpen(
   case Int64:
   case Uint64:
   case Float:
+  case Float32:
   case String:
     return WriteTyped(
         out, *reinterpret_cast<const Word *>(value), type, context);
@@ -653,6 +655,20 @@ void WriteTyped(
     char buffer[64];
     merk_format_float(number, buffer);
     out.Put(buffer);
+    return;
+  }
+  case Float32: {
+    // With its suffix, as a sized integer's, so that it reads back as a
+    // float32; an infinity or a NaN has none, as it has no literal.
+    float number;
+    auto bits{static_cast<std::uint32_t>(value)};
+    std::memcpy(&number, &bits, sizeof number);
+    char buffer[64];
+    merk_format_float32(number, buffer);
+    out.Put(buffer);
+    if (std::isfinite(number)) {
+      out.Put("f32");
+    }
     return;
   }
   case Char:
@@ -729,6 +745,33 @@ extern "C" void merk_format_float(double number, char *buffer) {
 extern "C" void merk_write_float(double number) {
   char buffer[64];
   merk_format_float(number, buffer);
+  std::fputs(buffer, stdout);
+}
+
+// A float32 as merk_format_float gives a float: the shortest of 6 to 9
+// digits that reads back as the same float32 (docs/INPROGRESS.md, Sized
+// floating point types).
+extern "C" void merk_format_float32(float number, char *buffer) {
+  if (std::isnan(number)) {
+    std::strcpy(buffer, "nan");
+  } else if (std::isinf(number)) {
+    std::strcpy(buffer, number < 0 ? "-infinity" : "infinity");
+  } else {
+    for (int precision{6}; precision <= 9; ++precision) {
+      std::snprintf(buffer, 64, "%.*g", precision, static_cast<double>(number));
+      if (std::strtof(buffer, nullptr) == number) {
+        break;
+      }
+    }
+    if (std::strpbrk(buffer, ".e") == nullptr) {
+      std::strcat(buffer, ".0");
+    }
+  }
+}
+
+extern "C" void merk_write_float32(float number) {
+  char buffer[64];
+  merk_format_float32(number, buffer);
   std::fputs(buffer, stdout);
 }
 

@@ -159,6 +159,7 @@ void Writer::EncodeTyped(Word value, const Type &type) {
   case Uint16:
     return Item(value & 0xffff);
   case Uint32:
+  case Float32:
     return Item(value & 0xffffffff);
   case Dummy:
     return Item(0);
@@ -437,6 +438,7 @@ bool Reader::DecodeTyped(const Type &type, Word &value) {
   case Uint16:
     return Unsigned(value, 16);
   case Uint32:
+  case Float32:
     return Unsigned(value, 32);
   case Char:
     if (!Item(value)) {
