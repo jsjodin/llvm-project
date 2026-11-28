@@ -1,0 +1,7 @@
+The math benchmark of benchmarks/math on the machine's GPU, on few
+elements and applications: its loops' sums, from LLVM libc's libm for the
+device, have the same first six digits as on the host (math.test).
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/math/math_loop.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MATH_N=1000 MATH_K=10 MATH_REPEAT=2 %t | FileCheck %S/math.test

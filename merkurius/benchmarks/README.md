@@ -15,6 +15,7 @@ by hand.
 | [`gpu-link`](gpu-link/README.md) | Arrays streamed between GPU processes on two GPUs with no host on the way, one way and both: the direct path against the link |
 | [`life`](life/README.md) | Conway's Game of Life, dense, on one GPU, in Mercury and in C with cells of 8 and 1 bytes, on two nodes over TCP with halo rows as messages, and on sparse tiles, in one GPU process and on several places with a directory: the demo's references |
 | [`mandel-gpus`](mandel-gpus/README.md) | The work-stealing example's Mandelbrot zoom on four GPUs, 16 places: static, stealing in a ring or own GPU first, a host pool and bands, with and without a barrier between frames, beside C with OpenMP; tiles, sizes, places a GPU, traces of single frames |
+| [`math`](math/README.md) | The math library's functions (`sqrt`, `exp`, `ln`, `sin`, `cos`, `pow`, `tanh`) in a GPU loop: Merkurius, whose device math is LLVM libc's, beside C with OpenMP, HIP and Flang, whose device math is ocml |
 | [`open-holes`](open-holes/README.md) | A list built through holes bound at every step, then summed as an open term: E5's shape, compiled |
 | [`open-unify`](open-unify/README.md) | Two open lists, one with holes, unified by the type's unify procedure, then summed |
 | [`pingpong`](pingpong/README.md) | Latency of a message round trip between processes, from a GPU's target region or the CPU, over TCP or within a node, beside plain C floors |

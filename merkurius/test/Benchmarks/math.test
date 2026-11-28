@@ -1,0 +1,19 @@
+The math benchmark of benchmarks/math on few elements and applications, so
+that it keeps building and running: sequentially, and on the host's
+threads, where OpenMP runs its target regions when there is no device.
+Each line is a function's name, its best time and its loop's sum, whose
+first six digits are the same under any of the libraries and orders of
+addition.
+
+RUN: merkc -O2 -fdo-loops %S/../../benchmarks/math/math_loop.m -o %t.sequential
+RUN: env MATH_N=1000 MATH_K=10 MATH_REPEAT=2 %t.sequential | FileCheck %s
+RUN: merkc -O2 -fopenmp -fdo-loops %libomp-flags %S/../../benchmarks/math/math_loop.m -o %t
+RUN: %libomp-env OMP_NUM_THREADS=4 MATH_N=1000 MATH_K=10 MATH_REPEAT=2 %t | FileCheck %s
+CHECK:      sqrt {{[0-9]+\.[0-9]+}} 1346.76{{[0-9]*$}}
+CHECK-NEXT: exp {{[0-9]+\.[0-9]+}} 410.656{{[0-9]*$}}
+CHECK-NEXT: ln {{[0-9]+\.[0-9]+}} 1340.10{{[0-9]*$}}
+CHECK-NEXT: sin {{[0-9]+\.[0-9]+}} 766.340{{[0-9]*$}}
+CHECK-NEXT: cos {{[0-9]+\.[0-9]+}} 576.299{{[0-9]*$}}
+CHECK-NEXT: pow {{[0-9]+\.[0-9]+}} 3169.32{{[0-9]*$}}
+CHECK-NEXT: tanh {{[0-9]+\.[0-9]+}} 952.584{{[0-9]*$}}
+CHECK-NOT:  {{.}}

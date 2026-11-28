@@ -9436,6 +9436,48 @@ reported as not yet implemented where the compiler meets it:
    first binding `det`, and tagged small integers inside the open layout
    (design document, "Open terms", option 2).
 
+## Math on the GPU
+
+*Opened 2026-11-28, to measure, then decide with the user.*
+
+**What is so:** Merkurius' device math is LLVM libc's; every baseline's
+is ROCm's ocml. `library/math.m`'s functions are C foreign procs calling
+`<math.h>` around Mercury's domain checks; Clang compiles them for amdgcn
+as calls of `sqrt`, `exp` and so on, and both device links, a GPU
+process's image (`-lc -lm` in the driver) and an OpenMP target region's
+(the linker wrapper), resolve them from LLVM libc's `libm.a` for amdgcn,
+which LTO inlines. Checked 2026-11-28 in the linked bitcode and the LTO
+resolution of `benchmarks/math/math_loop.m` and of
+`test/CodeGen/process-library-errors.m`. Against that:
+- C with OpenMP offload and HIP: Clang's wrapper headers map `<math.h>` on
+  the device to `__ocml_*_f64`, from `ocml.bc`.
+- Flang: intrinsics become `math` dialect operations, which
+  `createConvertMathToROCDL` makes calls of ocml (flang/lib/Optimizer/
+  CodeGen/CodeGen.cpp), with `ocml.bc` linked by `-mlink-builtin-bitcode`.
+- `sqrt` is the same in all: the hardware's `v_rsq_f64` and a refinement.
+
+LLVM libc's GPU libm has been moving to correctly rounded double
+functions, which may cost more than ocml's few-ulp ones for `exp`, `log`,
+`sin`, `cos`, `pow` and `tanh`, so a kernel heavy on them (Quicksilver's
+`log` and `exp`, mc) may lose to its HIP baseline for its library alone,
+and a comparison with a baseline then compares libraries.
+
+**The measurement:** `benchmarks/math/compare-math.sh`, each function's
+loop in Merkurius, C with OpenMP, HIP and Flang; times against HIP's, and
+how far each sum is from HIP's. Not yet run (a performance run).
+
+**Options, once measured, if libc is slower:**
+1. math.m's device C calls ocml (`__ocml_exp_f64`, or Clang's builtins
+   where they reach it) under `#ifdef __AMDGPU__`, keeping the domain
+   checks, with `ocml.bc` linked as Flang links it. Smallest; keeps libc
+   for stdio, revising "prefer LLVM libc on the GPU" for math only.
+2. Code generation makes `math` dialect operations of the math library's
+   calls, as Flang's intrinsics, lowered by `ConvertMathToROCDL` on AMD
+   GPUs and `ConvertMathToLLVM` or libm calls on the host; a step 4
+   operation (Concurrency in merk) in kind. Pays only with MLIR-level
+   optimization of math, which nothing does now.
+3. Keep libc, for its accuracy, and say so where results are compared.
+
 ## Concurrency in merk, and what mrt is for
 
 Discussed with the user 2026-11-27. Step 1 is being built (below); the
