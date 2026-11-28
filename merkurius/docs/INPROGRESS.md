@@ -9484,7 +9484,7 @@ not change. What they would give:
   to one target batched, and a message's flatness and last use at the
   operation itself; last use is a `moves` flag on `merk.foreign_call` now.
 
-**Also, cheaper:** the runtime could report a certain deadlock, as Go
+**Also, cheaper** (dropped, step 3 below): the runtime could report a certain deadlock, as Go
 reports that all goroutines are asleep: every process of a node blocked in
 a receive with no message, no deadline and nothing in flight to it. Across
 nodes, or with GPU processes, "nothing in flight" is harder to know. The
@@ -9947,9 +9947,110 @@ runtime has no such check now.
      test/Dialect/Merk/spawn.mlir, invalid.mlir's `SPAWN-*`, and
      test/CodeGen/spawn-ops.m; the registers of every `-gpu.test` are
      unchanged.
-3. The runtime's check of a certain deadlock on one node.
-4. A static analysis, a merk pass, once 1 and 2 are in: first, a
-   process kind that receives from a mailbox nothing ever sends to.
+3. *Dropped 2026-11-27, decided with the user:* the runtime's check of
+   a certain deadlock on one node. It could only be sound by reporting
+   just a node that nothing can reach: every process blocked in a
+   receive with no deadline, nothing runnable, no process in a blocking
+   call, no connection or listening socket, no GPU process, no parallel
+   region and no thread without a process that uses the runtime. On a
+   node of a distributed program it would never fire, and should not: a
+   process that waits a long time for a rare message, such as a monitor
+   of exceptional cases, is normal there, and even a quiet whole system
+   with such a process waiting is no deadlock, so distributed termination
+   detection answers no useful question either. What is left, single-node
+   programs and tests, did not justify anything fatal in the runtime; a
+   compile-time analysis (step 4) is wanted instead.
+4. *Proposed 2026-11-27, to decide with the user:* static analyses of
+   communication, on merk, now that every send, receive and spawn is an
+   operation (steps 1 and 2).
+
+   **The literature,** from memory, the titles and venues to check before
+   they are cited in the design document:
+   - Christakis and Sagonas, "Detection of Asynchronous Message Passing
+     Errors Using Static Analysis" (PADL 2011), for Erlang: from a
+     communication graph, receives that can never match what is sent,
+     messages that nothing receives, and receives that block forever.
+     Most of its work recovers the types that Erlang lacks, and that
+     `mailbox(M)` gives us.
+   - Lange, Ng, Toninho and Yoshida, "Fencing off Go" (POPL 2017) and "A
+     Static Verification Framework for Message Passing in Go Using
+     Behavioural Types" (ICSE 2018); Ng and Yoshida's dingo-hunter (CC
+     2016): a CCS-like model of each goroutine's channel operations,
+     taken from the compiler's SSA, model-checked for deadlock and
+     liveness (mCRL2).
+   - de'Liguoro and Padovani, "Mailbox Types for Unordered Interactions"
+     (ECOOP 2018); Fowler, Attard, Sowul, Gay and Trinder, "Special
+     Delivery: Programming with Mailbox Types" (ICFP 2023), the language
+     Pat: a mailbox's type says what it must yet receive, and checking it
+     gives deadlock freedom, with selective receive and unordered
+     mailboxes, which is our model.
+   - Background: D'Osualdo, Kochems and Ong's Soter (SAS 2013), Erlang
+     abstracted to infinite-state models; Kobayashi's and Padovani's
+     deadlock freedom by typing in the pi-calculus; Carbone and Montesi's
+     choreographies, deadlock-free by construction.
+
+   **Proposed, in this order,** each a warning with its own `-W` flag,
+   in a merk pass after code generation and before optimization, so that
+   inlining does not move what it sees and every operation still has its
+   source location:
+
+   (a) *Arms that can never select anything.* A receive's arm whose
+   pattern's constructor no code can make. Constructors are made only
+   where the type's definition is visible: for a type defined in the
+   module's implementation, or exported abstractly, every value of it is
+   made in this module. So the pass needs no flow analysis: a constructor
+   that no `merk.construct` (or constant of an enumeration) in the module
+   makes can never be sent, wherever a value goes before it is. A type
+   exported with its constructors is skipped, as other modules may make
+   its values. Values made by generic means, from a type_info (`io.read`,
+   the `construct` module, decoding another node's message, which was
+   made by the same program), are counted as making every constructor
+   when the module passes the type's type_info to such a procedure.
+   Example: `get(Reply)` is matched, but the module only ever makes
+   `put(N)` and `stop`.
+
+   (b) *A forgotten reply.* A mailbox handle taken out of a message by an
+   arm, such as `Reply` of `get(Reply)`, that on some path through the
+   arm's code to the end of the procedure, or to the process's next
+   receive, is neither sent to, nor passed to a call, stored in a value
+   or sent in a message: then the asker may wait forever. A path that
+   passes the handle on counts as answering, so the warning is only for
+   a handle provably dropped on a path, as in an if-then-else whose one
+   branch replies and whose other does not. This is the commonest
+   request/reply bug, and the ops make it a path-sensitive check within
+   one procedure, over `merk.ite` and `merk.switch` regions.
+
+   (c) *Constructors sent that nothing selects,* the converse of
+   `-Wunselected-message` (check-receives.cpp): a constructor made and
+   sent to mailboxes of a type, when every receive of that type in the
+   module is selective and none selects it. Weaker than (a): another
+   module that has a handle may receive with `any`, so only for a type
+   whose mailboxes do not leave the module, which needs to know where
+   handles go; after (a) and (b), if they find real bugs.
+
+   **Later, if the cheap checks prove worth it:** a Go-style model of
+   each process kind's communication, from `merk.spawn` bodies and the
+   operations, model-checked; it needs to know which mailbox each handle
+   is, and the states grow fast. And mailbox types, which would change
+   the language: Mercury's modes, with unique and linear insts, could
+   carry them.
+
+   **Rejected:** the analyses in lib/Semantics, where
+   `-Wunselected-message` is: the clauses are there, but a spawn's body,
+   a receive's matchers and a send's mailbox are calls and closures to be
+   recognised by name, which step 2 made operations of on merk, where an
+   analysis also serves a tool outside this compiler.
+
+   **Tests:** a test for each warning that must fire and for those that
+   must not (a type exported with constructors, a handle passed to a
+   call, a message read by `io.read`); and the analyses run over every
+   example, benchmark, SERGHEI, mc and uts, whose findings are reported
+   to the user before any warning is kept, to see whether they find real
+   bugs or only noise.
+
+   **To decide:** whether (a) and (b) first, as proposed; and whether the
+   warnings are on by default or only with a flag, until the runs over
+   the existing programs show how noisy they are.
 
 ### mrt: make it a stage, or remove it
 
