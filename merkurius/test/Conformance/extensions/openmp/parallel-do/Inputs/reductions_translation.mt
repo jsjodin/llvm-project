@@ -1,23 +1,24 @@
-% The translation of run-reductions.m's loops, without their directives.
+% The translation of run-reductions.mt's loops, without their directives,
+% a template as the test is.
 :- module reductions_translation.
 :- interface.
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module float, int, list, string.
+:- import_module @TM@, int, list, string.
 
-:- func pi(int) = float.
+:- func pi(int) = @T@.
 pi(N) = Step * Sum :-
-    Step = 1.0 / float(N),
-    pi_loop(0, N - 1, Step, 0.0, Sum).
+    Step = 1.0@S@ / @FROM_INT@(N),
+    pi_loop(0, N - 1, Step, 0.0@S@, Sum).
 
-:- pred pi_loop(int::in, int::in, float::in, float::in, float::out) is det.
+:- pred pi_loop(int::in, int::in, @T@::in, @T@::in, @T@::out) is det.
 pi_loop(I, Hi, Step, S0, Sum) :-
     ( if I > Hi then
         Sum = S0
     else
-        X = (float(I) + 0.5) * Step,
-        S1 = S0 + 4.0 / (1.0 + X * X),
+        X = (@FROM_INT@(I) + 0.5@S@) * Step,
+        S1 = S0 + 4.0@S@ / (1.0@S@ + X * X),
         pi_loop(I + 1, Hi, Step, S1, Sum)
     ).
 
@@ -48,23 +49,32 @@ others(N, {P, Lo, Hi, X, And, Or, L}) :-
     fold(0, 7, (func(I, O0) = O0 \/ (1 << (3 * I))), 0, Or),
     fold(0, N - 1, (func(I, M0) = int.max(M0, (I * 5) mod 11)), min_int, L).
 
-:- pred halves(int::in, float::out, float::out) is det.
+:- pred halves(int::in, @T@::out, @T@::out) is det.
 halves(N, Sum, Product) :-
-    halves_loop(1, N, 0.5, Sum, 1.0, Product).
+    halves_loop(1, N, 0.5@S@, Sum, 1.0@S@, Product).
 
-:- pred halves_loop(int::in, int::in, float::in, float::out, float::in,
-    float::out) is det.
+:- pred halves_loop(int::in, int::in, @T@::in, @T@::out, @T@::in,
+    @T@::out) is det.
 halves_loop(I, Hi, S0, Sum, P0, Product) :-
     ( if I > Hi then
         Sum = S0, Product = P0
     else
-        S1 = S0 + float(I) / 4.0,
-        P1 = P0 * (if I mod 2 = 0 then 2.0 else 0.5),
+        S1 = S0 + @FROM_INT@(I) / 4.0@S@,
+        P1 = P0 * (if I mod 2 = 0 then 2.0@S@ else 0.5@S@),
         halves_loop(I + 1, Hi, S1, Sum, P1, Product)
     ).
 
+    % The terms of the pi sum, and the digits it is printed to, that no
+    % order of the threads' additions changes: fewer for float32, whose
+    % sum's rounding errors grow faster.
+:- func pi_precision = {int, int}.
+pi_precision =
+    ( if @T@.mantissa_digits > 24 then {100000, 8} else {1000, 2} ).
+
 main(!IO) :-
-    io.write_string(string.format("%.8f\n", [f(pi(100000))]), !IO),
+    {Terms, Digits} = pi_precision,
+    io.write_string(string.format("%." ++ string.int_to_string(Digits) ++
+        "f\n", [f(@TO_FLOAT@(pi(Terms)))]), !IO),
     sums(100, A, S),
     io.write({A, S}, !IO), io.nl(!IO),
     others(10, Others),

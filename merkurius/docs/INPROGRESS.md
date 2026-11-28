@@ -9637,6 +9637,42 @@ or a NaN has none, as it has no literal.
      C's `float`.
    - benchmarks/math/math_loop32.* and `MATH_PRECISION=32` in
      compare-math.sh: built, not yet measured.
+   - **Templated tests, begun 2026-11-28.** So that every path a `float`
+     takes is tested for `float32` too, and later for the 16-bit types,
+     the tests where a float goes through arrays, records, messages,
+     roots, open terms, polymorphism, io.write, OpenMP or GPU code become
+     templates, `run-x.mt`, written once with placeholders (`@T@`, a
+     literal's suffix `@S@`, `@FROM_INT@` and so on;
+     utils/conformance/instantiate.py) and run for each type its
+     `% FLOAT-TYPES:` line names, float and float32 by default.
+     oracle.py writes a block of RUN lines and expected output for each
+     type, OUTPUT-FLOAT and OUTPUT-FLOAT32.
+     - The oracle stays mmc: a `float32` instance compiles with stand-in
+       modules, utils/conformance/emulation/float32.m and
+       math_float32.m, whose `float32` wraps a `float` holding a value of
+       C's `float`, and each operation computes in C's `float`, as merkc's
+       code and library do on the host. A literal `1.5f32` becomes
+       `float32.lit("1.5")`, rounded once from its digits, and mmc's
+       `float32_value(1.5)` is printed as merkc prints it, `1.5f32`.
+     - Chosen over a C translation of each test, decided with the user
+       2026-11-28: most tests mix floats with ints, closures and type
+       classes, which a translation would rewrite in C, where the
+       stand-ins keep the whole program under mmc. A C translation is
+       kept where a test needs exactly the library's single-precision
+       functions (run-float32.m); the stand-ins' `exp` and the like are
+       glibc's, as merkc's are on the host, but LLVM libc's on a GPU may
+       differ in the last bit.
+     - Where a float32 result depends on the order of additions, as a
+       reduction's does, the template sums fewer terms or prints fewer
+       digits for the narrower type (run-reductions.mt, `pi_precision`).
+     - Pilot: types/floating-point-type/run-precision.mt (was
+       run-double.m), flat-records/run-record-arrays.mt,
+       openmp/parallel-do/run-reductions.mt with its translation, and
+       openmp/target/run-arrays.mt with run-arrays-gpu.test, which checks
+       that float32's arrays map fewer bytes. Next: the other tests of
+       that kind, by directory, and generate-interactions.py's tests,
+       which the generator makes templates of. CodeGen tests that check
+       IR need their own float32 checks, to decide when they come up.
 3. `float16` and `bfloat16`, the same, arrays packed as the sized
    integers' are, arithmetic left to the backend; the driver's `-march`
    and `-mcpu` for the host, passed to `-fc1`'s `-target-cpu` and

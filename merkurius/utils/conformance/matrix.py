@@ -90,7 +90,7 @@ def scan(dirs):
             subdirs[:] = sorted(d for d in subdirs
                                 if d not in ("Inputs", "Output"))
             for name in sorted(files):
-                if not name.endswith((".m", ".test")):
+                if not name.endswith((".m", ".mt", ".test")):
                     continue
                 path = os.path.join(root, name)
                 manual, design, known = [], [], []

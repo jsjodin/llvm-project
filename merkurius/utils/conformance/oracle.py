@@ -18,6 +18,15 @@ and whose class is the start of its file name:
             rejects the program, as for a limitation of its implementation,
             `% MMC-STATUS: rejected` and its errors' first lines are kept.
 
+A run- test may be a template, run-x.mt, written once for every floating
+point type with the placeholders of instantiate.py, for the types its
+`% FLOAT-TYPES:` line names (float and float32 if it has none). The script
+writes RUN lines that instantiate it for each type and check that
+instance's output under its own prefix, OUTPUT-FLOAT, OUTPUT-FLOAT32. mmc
+runs each instance, a float32 one with the stand-in modules in emulation/,
+which compute in C's float; a TRANSLATION that is a template too is
+instantiated for each type with the test.
+
 A run- or reject- test that merkc gets wrong, a known bug rather than a
 feature not done, says why in a `% KNOWN-BUG:` line: its expectations are
 still mmc's, and the script adds lit's `% XFAIL: *`, so that the test is
@@ -85,12 +94,13 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import instantiate  # noqa: E402
+
 GENERATED = ("% RUN:", "% OUTPUT", "% ERRORS", "% NYI", "% MMC", "% STATUS",
              "% XFAIL:", "% REQUIRES:")
 CLASSES = ("run", "reject", "nyi", "differs")
 DIFFERS_KINDS = ("mmc-bug", "manual", "implementation")
-FILECHECK_OUTPUT = (
-    "FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace")
 
 
 class TestError(Exception):
@@ -117,6 +127,7 @@ class Test:
         self.path = os.path.abspath(path)
         self.name = os.path.basename(path)
         self.kind = self.name.split("-", 1)[0]
+        self.template = path.endswith(".mt")
         with open(path, encoding="utf-8") as f:
             self.lines = f.read().split("\n")
         # A test whose expectations are written by hand, such as a warn-
@@ -192,6 +203,19 @@ class Test:
                            not self.mmc_program.endswith(".erl")):
             raise TestError("only a run- or nyi- test with an Erlang "
                             "TRANSLATION has NODES")
+        self.types = []
+        if self.template:
+            if self.kind != "run":
+                raise TestError("only a run- test is a template")
+            if self.nodes or self.modules:
+                raise TestError("a template has no NODES or MODULES yet")
+            if self.mmc_program and not self.mmc_program.endswith(".mt"):
+                raise TestError("a template's TRANSLATION is a template, "
+                                ".mt")
+            try:
+                self.types = instantiate.float_types("\n".join(self.lines))
+            except ValueError as e:
+                raise TestError(str(e))
         if self.known_bug and self.kind not in ("run", "reject"):
             raise TestError("only a run- or reject- test has a known bug; "
                             "a %s- test says what merkc does" % self.kind)
@@ -206,10 +230,22 @@ class Test:
         here = os.path.dirname(self.path)
         return [os.path.join(here, m) for m in self.modules]
 
-    def copy_to(self, directory):
+    def copy_to(self, directory, type_name=None):
         """The program's modules in a directory, as mmc --make wants them,
-        and the module to make: the test's, or its TRANSLATION's."""
+        and the module to make: the test's, or its TRANSLATION's; a
+        template's instance for the type, with the stand-ins it needs."""
         here = os.path.dirname(self.path)
+        if self.template:
+            source = (os.path.join(here, self.mmc_program) if self.mmc_program
+                      else self.path)
+            try:
+                _, module = instantiate.write_instance(
+                    source, type_name, directory, mmc=True, emulation=True)
+            except ValueError as e:
+                raise TestError(str(e))
+            for path in [os.path.join(here, f) for f in self.files]:
+                shutil.copy(path, directory)
+            return module
         module = self.module
         if self.mmc_program:
             program = os.path.join(here, self.mmc_program)
@@ -239,7 +275,7 @@ class Test:
         return "\n".join(self.authored + ["%"] + generated + self.body)
 
 
-def mmc_run(test, mmc):
+def mmc_run(test, mmc, type_name=None):
     """mmc's program's output, standard error after standard output as
     they are written, and its exit status; or, for a translation into
     Prolog or Erlang, swipl's or escript's, which run it in the
@@ -272,12 +308,14 @@ def mmc_run(test, mmc):
             status, out, _ = run([binary], tmp, merge=True)
             return status, out
     with tempfile.TemporaryDirectory() as tmp:
-        module = test.copy_to(tmp)
+        module = test.copy_to(tmp, type_name)
         status, out, err = run([mmc] + test.mmc_flags + ["--make", module],
                                tmp, timeout=600)
         if status != 0:
             raise TestError("mmc cannot compile it:\n" + out + err)
         status, out, _ = run(["./" + module], tmp, merge=True)
+        if test.template:
+            out = instantiate.normalise(out, type_name)
         return status, out
 
 
@@ -343,15 +381,15 @@ def mmc_error_texts(test, mmc):
         return errors
 
 
-def merkc_arguments(test, lit):
+def merkc_arguments(test, lit, source=None):
     """merkc's flags, search directories and sources, as a RUN line writes
-    them, or as paths for the triage."""
+    them, or as paths for the triage; a template's instance's, `source'."""
     here = "%S" if lit else os.path.dirname(test.path)
     directories = sorted({os.path.dirname(m) for m in test.modules})
     return (test.flags +
             [a for d in directories for a in ("-I", here + "/" + d if d
                                                else here)] +
-            ["%s" if lit else test.path] +
+            [source or ("%s" if lit else test.path)] +
             [here + "/" + m for m in test.modules])
 
 
@@ -375,12 +413,17 @@ def libomp_dirs(merkc):
     return dirs
 
 
-def merkc_build(test, merkc, level, directory, sequential=False):
+def merkc_build(test, merkc, level, directory, sequential=False,
+                type_name=None):
     """Builds the program; an OpenMP test's with libomp, or, `sequential`,
-    without -fopenmp."""
+    without -fopenmp; a template's instance for the type."""
     exe = os.path.join(directory, "prog%d%s" % (level, "s" if sequential
                                                  else ""))
-    arguments = merkc_arguments(test, False)
+    source = None
+    if test.template:
+        source, _ = instantiate.write_instance(test.path, type_name,
+                                               directory)
+    arguments = merkc_arguments(test, False, source)
     if test.openmp():
         if sequential:
             arguments = [a for a in arguments if a != "-fopenmp"]
@@ -441,16 +484,36 @@ def output_lines(prefix, output):
     return checks
 
 
-def run_lines(test, status):
-    arguments = " ".join(merkc_arguments(test, True))
+def run_lines(test, status, type_name=None):
+    """The RUN lines; a template's for its instance for the type, which
+    the first line writes, checked under the type's prefix."""
+    if test.template:
+        # The instance's directory is named after naming the programs,
+        # which renames lit's %t.
+        directory = "%t." + type_name + ".d"
+        lines = [l.replace("@DIRECTORY@", directory) for l in run_lines_for(
+            test, status, "@DIRECTORY@/" + instantiate.module_name(
+                "\n".join(test.lines), type_name) + ".m",
+            "%t." + type_name + ".", "OUTPUT-" + type_name.upper())]
+        return (lines[:1] if lines[0].startswith("% REQUIRES:") else []) + [
+            "% RUN: %instantiate %s " + type_name + " " + directory] + [
+                l for l in lines if not l.startswith("% REQUIRES:")]
+    return run_lines_for(test, status, None, "%t", "OUTPUT")
+
+
+def run_lines_for(test, status, source, t, prefix):
+    FILECHECK_OUTPUT = (
+        "FileCheck %s --check-prefix=" + prefix +
+        " --match-full-lines --strict-whitespace")
+    arguments = " ".join(merkc_arguments(test, True, source))
     expect = "not " if status != 0 else ""
     if test.openmp():
         # Run on four threads, and built without -fopenmp, the program
         # prints the same.
-        sequential = " ".join(a for a in merkc_arguments(test, True)
+        sequential = " ".join(a for a in merkc_arguments(test, True, source)
                               if a != "-fopenmp")
         threads = "%libomp-env OMP_NUM_THREADS=4 "
-        return [
+        return named(t, [
             "% REQUIRES: libomp",
             "% RUN: merkc -O0 " + arguments + " %libomp-flags -o %t0",
             "% RUN: " + threads + expect + "%t0 2>&1 | " + FILECHECK_OUTPUT,
@@ -464,11 +527,11 @@ def run_lines(test, status):
             "% RUN: " + expect + "%t0s 2>&1 | " + FILECHECK_OUTPUT,
             "% RUN: merkc -O2 " + sequential + " -o %t2s",
             "% RUN: " + expect + "%t2s 2>&1 | " + FILECHECK_OUTPUT,
-        ]
+        ])
     if test.nodes:
         # The driver prints the nodes' exit statuses, and exits with 0.
         roles = " ".join(test.nodes)
-        return [
+        return named(t, [
             "% RUN: merkc -O0 " + arguments + " -o %t0",
             "% RUN: %nodes %t0 " + roles + " | " + FILECHECK_OUTPUT,
             "% RUN: env MERK_GC_EVERY_ALLOC=1 %nodes %t0 " + roles + " | " +
@@ -477,8 +540,8 @@ def run_lines(test, status):
             "% RUN: %nodes %t2 " + roles + " | " + FILECHECK_OUTPUT,
             "% RUN: env MERK_GC_EVERY_ALLOC=1 %nodes %t2 " + roles + " | " +
             FILECHECK_OUTPUT,
-        ]
-    return [
+        ])
+    return named(t, [
         "% RUN: merkc -O0 " + arguments + " -o %t0",
         "% RUN: " + expect + "%t0 2>&1 | " + FILECHECK_OUTPUT,
         "% RUN: env MERK_GC_EVERY_ALLOC=1 " + expect + "%t0 2>&1 | " +
@@ -487,12 +550,30 @@ def run_lines(test, status):
         "% RUN: " + expect + "%t2 2>&1 | " + FILECHECK_OUTPUT,
         "% RUN: env MERK_GC_EVERY_ALLOC=1 " + expect + "%t2 2>&1 | " +
         FILECHECK_OUTPUT,
-    ]
+    ])
+
+
+def named(t, lines):
+    """The lines with the programs named t0, t2 and so on, where t is not
+    lit's %t."""
+    return lines if t == "%t" else [l.replace("%t", t) for l in lines]
 
 
 def generate(test, args):
     """The test's generated lines, and notes for the triage."""
     notes = []
+    if test.kind == "run" and test.template:
+        generated = []
+        for type_name in test.types:
+            status, out = mmc_run(test, args.mmc, type_name)
+            lines = run_lines(test, status, type_name)
+            generated += [l for l in lines if l not in generated or
+                          not l.startswith("% REQUIRES:")]
+            generated += output_lines("OUTPUT-" + type_name.upper(), out)
+            if args.triage:
+                notes += ["%s: %s" % (type_name, n) for n in
+                          triage(test, args.merkc, status, out, type_name)]
+        return generated, notes
     if test.kind == "run":
         status, out = mmc_run(test, args.mmc)
         generated = run_lines(test, status) + output_lines("OUTPUT", out)
@@ -553,12 +634,13 @@ def generate(test, args):
     return generated, notes
 
 
-def triage(test, merkc, mmc_status, mmc_out):
+def triage(test, merkc, mmc_status, mmc_out, type_name=None):
     notes = []
     for sequential in ([False, True] if test.openmp() else [False]):
         which = "merkc" + (" without -fopenmp" if sequential else "")
         with tempfile.TemporaryDirectory() as tmp:
-            status, out, exe = merkc_build(test, merkc, 0, tmp, sequential)
+            status, out, exe = merkc_build(test, merkc, 0, tmp, sequential,
+                                           type_name)
             if status != 0:
                 notes.append(which + " cannot compile it: " +
                              (out.strip().split("\n") or [""])[0])
@@ -607,7 +689,7 @@ def tests_in(paths):
             for root, dirs, files in os.walk(path):
                 dirs[:] = sorted(d for d in dirs if d != "Inputs")
                 for name in sorted(files):
-                    if name.endswith(".m"):
+                    if name.endswith((".m", ".mt")):
                         yield os.path.join(root, name)
         else:
             yield path

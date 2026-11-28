@@ -16,7 +16,9 @@ config.test_format = lit.formats.ShTest()
 
 # Merkurius sources, .test files for tests that need no source of their own,
 # and MLIR modules in the merk dialect.
-config.suffixes = [".m", ".test", ".mlir", ".ll"]
+# .mt files are templated tests, one program for each floating point type
+# (utils/conformance/instantiate.py).
+config.suffixes = [".m", ".mt", ".test", ".mlir", ".ll"]
 
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.merkurius_obj_root, "test")
@@ -182,6 +184,20 @@ config.substitutions.append(
             os.path.join(config.merkurius_src_root, "utils", "gpu",
                          "gpu-registers.py"),
             os.path.dirname(config.llvm_tools_dir),
+        ),
+    )
+)
+
+# The instance of a templated test for a floating point type
+# (utils/conformance/instantiate.py).
+config.substitutions.append(
+    (
+        "%instantiate",
+        "%s -I %s"
+        % (
+            config.python_executable,
+            os.path.join(config.merkurius_src_root, "utils", "conformance",
+                         "instantiate.py"),
         ),
     )
 )

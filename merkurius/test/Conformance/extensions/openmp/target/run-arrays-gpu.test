@@ -1,21 +1,39 @@
-The program of run-arrays.m, run on the machine's GPU: the arrays the
-region updates are mapped tofrom, over their headers' and elements' words.
-A region whose procedure updates an array, which its operations do not
-show, maps each array of the type tofrom and finds which one it gives
-(design document, "What is lowered so far"), so the array it only reads
-is copied back too, unchanged.
+The program of run-arrays.mt, run on the machine's GPU for float and for
+float32: the arrays the region updates are mapped tofrom, over their
+headers' and elements' words. A region whose procedure updates an array,
+which its operations do not show, maps each array of the type tofrom and
+finds which one it gives (design document, "What is lowered so far"), so
+the array it only reads is copied back too, unchanged. float32's arrays
+are packed 4 bytes to an element, so they map fewer bytes: 3 elements and
+the header are 24 bytes, not 32, and 4 elements 24, not 40.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/run-arrays.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
-RUN:   | FileCheck %S/run-arrays.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-RUN: FileCheck %s < %t.info
-CHECK: info: Entering OpenMP kernel at {{.*}}run-arrays.m:{{[0-9]+}}:5 with 6 arguments:
-CHECK-NEXT: info: to(region_slot)[8]
-CHECK-NEXT: info: tofrom(A)[32]
-CHECK-NEXT: info: tofrom(STATE_VARIABLE_B_0)[40]
-CHECK: info: Entering OpenMP kernel at {{.*}}run-arrays.m:{{[0-9]+}}:5 with 7 arguments:
-CHECK-NEXT: info: to(region_slot)[8]
-CHECK-NEXT: info: tofrom(STATE_VARIABLE_B_0)[16]
-CHECK-NEXT: info: tofrom(STATE_VARIABLE_C_0)[24]
-CHECK-NOT: Entering OpenMP kernel
+RUN: %instantiate %S/run-arrays.mt float %t.float.d
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %t.float.d/run_arrays_float.m -o %t.float
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.float 2> %t.float.info \
+RUN:   | FileCheck %S/run-arrays.mt --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+RUN: FileCheck %s --check-prefix=FLOAT < %t.float.info
+FLOAT: info: Entering OpenMP kernel at {{.*}}run_arrays_float.m:{{[0-9]+}}:5 with 6 arguments:
+FLOAT-NEXT: info: to(region_slot)[8]
+FLOAT-NEXT: info: tofrom(A)[32]
+FLOAT-NEXT: info: tofrom(STATE_VARIABLE_B_0)[40]
+FLOAT: info: Entering OpenMP kernel at {{.*}}run_arrays_float.m:{{[0-9]+}}:5 with 7 arguments:
+FLOAT-NEXT: info: to(region_slot)[8]
+FLOAT-NEXT: info: tofrom(STATE_VARIABLE_B_0)[16]
+FLOAT-NEXT: info: tofrom(STATE_VARIABLE_C_0)[24]
+FLOAT-NOT: Entering OpenMP kernel
+
+RUN: %instantiate %S/run-arrays.mt float32 %t.float32.d
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %t.float32.d/run_arrays_float32.m -o %t.float32
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.float32 2> %t.float32.info \
+RUN:   | FileCheck %S/run-arrays.mt --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+RUN: FileCheck %s --check-prefix=FLOAT32 < %t.float32.info
+FLOAT32: info: Entering OpenMP kernel at {{.*}}run_arrays_float32.m:{{[0-9]+}}:5 with 6 arguments:
+FLOAT32-NEXT: info: to(region_slot)[8]
+FLOAT32-NEXT: info: tofrom(A)[24]
+FLOAT32-NEXT: info: tofrom(STATE_VARIABLE_B_0)[24]
+FLOAT32: info: Entering OpenMP kernel at {{.*}}run_arrays_float32.m:{{[0-9]+}}:5 with 7 arguments:
+FLOAT32-NEXT: info: to(region_slot)[8]
+FLOAT32-NEXT: info: tofrom(STATE_VARIABLE_B_0)[16]
+FLOAT32-NEXT: info: tofrom(STATE_VARIABLE_C_0)[24]
+FLOAT32-NOT: Entering OpenMP kernel
