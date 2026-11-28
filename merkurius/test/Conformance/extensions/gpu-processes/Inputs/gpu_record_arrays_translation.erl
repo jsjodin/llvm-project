@@ -1,4 +1,4 @@
-%% The translation of run-gpu-record-arrays.m into Erlang, where every
+%% The translation of run-gpu-record-arrays.mt into Erlang, where every
 %% process runs on the host, as the test's do when it is run without an
 %% argument. An array is {array, List}, and a cell
 %% {cell, {point, X, Y}, Count, Hue, Heat} with its sized integers as
@@ -6,6 +6,8 @@
 -module(gpu_record_arrays_translation).
 -export([main/1]).
 -mode(compile).
+% A template, as the test is: FLOAT_TYPE is the instance's type.
+-define(FLOAT_TYPE, @T@).
 -include("mercury_write.hrl").
 
 i32(N) -> {suffixed, N, "i32"}.
@@ -19,13 +21,13 @@ next(blue) -> red.
 
 move({cell, {point, {suffixed, X, _}, {suffixed, Y, _}}, {suffixed, C, _}, H,
       T}) ->
-    {cell, {point, i32(X + C), i32(Y - C)}, u8(C + 1), next(H), T / 2.0}.
+    {cell, {point, i32(X + C), i32(Y - C)}, u8(C + 1), next(H), ?R(T / 2.0)}.
 
 moved({array, Cells}) ->
     {array, lists:reverse([move(C) || C <- Cells])}.
 
 warm(Cells) ->
-    [setelement(5, C, erlang:element(5, C) + float(I))
+    [setelement(5, C, ?R(erlang:element(5, C) + float(I)))
      || {I, C} <- lists:zip(lists:seq(0, length(Cells) - 1), Cells)].
 
 filled(Fill, {array, Cells}) ->
@@ -34,7 +36,7 @@ filled(Fill, {array, Cells}) ->
 cell_of(N, I) ->
     Hue = case I rem 3 of 0 -> red; 1 -> green; 2 -> blue end,
     {cell, {point, i32(I), i32(-N)}, u8((I * 37 + N * 11) rem 256), Hue,
-     float(I * N)}.
+     ?R(float(I * N))}.
 
 round_of(N) -> {array, [cell_of(N, I) || I <- lists:seq(0, N - 1)]}.
 

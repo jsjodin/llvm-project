@@ -17,6 +17,9 @@ these placeholders, which each type's instance replaces:
   @TO_FLOAT@   the conversion to float: nothing for float, float32.to_float
   @FROM_FLOAT@ the conversion of a float: nothing, float32.from_float
 
+An Erlang TRANSLATION of a template is one too, with the same
+placeholders, and its module keeps its name.
+
 and the module, `:- module run_x.', is run_x_float32 in float32's
 instance, in a file of that name. A test's other modules may be templates
 too, and keep their names (--keep-name): each type's instance is in a
@@ -138,6 +141,18 @@ def for_mmc(text, type_name):
     return "".join(out)
 
 
+def substitute(text, type_name):
+    """The text with the type's replacements for the placeholders; for a
+    translation into another language too, as an Erlang one, whose
+    `-define(FLOAT_TYPE, @T@).' names the type to mercury_write.hrl."""
+    for key, value in TYPES[type_name].items():
+        text = text.replace("@" + key + "@", value)
+    unknown = re.search(r"@[A-Z_]+@", text)
+    if unknown:
+        raise ValueError("unknown placeholder " + unknown.group(0))
+    return text
+
+
 def instantiate(text, type_name, mmc=False, rename=True):
     """The template's instance for the type, and its module's name."""
     if not rename:
@@ -146,12 +161,7 @@ def instantiate(text, type_name, mmc=False, rename=True):
         module = module_name(text, type_name)
         text = re.sub(r"^(:- (?:end_)?module) [a-z][A-Za-z0-9_]*\.",
                       r"\1 " + module + ".", text, flags=re.M)
-    replacements = TYPES[type_name]
-    for key, value in replacements.items():
-        text = text.replace("@" + key + "@", value)
-    unknown = re.search(r"@[A-Z_]+@", text)
-    if unknown:
-        raise ValueError("unknown placeholder " + unknown.group(0))
+    text = substitute(text, type_name)
     if mmc:
         text = for_mmc(text, type_name)
     return text, module

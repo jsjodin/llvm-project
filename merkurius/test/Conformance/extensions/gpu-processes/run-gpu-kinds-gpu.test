@@ -1,6 +1,12 @@
-run-gpu-kinds.m's process kinds spawned on the machine's GPU, which print
-what they print at the host, the output the oracle checked.
+run-gpu-kinds.mt's process kinds spawned on the machine's GPU, which print
+what they print at the host, the output the oracle checked, for
+each floating point type.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/run-gpu-kinds.m -o %t2
-RUN: %gpu-env timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %S/run-gpu-kinds.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: %instantiate %S/run-gpu-kinds.mt float %t.float.d
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %t.float.d/run_gpu_kinds_float.m -o %t.float
+RUN: %gpu-env timeout -k 1 60 %t.float gpu 2>&1 | FileCheck %S/run-gpu-kinds.mt --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+
+RUN: %instantiate %S/run-gpu-kinds.mt float32 %t.float32.d
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %t.float32.d/run_gpu_kinds_float32.m -o %t.float32
+RUN: %gpu-env timeout -k 1 60 %t.float32 gpu 2>&1 | FileCheck %S/run-gpu-kinds.mt --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace

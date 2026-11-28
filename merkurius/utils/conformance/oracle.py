@@ -209,9 +209,10 @@ class Test:
                 raise TestError("only a run- test is a template")
             if self.nodes:
                 raise TestError("a template has no NODES yet")
-            if self.mmc_program and not self.mmc_program.endswith(".mt"):
+            if self.mmc_program and not self.mmc_program.endswith(
+                    (".mt", ".erl")):
                 raise TestError("a template's TRANSLATION is a template, "
-                                ".mt")
+                                ".mt, or Erlang, .erl")
             try:
                 self.types = instantiate.float_types("\n".join(self.lines))
             except ValueError as e:
@@ -314,6 +315,9 @@ def mmc_run(test, mmc, type_name=None):
     if test.nodes:
         program = os.path.join(os.path.dirname(test.path), test.mmc_program)
         return run_nodes(["--erlang", program], test.nodes)
+    if extension in interpreters and test.template:
+        return run_translation_instance(test, interpreters[extension],
+                                        type_name)
     if extension in interpreters:
         program = os.path.join(os.path.dirname(test.path), test.mmc_program)
         status, out, _ = run(interpreters[extension] +
@@ -343,6 +347,30 @@ def mmc_run(test, mmc, type_name=None):
         if test.template:
             out = instantiate.normalise(out, type_name)
         return status, out
+
+
+def run_translation_instance(test, interpreter, type_name):
+    """A template's translation into Erlang or Prolog, instantiated for the
+    type beside copies of the helpers in its directory, and its output as
+    merkc's program would print it."""
+    program = os.path.join(os.path.dirname(test.path), test.mmc_program)
+    here = os.path.dirname(program)
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in os.listdir(here):
+            if name.endswith((".hrl", ".pl")) and \
+                    os.path.join(here, name) != program:
+                shutil.copy(os.path.join(here, name), tmp)
+        with open(program, encoding="utf-8") as f:
+            try:
+                text = instantiate.substitute(f.read(), type_name)
+            except ValueError as e:
+                raise TestError(str(e))
+        with open(os.path.join(tmp, os.path.basename(program)), "w",
+                  encoding="utf-8") as f:
+            f.write(text)
+        status, out, _ = run(interpreter + [os.path.basename(program)], tmp,
+                             merge=True)
+        return status, instantiate.normalise(out, type_name)
 
 
 NODES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nodes.py")

@@ -1,33 +1,49 @@
 % DESIGN: GPU processes
+% DESIGN: Sized floating point types
 % A process kind declared on gpu runs at the place it is spawned at: on
 % the host, or on a GPU, where it receives and sends flat messages, ints,
 % floats, flat records, strings and arrays of scalars, as the host's
 % processes do. It may poll with after(0), and send to another GPU
 % process directly. Run with no argument the kinds run at the host, which
 % the oracle checks; run-gpu-kinds-gpu.test runs them on the GPU and
-% checks the same output.
+% checks the same output. It is a template, run for float and float32.
 % MERKC-FLAGS: -fprocess-declarations
 % TRANSLATION: Inputs/gpu_kinds_translation.erl
 %
-% RUN: merkc -O0 -fprocess-declarations %s -o %t0
-% RUN: %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: merkc -O2 -fprocess-declarations %s -o %t2
-% RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% OUTPUT:message(count(303, 3))
-% OUTPUT-NEXT:message(polled("timeout"))
-% OUTPUT-NEXT:message(pinged(623))
-% OUTPUT-NEXT:message(summed(5050))
-% OUTPUT-NEXT:message(summed_floats(3.75))
-% OUTPUT-NEXT:message(moved(point(7, 3.0)))
-% OUTPUT-NOT:{{.}}
+% RUN: %instantiate %s float %t.float.d
+% RUN: merkc -O0 -fprocess-declarations %t.float.d/run_gpu_kinds_float.m -o %t.float.0
+% RUN: %t.float.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fprocess-declarations %t.float.d/run_gpu_kinds_float.m -o %t.float.2
+% RUN: %t.float.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% OUTPUT-FLOAT:message(count(303, 3))
+% OUTPUT-FLOAT-NEXT:message(polled("timeout"))
+% OUTPUT-FLOAT-NEXT:message(pinged(623))
+% OUTPUT-FLOAT-NEXT:message(summed(5050))
+% OUTPUT-FLOAT-NEXT:message(summed_floats(3.75))
+% OUTPUT-FLOAT-NEXT:message(moved(point(7, 3.0)))
+% OUTPUT-FLOAT-NOT:{{.}}
+% RUN: %instantiate %s float32 %t.float32.d
+% RUN: merkc -O0 -fprocess-declarations %t.float32.d/run_gpu_kinds_float32.m -o %t.float32.0
+% RUN: %t.float32.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float32.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fprocess-declarations %t.float32.d/run_gpu_kinds_float32.m -o %t.float32.2
+% RUN: %t.float32.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float32.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% OUTPUT-FLOAT32:message(count(303, 3))
+% OUTPUT-FLOAT32-NEXT:message(polled("timeout"))
+% OUTPUT-FLOAT32-NEXT:message(pinged(623))
+% OUTPUT-FLOAT32-NEXT:message(summed(5050))
+% OUTPUT-FLOAT32-NEXT:message(summed_floats(3.75f32))
+% OUTPUT-FLOAT32-NEXT:message(moved(point(7, 3.0f32)))
+% OUTPUT-FLOAT32-NOT:{{.}}
 :- module run_gpu_kinds.
 :- interface.
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module array, float, int, list, process, string.
+:- import_module array, @TM@, int, list, process, string.
 
 :- type counter_msg
     --->    add(int)
@@ -36,14 +52,14 @@
     ;       stop.
 
 :- type point
-    --->    point(int, float).
+    --->    point(int, @T@).
 
 :- type report
     --->    count(int, int)                 % the count, and the others
     ;       polled(string)
     ;       pinged(int)
     ;       summed(int)
-    ;       summed_floats(float)
+    ;       summed_floats(@T@)
     ;       moved(point).
 
     % Adds what it is sent, an urgent amount a hundred times, and answers
@@ -125,7 +141,7 @@ pinger_loop(Rounds, N, Ponger, Report, Self, !IO) :-
 
 :- type data
     --->    ints(array(int))
-    ;       floats(array(float))
+    ;       floats(array(@T@))
     ;       move(point, int).
 
     % Answers each message with what it computes, until it has answered
@@ -148,10 +164,10 @@ worker_loop(K, Report, Self, !IO) :-
             send(Report, summed(sum_ints(A, 0, 0)), !IO)
         ;
             R = message(floats(A)),
-            send(Report, summed_floats(sum_floats(A, 0, 0.0)), !IO)
+            send(Report, summed_floats(sum_floats(A, 0, 0.0@S@)), !IO)
         ;
             R = message(move(point(X, Y), D)),
-            send(Report, moved(point(X + D, Y * 2.0)), !IO)
+            send(Report, moved(point(X + D, Y * 2.0@S@)), !IO)
         ;
             R = timeout
         ),
@@ -164,7 +180,7 @@ sum_ints(A, I, S) =
     ( if I < array.size(A) then sum_ints(A, I + 1, S + array.lookup(A, I))
     else S ).
 
-:- func sum_floats(array(float), int, float) = float.
+:- func sum_floats(array(@T@), int, @T@) = @T@.
 
 sum_floats(A, I, S) =
     ( if I < array.size(A) then
@@ -198,7 +214,7 @@ main(!IO) :-
     spawn(Place, worker(Reports), W, !IO),
     send(W, ints(array(1 .. 100)), !IO),
     report(Reports, !IO),
-    send(W, floats(array([0.5, 1.25, 2.0])), !IO),
+    send(W, floats(array([0.5@S@, 1.25@S@, 2.0@S@])), !IO),
     report(Reports, !IO),
-    send(W, move(point(4, 1.5), 3), !IO),
+    send(W, move(point(4, 1.5@S@), 3), !IO),
     report(Reports, !IO).

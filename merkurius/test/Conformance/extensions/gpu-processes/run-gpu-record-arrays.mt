@@ -1,4 +1,5 @@
 % DESIGN: GPU processes / The device runtime
+% DESIGN: Sized floating point types
 % A GPU process makes, reads, sets, fills and resizes arrays of flat
 % records in place, and sends and receives them, alone or as a message's
 % last field, to the host and to another GPU process, copied as one block.
@@ -9,30 +10,47 @@
 % array and passes it to a summer, another GPU process, which reports its
 % totals. Run with no argument the kinds run at the host, which the oracle
 % checks; run-gpu-record-arrays-gpu.test runs them on the GPU and checks
-% the same output.
+% the same output. It is a template, run for float and float32, whose cells
+% are smaller with a float32's 4 bytes.
 % MERKC-FLAGS: -fprocess-declarations
 % TRANSLATION: Inputs/gpu_record_arrays_translation.erl
 %
-% RUN: merkc -O0 -fprocess-declarations %s -o %t0
-% RUN: %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: env MERK_GC_EVERY_ALLOC=1 %t0 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: merkc -O2 -fprocess-declarations %s -o %t2
-% RUN: %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: env MERK_GC_EVERY_ALLOC=1 %t2 2>&1 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% OUTPUT:message(array([cell(point(109i32, -110i32), 108u8, red, 3.0), cell(point(71i32, -73i32), 71u8, blue, 1.5), cell(point(33i32, -36i32), 34u8, green, 0.0)]))
-% OUTPUT-NEXT:message(array([cell(point(11i32, -12i32), 12u8, green, 0.0)]))
-% OUTPUT-NEXT:message(array([]))
-% OUTPUT-NEXT:message(array([cell(point(0i32, -2i32), 22u8, red, 0.0), cell(point(1i32, -2i32), 59u8, green, 3.0), cell(point(4i32, -9i32), 247u8, green, 38.0), cell(point(4i32, -9i32), 247u8, green, 39.0)]))
-% OUTPUT-NEXT:message(array([cell(point(0i32, 0i32), 0u8, red, 0.0), cell(point(0i32, 0i32), 0u8, red, 1.0)]))
-% OUTPUT-NEXT:message(totals(4, -10, 12))
-% OUTPUT-NEXT:message(totals(1000, -500500, 249750000))
-% OUTPUT-NOT:{{.}}
+% RUN: %instantiate %s float %t.float.d
+% RUN: merkc -O0 -fprocess-declarations %t.float.d/run_gpu_record_arrays_float.m -o %t.float.0
+% RUN: %t.float.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fprocess-declarations %t.float.d/run_gpu_record_arrays_float.m -o %t.float.2
+% RUN: %t.float.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% OUTPUT-FLOAT:message(array([cell(point(109i32, -110i32), 108u8, red, 3.0), cell(point(71i32, -73i32), 71u8, blue, 1.5), cell(point(33i32, -36i32), 34u8, green, 0.0)]))
+% OUTPUT-FLOAT-NEXT:message(array([cell(point(11i32, -12i32), 12u8, green, 0.0)]))
+% OUTPUT-FLOAT-NEXT:message(array([]))
+% OUTPUT-FLOAT-NEXT:message(array([cell(point(0i32, -2i32), 22u8, red, 0.0), cell(point(1i32, -2i32), 59u8, green, 3.0), cell(point(4i32, -9i32), 247u8, green, 38.0), cell(point(4i32, -9i32), 247u8, green, 39.0)]))
+% OUTPUT-FLOAT-NEXT:message(array([cell(point(0i32, 0i32), 0u8, red, 0.0), cell(point(0i32, 0i32), 0u8, red, 1.0)]))
+% OUTPUT-FLOAT-NEXT:message(totals(4, -10, 12))
+% OUTPUT-FLOAT-NEXT:message(totals(1000, -500500, 249750000))
+% OUTPUT-FLOAT-NOT:{{.}}
+% RUN: %instantiate %s float32 %t.float32.d
+% RUN: merkc -O0 -fprocess-declarations %t.float32.d/run_gpu_record_arrays_float32.m -o %t.float32.0
+% RUN: %t.float32.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float32.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fprocess-declarations %t.float32.d/run_gpu_record_arrays_float32.m -o %t.float32.2
+% RUN: %t.float32.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.float32.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% OUTPUT-FLOAT32:message(array([cell(point(109i32, -110i32), 108u8, red, 3.0f32), cell(point(71i32, -73i32), 71u8, blue, 1.5f32), cell(point(33i32, -36i32), 34u8, green, 0.0f32)]))
+% OUTPUT-FLOAT32-NEXT:message(array([cell(point(11i32, -12i32), 12u8, green, 0.0f32)]))
+% OUTPUT-FLOAT32-NEXT:message(array([]))
+% OUTPUT-FLOAT32-NEXT:message(array([cell(point(0i32, -2i32), 22u8, red, 0.0f32), cell(point(1i32, -2i32), 59u8, green, 3.0f32), cell(point(4i32, -9i32), 247u8, green, 38.0f32), cell(point(4i32, -9i32), 247u8, green, 39.0f32)]))
+% OUTPUT-FLOAT32-NEXT:message(array([cell(point(0i32, 0i32), 0u8, red, 0.0f32), cell(point(0i32, 0i32), 0u8, red, 1.0f32)]))
+% OUTPUT-FLOAT32-NEXT:message(totals(4, -10, 12))
+% OUTPUT-FLOAT32-NEXT:message(totals(1000, -500500, 249750000))
+% OUTPUT-FLOAT32-NOT:{{.}}
 :- module run_gpu_record_arrays.
 :- interface.
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module array, float, int, int32, list, process, uint8.
+:- import_module array, @TM@, int, int32, list, process, uint8.
 
 :- type colour
     --->    red
@@ -47,7 +65,7 @@
                 at :: point,
                 count :: uint8,
                 hue :: colour,
-                heat :: float
+                heat :: @T@
             ).
 
 :- type batch
@@ -136,7 +154,7 @@ sum_cells(A, I, Totals0) = Totals :-
         Totals0 = totals(N, S, H),
         Totals = sum_cells(A, I + 1, totals(N + 1,
             S + int32.to_int(C ^ at ^ x) + int32.to_int(C ^ at ^ y),
-            H + float.truncate_to_int(C ^ heat)))
+            H + @T@.truncate_to_int(C ^ heat)))
     else
         Totals = Totals0
     ).
@@ -171,7 +189,7 @@ copy_cells(I, A, !B) :-
 warm(I, !B) :-
     ( if I < array.size(!.B) then
         array.lookup(!.B, I, C),
-        array.set(I, C ^ heat := C ^ heat + float(I), !B),
+        array.set(I, C ^ heat := C ^ heat + @FROM_INT@(I), !B),
         warm(I + 1, !B)
     else
         true
@@ -179,7 +197,7 @@ warm(I, !B) :-
 
 :- func still = cell.
 
-still = cell(point(0i32, 0i32), 0u8, red, 0.0).
+still = cell(point(0i32, 0i32), 0u8, red, 0.0@S@).
 
     % Each cell moved by its count, its count plus one, its colour the next
     % and its heat halved, in reverse order.
@@ -196,7 +214,7 @@ moved(A, I, B) =
 :- func move(cell) = cell.
 
 move(cell(point(X, Y), C, H, T)) = cell(point(X + N, Y - N), C + 1u8,
-        next(H), T / 2.0) :-
+        next(H), T / 2.0@S@) :-
     N = int32.cast_from_int(uint8.to_int(C)).
 
 :- func next(colour) = colour.
@@ -215,7 +233,7 @@ round(N) = array.generate(N, element(N)).
 element(N, I) = cell(point(int32.cast_from_int(I), int32.cast_from_int(-N)),
     uint8.cast_from_int((I * 37 + N * 11) mod 256),
     ( if I mod 3 = 0 then red else if I mod 3 = 1 then green else blue ),
-    float(I * N)).
+    @FROM_INT@(I * N)).
 
 :- pred answer(mailbox(T)::in, io::di, io::uo) is det.
 

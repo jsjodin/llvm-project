@@ -1,26 +1,51 @@
-The program of run-teams-loop.m, run on the machine's GPU: each
-reduction's variable is mapped tofrom, an array the loop only reads to, and
-one it updates tofrom.
+The program of run-teams-loop.mt, run on the machine's GPU for float and
+for float32: each reduction's variable is mapped tofrom, an array the loop
+only reads to, and one it updates tofrom. float32's array of 4096 is
+packed 4 bytes to an element, and its sum is 4 bytes.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -O2 -fdo-loops -fopenmp --offload-arch=%offload-arch %libomp-flags %S/run-teams-loop.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
-RUN:   | FileCheck %S/run-teams-loop.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-RUN: FileCheck %s < %t.info
-CHECK: info: Entering OpenMP kernel at {{.*}}run-teams-loop.m:{{[0-9]+}}:5 with 5 arguments:
-CHECK-NEXT: info: to(region_slot)[8]
-CHECK-NEXT: info: to(N)[8]
-CHECK-NEXT: info: tofrom(Sum)[8]
-CHECK-NEXT: info: tofrom(Lo)[8]
-CHECK-NEXT: info: tofrom(Hi)[8]
-CHECK: info: Entering OpenMP kernel at {{.*}}run-teams-loop.m:{{[0-9]+}}:5 with 4 arguments:
-CHECK-NEXT: info: to(region_slot)[8]
-CHECK-NEXT: info: to(N)[8]
-CHECK-NEXT: info: to(STATE_VARIABLE_A_0)[32776]
-CHECK-NEXT: info: tofrom(Sum)[8]
-CHECK: info: Entering OpenMP kernel at {{.*}}run-teams-loop.m:{{[0-9]+}}:5 with 4 arguments:
-CHECK-NEXT: info: to(region_slot)[8]
-CHECK-NEXT: info: to(N)[8]
-CHECK-NEXT: info: tofrom(STATE_VARIABLE_A_0)[32776]
-CHECK-NEXT: info: to(Sum)[8]
-CHECK-NOT: Entering OpenMP kernel
+RUN: %instantiate %S/run-teams-loop.mt float %t.float.d
+RUN: merkc -O2 -fdo-loops -fopenmp --offload-arch=%offload-arch %libomp-flags %t.float.d/run_teams_loop_float.m -o %t.float
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.float 2> %t.float.info \
+RUN:   | FileCheck %S/run-teams-loop.mt --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+RUN: FileCheck %s --check-prefix=FLOAT < %t.float.info
+FLOAT: info: Entering OpenMP kernel at {{.*}}run_teams_loop_float.m:{{[0-9]+}}:5 with 5 arguments:
+FLOAT-NEXT: info: to(region_slot)[8]
+FLOAT-NEXT: info: to(N)[8]
+FLOAT-NEXT: info: tofrom(Sum)[8]
+FLOAT-NEXT: info: tofrom(Lo)[8]
+FLOAT-NEXT: info: tofrom(Hi)[8]
+FLOAT: info: Entering OpenMP kernel at {{.*}}run_teams_loop_float.m:{{[0-9]+}}:5 with 4 arguments:
+FLOAT-NEXT: info: to(region_slot)[8]
+FLOAT-NEXT: info: to(N)[8]
+FLOAT-NEXT: info: to(STATE_VARIABLE_A_0)[32776]
+FLOAT-NEXT: info: tofrom(Sum)[8]
+FLOAT: info: Entering OpenMP kernel at {{.*}}run_teams_loop_float.m:{{[0-9]+}}:5 with 4 arguments:
+FLOAT-NEXT: info: to(region_slot)[8]
+FLOAT-NEXT: info: to(N)[8]
+FLOAT-NEXT: info: tofrom(STATE_VARIABLE_A_0)[32776]
+FLOAT-NEXT: info: to(Sum)[8]
+FLOAT-NOT: Entering OpenMP kernel
+
+RUN: %instantiate %S/run-teams-loop.mt float32 %t.float32.d
+RUN: merkc -O2 -fdo-loops -fopenmp --offload-arch=%offload-arch %libomp-flags %t.float32.d/run_teams_loop_float32.m -o %t.float32
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.float32 2> %t.float32.info \
+RUN:   | FileCheck %S/run-teams-loop.mt --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+RUN: FileCheck %s --check-prefix=FLOAT32 < %t.float32.info
+FLOAT32: info: Entering OpenMP kernel at {{.*}}run_teams_loop_float32.m:{{[0-9]+}}:5 with 5 arguments:
+FLOAT32-NEXT: info: to(region_slot)[8]
+FLOAT32-NEXT: info: to(N)[8]
+FLOAT32-NEXT: info: tofrom(Sum)[8]
+FLOAT32-NEXT: info: tofrom(Lo)[8]
+FLOAT32-NEXT: info: tofrom(Hi)[8]
+FLOAT32: info: Entering OpenMP kernel at {{.*}}run_teams_loop_float32.m:{{[0-9]+}}:5 with 4 arguments:
+FLOAT32-NEXT: info: to(region_slot)[8]
+FLOAT32-NEXT: info: to(N)[8]
+FLOAT32-NEXT: info: to(STATE_VARIABLE_A_0)[16392]
+FLOAT32-NEXT: info: tofrom(Sum)[4]
+FLOAT32: info: Entering OpenMP kernel at {{.*}}run_teams_loop_float32.m:{{[0-9]+}}:5 with 4 arguments:
+FLOAT32-NEXT: info: to(region_slot)[8]
+FLOAT32-NEXT: info: to(N)[8]
+FLOAT32-NEXT: info: tofrom(STATE_VARIABLE_A_0)[16392]
+FLOAT32-NEXT: info: to(Sum)[4]
+FLOAT32-NOT: Entering OpenMP kernel

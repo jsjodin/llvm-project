@@ -9677,9 +9677,18 @@ or a NaN has none, as it has no literal.
        other modules (MODULES, FILES, the TRANSLATION) may be templates
        too; they keep their names, as each type's instance is in a
        directory of its own.
-     - Next: the hand-written tests of that kind, by directory (OpenMP
-       target, GPU processes, type classes, existential types, open
-       types, the standard ordering, exceptions). Distribution tests
+     - OpenMP target (run-cells, run-scalars, run-teams-loop) and GPU
+       processes (run-gpu-kinds, run-gpu-record-arrays) are templates,
+       their -gpu.tests run both types. A float32 maps 4 bytes into a
+       region, a packed array 4 per element; a cell of float32s maps
+       its words, as a notag of one does, the same as for float.
+     - An Erlang TRANSLATION of a template is one too: it names its
+       type with `-define(FLOAT_TYPE, @T@).`, and mercury_write.hrl then
+       writes its floats as the stand-in does, `float32_value(X)`, and
+       `?R(X)` rounds an operation's result to single precision.
+     - Next: the other hand-written tests of that kind, by directory
+       (type classes, existential types, open types, the standard
+       ordering, exceptions). Distribution tests
        wait for NODES in templates. CodeGen tests that check IR need
        their own float32 checks, to decide when they come up.
 3. `float16` and `bfloat16`, the same, arrays packed as the sized

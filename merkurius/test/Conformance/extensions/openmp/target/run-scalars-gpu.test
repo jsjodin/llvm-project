@@ -1,27 +1,55 @@
-The program of run-scalars.m, run on the machine's GPU: each scalar is
-mapped by copy into the region, and each output back from it.
+The program of run-scalars.mt, run on the machine's GPU for float and for
+float32: each scalar is mapped by copy into the region, and each output
+back from it. A float32 is 4 bytes; meters, a notag of it, crosses in a
+word, as the enum does.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/run-scalars.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
-RUN:   | FileCheck %S/run-scalars.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-RUN: FileCheck %s < %t.info
-CHECK: info: Entering OpenMP kernel at {{.*}}run-scalars.m:{{[0-9]+}}:5 with 17 arguments:
-CHECK-NEXT: info: to(region_slot)[8]
-CHECK-NEXT: info: to(I)[8]
-CHECK-NEXT: info: to(U)[8]
-CHECK-NEXT: info: to(B)[1]
-CHECK-NEXT: info: to(L)[8]
-CHECK-NEXT: info: to(F)[8]
-CHECK-NEXT: info: to(C)[4]
-CHECK-NEXT: info: to(K)[8]
-CHECK-NEXT: info: to(M)[8]
-CHECK-NEXT: info: from(I1)[8]
-CHECK-NEXT: info: from(U1)[8]
-CHECK-NEXT: info: from(B1)[1]
-CHECK-NEXT: info: from(L1)[8]
-CHECK-NEXT: info: from(F1)[8]
-CHECK-NEXT: info: from(C1)[4]
-CHECK-NEXT: info: from(K1)[8]
-CHECK-NEXT: info: from(M1)[8]
-CHECK-NOT: Entering OpenMP kernel
+RUN: %instantiate %S/run-scalars.mt float %t.float.d
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %t.float.d/run_scalars_float.m -o %t.float
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.float 2> %t.float.info \
+RUN:   | FileCheck %S/run-scalars.mt --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+RUN: FileCheck %s --check-prefix=FLOAT < %t.float.info
+FLOAT: info: Entering OpenMP kernel at {{.*}}run_scalars_float.m:{{[0-9]+}}:5 with 17 arguments:
+FLOAT-NEXT: info: to(region_slot)[8]
+FLOAT-NEXT: info: to(I)[8]
+FLOAT-NEXT: info: to(U)[8]
+FLOAT-NEXT: info: to(B)[1]
+FLOAT-NEXT: info: to(L)[8]
+FLOAT-NEXT: info: to(F)[8]
+FLOAT-NEXT: info: to(C)[4]
+FLOAT-NEXT: info: to(K)[8]
+FLOAT-NEXT: info: to(M)[8]
+FLOAT-NEXT: info: from(I1)[8]
+FLOAT-NEXT: info: from(U1)[8]
+FLOAT-NEXT: info: from(B1)[1]
+FLOAT-NEXT: info: from(L1)[8]
+FLOAT-NEXT: info: from(F1)[8]
+FLOAT-NEXT: info: from(C1)[4]
+FLOAT-NEXT: info: from(K1)[8]
+FLOAT-NEXT: info: from(M1)[8]
+FLOAT-NOT: Entering OpenMP kernel
+
+RUN: %instantiate %S/run-scalars.mt float32 %t.float32.d
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %t.float32.d/run_scalars_float32.m -o %t.float32
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.float32 2> %t.float32.info \
+RUN:   | FileCheck %S/run-scalars.mt --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+RUN: FileCheck %s --check-prefix=FLOAT32 < %t.float32.info
+FLOAT32: info: Entering OpenMP kernel at {{.*}}run_scalars_float32.m:{{[0-9]+}}:5 with 17 arguments:
+FLOAT32-NEXT: info: to(region_slot)[8]
+FLOAT32-NEXT: info: to(I)[8]
+FLOAT32-NEXT: info: to(U)[8]
+FLOAT32-NEXT: info: to(B)[1]
+FLOAT32-NEXT: info: to(L)[8]
+FLOAT32-NEXT: info: to(F)[4]
+FLOAT32-NEXT: info: to(C)[4]
+FLOAT32-NEXT: info: to(K)[8]
+FLOAT32-NEXT: info: to(M)[8]
+FLOAT32-NEXT: info: from(I1)[8]
+FLOAT32-NEXT: info: from(U1)[8]
+FLOAT32-NEXT: info: from(B1)[1]
+FLOAT32-NEXT: info: from(L1)[8]
+FLOAT32-NEXT: info: from(F1)[4]
+FLOAT32-NEXT: info: from(C1)[4]
+FLOAT32-NEXT: info: from(K1)[8]
+FLOAT32-NEXT: info: from(M1)[8]
+FLOAT32-NOT: Entering OpenMP kernel

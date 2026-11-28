@@ -1,8 +1,10 @@
-%% The translation of run-gpu-kinds.m into Erlang, where every process
+%% The translation of run-gpu-kinds.mt into Erlang, where every process
 %% runs on the host, as the test's do when it is run without an argument.
 -module(gpu_kinds_translation).
 -export([main/1]).
 -mode(compile).
+% A template, as the test is: FLOAT_TYPE is the instance's type.
+-define(FLOAT_TYPE, @T@).
 -include("mercury_write.hrl").
 
 counter(N) ->
@@ -37,8 +39,10 @@ worker(0, _) ->
 worker(K, Report) ->
     receive
         {ints, A} -> Report ! {summed, lists:sum(A)};
-        {floats, A} -> Report ! {summed_floats, lists:sum(A)};
-        {move, {point, X, Y}, D} -> Report ! {moved, {point, X + D, Y * 2.0}}
+        {floats, A} ->
+            Report ! {summed_floats,
+                      lists:foldl(fun(X, S) -> ?R(S + X) end, 0.0, A)};
+        {move, {point, X, Y}, D} -> Report ! {moved, {point, X + D, ?R(Y * 2.0)}}
     end,
     worker(K - 1, Report).
 

@@ -1,17 +1,35 @@
-The program of run-cells.m, run on the machine's GPU: each cell of
-scalars is mapped to the region by its words.
+The program of run-cells.mt, run on the machine's GPU for float and for
+float32: each cell of scalars is mapped to the region by its words, which
+hold a float32 as they hold a float, so the cells map the same bytes; the
+float32 that comes out is 4 bytes.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/run-cells.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
-RUN:   | FileCheck %S/run-cells.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-RUN: FileCheck %s < %t.info
-CHECK: info: Entering OpenMP kernel at {{.*}}run-cells.m:{{[0-9]+}}:5 with 7 arguments:
-CHECK-NEXT: info: to(region_slot)[8]
-CHECK-NEXT: info: to(U)[24]
-CHECK-NEXT: info: to(V)[24]
-CHECK-NEXT: info: to(S)[16]
-CHECK-NEXT: info: from(D)[8]
-CHECK-NEXT: info: from(W)[8]
-CHECK-NEXT: info: from(N)[8]
-CHECK-NOT: Entering OpenMP kernel
+RUN: %instantiate %S/run-cells.mt float %t.float.d
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %t.float.d/run_cells_float.m -o %t.float
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.float 2> %t.float.info \
+RUN:   | FileCheck %S/run-cells.mt --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+RUN: FileCheck %s --check-prefix=FLOAT < %t.float.info
+FLOAT: info: Entering OpenMP kernel at {{.*}}run_cells_float.m:{{[0-9]+}}:5 with 7 arguments:
+FLOAT-NEXT: info: to(region_slot)[8]
+FLOAT-NEXT: info: to(U)[24]
+FLOAT-NEXT: info: to(V)[24]
+FLOAT-NEXT: info: to(S)[16]
+FLOAT-NEXT: info: from(D)[8]
+FLOAT-NEXT: info: from(W)[8]
+FLOAT-NEXT: info: from(N)[8]
+FLOAT-NOT: Entering OpenMP kernel
+
+RUN: %instantiate %S/run-cells.mt float32 %t.float32.d
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %t.float32.d/run_cells_float32.m -o %t.float32
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.float32 2> %t.float32.info \
+RUN:   | FileCheck %S/run-cells.mt --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+RUN: FileCheck %s --check-prefix=FLOAT32 < %t.float32.info
+FLOAT32: info: Entering OpenMP kernel at {{.*}}run_cells_float32.m:{{[0-9]+}}:5 with 7 arguments:
+FLOAT32-NEXT: info: to(region_slot)[8]
+FLOAT32-NEXT: info: to(U)[24]
+FLOAT32-NEXT: info: to(V)[24]
+FLOAT32-NEXT: info: to(S)[16]
+FLOAT32-NEXT: info: from(D)[4]
+FLOAT32-NEXT: info: from(W)[8]
+FLOAT32-NEXT: info: from(N)[8]
+FLOAT32-NOT: Entering OpenMP kernel
