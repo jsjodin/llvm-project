@@ -9484,6 +9484,216 @@ explained yet.
    optimization of math, which nothing does now.
 3. Keep libc, for its accuracy, and say so where results are compared.
 
+## Sized floating point types
+
+*Proposed 2026-11-28, to decide with the user.* `float64`, `float32`,
+`float16` and `bfloat16`, beside `float`, which is the only floating
+point type now (`f64`); `float128` and 8-bit floats deferred (below).
+Not in the manual and not in mmc: an extension, with its tests under
+test/Conformance/extensions/.
+
+**Why:** double precision is the slow case on most GPUs. The gfx1030 runs
+it at 1/16 of single, so `benchmarks/math` measures nothing useful there
+(Math on the GPU, above); the gfx90a packs two `f32` operations in an
+instruction (`v_pk_mul_f32`); and machine learning and mixed-precision
+codes keep data in 16 and 8 bits.
+
+**What LLVM and MLIR handle (checked 2026-11-28):**
+- LLVM IR's types stop at `half`, `bfloat`, `float`, `double` and `fp128`
+  (and `x86_fp80`, `ppc_fp128`). APFloat computes in every format below,
+  but IR has no 8-, 6- or 4-bit float type: they are `i8` and intrinsics.
+- MLIR's builtin types have them all: `f16`, `bf16`, `tf32`, `f32`, `f64`,
+  `f80`, `f128`, and `f8E4M3FN`, `f8E5M2`, their `FNUZ` forms, `f8E4M3`,
+  `f8E3M4`, `f8E4M3B11FNUZ`, `f8E5M3FNU`, `f8E8M0FNU`, `f6E2M3FN`,
+  `f6E3M2FN` and `f4E2M1FN`. The LLVM type converter makes the 8-, 6- and
+  4-bit ones `i8`; `convert-arith-to-amdgpu` makes `arith.extf` and
+  `arith.truncf` of them the AMDGPU conversions, and
+  `arith-emulate-unsupported-floats` does their arithmetic in `f32`.
+- Every LLVM backend legalizes `half` and `bfloat`: native instructions
+  where the target has them, else promoted to `f32` with conversions
+  around (llc -O2, 2026-11-28). On x86-64: at the baseline, promoted, with
+  software conversions; with F16C, hardware conversions of `half`; with
+  AVX512-FP16, native `half` (`vaddsh`, `vmulph`); with AVX512-BF16, a
+  hardware conversion of `bfloat` (`vcvtneps2bf16`); with AVX10.2, native
+  `bfloat` too (`vaddbf16`, `vmulbf16`). On AArch64: with FEAT_FP16
+  (`+fullfp16`), native `half`; with FEAT_BF16, `bfcvt`; with SVE B16B16,
+  native `bfloat` vectors (`bfmul`). So 16-bit arithmetic is left to the
+  backend; only 8-bit types, which LLVM IR lacks, would need lowering in
+  MLIR.
+- The AMDGPU backend (llc -O2, gfx1030, gfx90a, gfx942, gfx950, gfx1100,
+  gfx1201):
+  - `f32` native on all; packed in pairs from gfx90a, dual-issued on RDNA3
+    and 4.
+  - `f16` native and packed in pairs on all.
+  - `bf16` has no arithmetic on any: computed in `f32`, converted with
+    shifts and masks, by one instruction on gfx950. It pays in the matrix
+    units (MFMA, WMMA), which Merkurius does not use.
+  - 8-bit conversions only on gfx942 (the FNUZ forms) and gfx950 and
+    gfx1201 (the OCP forms, E4M3FN and E5M2); none on gfx1030, gfx90a or
+    gfx1100.
+  - `fp128` not at all: "no libcall available for fadd with type f128".
+    On x86-64 it is soft float, `__addtf3` and the like.
+- LLVM libc's GPU libm has the `f32` functions, some of `f16` (`expf16`,
+  `logf16`, `sinf16`, `sqrtf16`) and `bf16` (`sinbf16`, `sqrtbf16`), and of
+  `f128` only `sqrtf128`. ocml has `f32` and `f16`. glibc has the `*f128`
+  functions on the host.
+- On gfx90a, `llvm.amdgcn.cvt.scalef32.pk.f32.fp4` gives an instruction
+  only gfx950 has, which the assembler rejects, and llc aborts on it for
+  gfx1030 and gfx1100: an upstream candidate, not on our path.
+
+**The types,** each a primitive type as the sized integers are
+(`primitiveTypes` in resolve-names.cpp), with a library module of its own
+name, its arithmetic and comparisons built into code generation as
+`float`'s are (MLIRGenBuiltins.cpp), and its own type_ctor_info, unify,
+compare and copy (MLIRGenTypeInfo.cpp, insts.cpp):
+
+| Type | MLIR | Arithmetic | GPU | C type in foreign code |
+| --- | --- | --- | --- | --- |
+| `float64` | `f64` | `float`'s | yes | `MR_Float` |
+| `float32` | `f32` | native | yes | `float` |
+| `float16` | `f16` | the backend's, as `bfloat16` | yes | `_Float16` |
+| `bfloat16` | `bf16` | the backend's: native where the target has it, else promoted to `f32` | yes | `__bf16` |
+
+- `float64` is `:- type float64 == float.` in a module `float64`: the
+  same type, so every `float` function applies, for code that wants its
+  size in its name.
+- `float16` and `bfloat16` are generated as `arith` operations on `f16`
+  and `bf16`, which become LLVM's `half` and `bfloat`, and each backend
+  uses the target's 16-bit instructions or promotes to `f32` itself; no
+  emulation in MLIR. What the target has comes from its CPU or GPU
+  features, so the host's features matter: at the x86-64 baseline every
+  conversion of `half` is a call. merkc's driver chooses them, as Clang's
+  does (target defaults belong in the driver); `-fc1` has `-target-cpu`
+  and `-target-feature` already, but the driver has no `-march` or
+  `-mcpu` for the host yet, which step 3 adds.
+- All fit a word, and are stored in one in polymorphic code, as
+  `float` is. Arrays of them are packed in their own widths, as arrays
+  of the sized integers already are (`array.init(100, 3i8)` is
+  `merk.array_new … : i8 -> <i8>`, checked 2026-11-28).
+
+**Literals:** suffixes on float literals, as on integers: `1.5f16`,
+`1.5bf16`, `1.5f32` and `1.5f64` (a `float`), which the lexer now
+rejects, so no program changes meaning.
+
+**Conversions:** explicit, as between the sized integers: each module's
+`from_float`, `to_float`, `cast_from_int` and the like, and between the
+float types `float32.from_float16` and so on, rounding to nearest even.
+No implicit promotion, as Mercury has none.
+
+**Math:** the `math` functions for each size in a module of their own,
+`math_float32`, `math_float16` and `math_bfloat16`, with
+`math`'s names, which overload `math`'s by the argument's type where both
+are imported, as `int32`'s `+` does `int`'s. Each is `foreign_proc("C")`
+on `sqrtf`, `sqrtf16`, `sqrtbf16` and the like, where the
+library has them, else on the `f32` function with conversions around it;
+on the device, LLVM libc's or ocml's after `benchmarks/math` has a
+`float32` version that measures them (Math on the GPU).
+
+**I/O and strings:** `io.write_float` and `string.float_to_string` for
+each, through the `float` (`f64`) conversion.
+
+**Steps:**
+1. `float64`, the equivalence type, with a test.
+2. `float32`: the type, literals, arithmetic, comparisons, conversions,
+   type_info, unify, compare and copy, foreign code, I/O, flat messages
+   and records, GPU code; `math_float32`; `benchmarks/math` in `float32`,
+   which then measures libc against ocml on the gfx1030 too.
+3. `float16` and `bfloat16`, the same, arrays packed as the sized
+   integers' are, arithmetic left to the backend; the driver's `-march`
+   and `-mcpu` for the host, passed to `-fc1`'s `-target-cpu` and
+   `-target-feature`.
+
+**Deferred, decided with the user 2026-11-28: `float128`.** Rare: quad
+precision appears in a few scientific codes (ill-conditioned problems,
+long accumulations, orbital mechanics) and as Fortran's `real(16)`, which
+Flang supports, but GPU codes that need more than double use double-double
+arithmetic, pairs of `f64`, instead. It would be host only (the AMDGPU
+backend has no `f128` libcalls, so on a device a NYI error), soft float on
+x86-64 (`__addtf3` and the like), with glibc's `*f128` math and
+`strfromf128` for printing; it does not fit a word, so polymorphic code
+would box it in a cell of two words; and its literal would be `1.5f128`.
+Nothing in steps 1 to 3 depends on it. It comes back when a program
+needs it, or with foreign code that passes `_Float128`.
+
+**Deferred, decided with the user 2026-11-28: 8-bit floats.** They are
+used today almost only in machine learning (from memory, not searched):
+training in FP8 with NVIDIA's Transformer Engine (E4M3 forward, E5M2 for
+gradients, a scale per tensor) and DeepSeek-V3's blocks of 128 with a
+scale each; FP8 inference and KV caches in vLLM, TensorRT-LLM and SGLang,
+and hipBLASLt on the MI300; OCP's Microscaling formats (MXFP8, MXFP6,
+MXFP4, an E8M0 exponent shared by 32 values) and NVFP4 below 8 bits; and
+FP8 gradients in all-reduce. Not in production scientific codes: mixed
+precision there is FP16 or BF16, and the Ozaki scheme uses INT8. In every
+use the values carry a scale, feed matrix units with `f32` accumulation
+(MFMA, WMMA, tensor cores), and are converted in bulk, four to a
+register; arithmetic on single 8-bit values is not done. So:
+- A scalar type with arithmetic through `f32`, as first proposed
+  (`float8_e4m3` and `float8_e5m2`, the OCP forms), would serve no
+  program as they are written.
+- Neither the gfx1030 nor the gfx90a has 8-bit float instructions, so it
+  could be neither measured nor tuned here.
+- The right design needs what Merkurius lacks: matrix operations, and a
+  choice of scaling (per tensor, blocks of 128, MX blocks of 32).
+- Nothing in steps 1 to 3 depends on it, and MLIR keeps the `f8` types.
+- Storage alone, compressed arrays or messages, can be library code on
+  `uint8` arrays with conversions in foreign code, if a program needs it.
+
+It comes back as scaled block arrays and matrix operations, not scalar
+types, when Merkurius has matrix operations, a gfx942 or later GPU is at
+hand, or a program to show wants it (inference, compressed messages
+between GPUs). What lowering would then face: gfx942 converts the FNUZ
+forms, gfx950 and gfx1201 the OCP forms, whose negative zero, NaN and
+exponent bias differ.
+
+**Rejected:**
+- One type `float(Size)`: Mercury has no type-level numbers, and its
+  operators would need a typeclass, whose dictionaries cost in code that
+  matters for speed. The sized integers are separate types, so these are
+  too.
+- `float` as `float32` on GPUs: the same program would compute different
+  results on the host and a device. mmc's `.spf` grade (single-precision
+  float) is the precedent, `float` 32-bit for a whole program; rejected
+  too, as it changes every `float`, the library's with them, where
+  separate `float32` values are chosen where they are wanted.
+- Names without the size, such as `single` or `half`: C's `float` and
+  `double` show how such names mislead, and Mercury's `float` is already
+  64-bit. Decided with the user 2026-11-28: the size as a number,
+  `float32`, `float16`, `bfloat16`, `float64`, as the sized integers.
+- Implicit widening in mixed arithmetic: Mercury has none for integers,
+  and silent rounding is a source of bugs.
+
+**To decide:** the literal suffixes; the math modules' names; and
+whether to begin with step 2 once step 1 is in.
+
+## Booleans: what is left
+
+*Noted 2026-11-28, not scheduled.* `bool` is the library's type
+`:- type bool ---> no ; yes.` (library/bool.m), as in the manual, not a
+primitive type. Mercury's conditions are goals, not values, so a
+comparison makes no `bool`: in code generation it is an `i1` and a branch,
+and `bool` only holds a truth value as data. What works and what is left,
+checked 2026-11-28:
+
+- **Values:** a type of constants only, so a value is a small integer in
+  a word, `no` 0 and `yes` 1, with no cell (`!merk.term<"bool.bool">` in
+  merk). `yes`, `no`, unification, comparison and `io.write` work.
+- **The library's functions are not implemented:** `not`, `or`, `and`,
+  `xor`, `or_list`, `and_list` and `pred_to_bool` are a NYI error, "code
+  generation for calls of bool.or/2", as `bool.m` is not compiled into
+  `libmerkstd` (MLIRGenBuiltins.cpp, `LibraryCallNotYet`, marked
+  temporary for chunk 1 step 6). To do: implement them in `bool.m` in
+  Mercury, add it to the library's list in `library/CMakeLists.txt`,
+  drop the temporary check, and test each function at -O0 and -O2.
+  Small, and its own commit.
+- **Arrays:** `array(bool)`, like an array of any enum, has elements of 4
+  bytes (`ArrayWidthOfKind` in runtime/array.h: `Enum` is
+  `kArrayBytes4`), where `array(int8)` has 1. Four bytes is C's size of an
+  enum, which flat records share with C (`FieldLayout`). An enum of at
+  most 256 constants could take 1 byte in an array, a quarter of the
+  memory and bandwidth for flags and masks on a GPU, if its arrays need
+  not match a C layout; to measure on a program that uses such arrays
+  before changing it.
+
 ## Concurrency in merk, and what mrt is for
 
 Discussed with the user 2026-11-27. Step 1 is being built (below); the
