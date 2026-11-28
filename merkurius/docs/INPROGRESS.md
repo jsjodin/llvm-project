@@ -9464,7 +9464,13 @@ and a comparison with a baseline then compares libraries.
 
 **The measurement:** `benchmarks/math/compare-math.sh`, each function's
 loop in Merkurius, C with OpenMP, HIP and Flang; times against HIP's, and
-how far each sum is from HIP's. Not yet run (a performance run).
+how far each sum is from HIP's. Run on the gfx1030 2026-11-28 (the design
+document's Measurements, Math on the GPU): libc is faster than ocml for
+`exp` (0.90x), `ln` (0.27x), `pow` (0.44x) and `tanh` (0.30x), slower for
+`sin` and `cos` (1.25x), the same for `sqrt`; the sums agree to 1e-14. So on
+this GPU option 1 would lose more than it gains. Still to run on a gfx90a,
+whose double precision is at full rate; and Flang's `pow` (0.20x), not
+explained yet.
 
 **Options, once measured, if libc is slower:**
 1. math.m's device C calls ocml (`__ocml_exp_f64`, or Clang's builtins

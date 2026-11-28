@@ -6886,6 +6886,36 @@ same iterations and checksum as `mandel-places.m` under the pool policy.
   kernel must be launched and its teams started before its places ask for
   tiles.
 
+### Math on the GPU
+
+`benchmarks/math/compare-math.sh` on the gfx1030 with
+`LIBOMPTARGET_AMDGPU_CU_MASK=0-39` (and `HSA_CU_MASK` the same for HIP),
+2026-11-28, at a0ffe8e58dca, Firefox closed. Each function's loop over 2^20
+elements, 1000 applications an element, double precision; the best of 5
+runs, then the best of 3 rounds. Merkurius' device math is LLVM libc's
+libm; the others' is ocml (`docs/INPROGRESS.md`, Math on the GPU).
+
+| Function | Merkurius (libc) | C OpenMP (ocml) | HIP (ocml) | Flang (ocml) |
+| --- | --- | --- | --- | --- |
+| sqrt | 34.9 ms, 1.02x | 34.3 ms, 1.01x | 34.1 ms | 34.1 ms, 1.00x |
+| exp | 41.5 ms, 0.90x | 46.5 ms, 1.01x | 46.1 ms | 46.1 ms, 1.00x |
+| ln | 49.1 ms, 0.27x | 184.7 ms, 1.00x | 183.8 ms | 184.1 ms, 1.00x |
+| sin | 137.0 ms, 1.25x | 110.1 ms, 1.01x | 109.3 ms | 110.0 ms, 1.01x |
+| cos | 134.7 ms, 1.26x | 107.6 ms, 1.01x | 106.9 ms | 107.5 ms, 1.01x |
+| pow | 153.4 ms, 0.44x | 347.0 ms, 1.00x | 345.6 ms | 68.5 ms, 0.20x |
+| tanh | 103.0 ms, 0.30x | 347.0 ms, 1.00x | 345.5 ms | 346.2 ms, 1.00x |
+
+Ratios are against HIP. The sums of Merkurius, C and Flang are the same
+bits, each within 1e-14 of HIP's, whose atomics add in another order.
+
+- On this GPU, libc's libm is faster than ocml for `exp`, `ln`, `pow` and
+  `tanh`, by up to 3.7 times for `ln`, and 25% slower for `sin` and `cos`.
+  The gfx1030 runs double precision at 1/16 of single; a gfx90a, at full
+  rate, may rank them otherwise, and is not measured yet.
+- Flang's `pow` with the constant exponent 0.75 is five times HIP's, not
+  investigated: the call of `__ocml_pow_f64` that MathToROCDL makes may be
+  simplified where C's, through the wrapper header, is not.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.
