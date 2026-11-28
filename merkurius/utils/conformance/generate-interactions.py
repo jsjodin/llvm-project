@@ -18,6 +18,12 @@ A feature is a type and two functions over it, which exercise the feature:
   :- func make(int) = fdata.     builds a value of the type
   :- func use(fdata) = string.   takes it apart, as text to print
 
+A feature whose values hold a float is written once for every floating
+point type, with the placeholders of instantiate.py (@T@, a literal's
+suffix @S@, @FROM_INT@), and its tests are templates, run-x.mt, whose
+modules are templates too, which oracle.py runs for each type
+(docs/INPROGRESS.md, Sized floating point types).
+
 A context moves values of fdata through itself, and prints what use makes
 of them, for a few values of make's argument: a closure builds and
 captures them, a type class method makes and uses them, polymorphic code
@@ -35,6 +41,9 @@ import os
 import re
 import sys
 import textwrap
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import instantiate  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "..", "..", "test", "Conformance", "interactions")
@@ -62,6 +71,8 @@ class Feature:
         self.interface = interface.strip("\n")
         self.implementation = implementation.strip("\n")
         self.summary = summary
+        # Whether the feature is written for every floating point type.
+        self.templated = "@T@" in self.interface + self.implementation
 
 
 class Context:
@@ -87,7 +98,7 @@ class Context:
 
 FEATURES = [
     Feature(
-        "layouts", "Discriminated unions", ["int", "float", "string"],
+        "layouts", "Discriminated unions", ["int", "@TM@", "string"],
         """
     % More functors with arguments than a pointer has tags, constants, and
     % arguments of every kind of word.
@@ -96,7 +107,7 @@ FEATURES = [
     ;       c1
     ;       one(int)
     ;       two(int, string)
-    ;       three(float, fdata, int)
+    ;       three(@T@, fdata, int)
     ;       four(char, int, int, int)
     ;       five(string)
     ;       six(int)
@@ -107,7 +118,7 @@ FEATURES = [
 :- func use(fdata) = string.
 """,
         """
-make(N) = seven(three(float(N) / 2.0, one(N), N * 3),
+make(N) = seven(three(@FROM_INT@(N) / 2.0@S@, one(N), N * 3),
     ( if N mod 2 = 0 then
         eight(c0)
     else if N mod 3 = 0 then
@@ -120,7 +131,7 @@ use(c0) = "c0".
 use(c1) = "c1".
 use(one(I)) = "one(" ++ string.int_to_string(I) ++ ")".
 use(two(I, S)) = "two(" ++ string.int_to_string(I) ++ ", " ++ S ++ ")".
-use(three(F, D, I)) = "three(" ++ string.float_to_string(F) ++ ", " ++
+use(three(F, D, I)) = "three(" ++ string.@T@_to_string(F) ++ ", " ++
     use(D) ++ ", " ++ string.int_to_string(I) ++ ")".
 use(four(C, A, B, D)) = "four(" ++ string.char_to_string(C) ++ ", " ++
     string.int_to_string(A + B + D) ++ ")".
@@ -129,10 +140,10 @@ use(six(I)) = "six(" ++ string.int_to_string(I) ++ ")".
 use(seven(A, B)) = "seven(" ++ use(A) ++ ", " ++ use(B) ++ ")".
 use(eight(D)) = "eight(" ++ use(D) ++ ")".
 """,
-        "a type of more functors than a pointer has tags", ["char"]),
+        "a type of more functors than a pointer has tags", ["char", "@TM@"]),
     Feature(
         "flat-values", "Discriminated unions",
-        ["int", "float", "string"],
+        ["int", "@TM@", "string"],
         """
 :- type colour
     --->    red
@@ -145,7 +156,7 @@ use(eight(D)) = "eight(" ++ use(D) ++ ")".
     % A record of one functor of numbers, an enumeration and a notag,
     % which Merkurius holds by value.
 :- type fdata
-    --->    fdata(colour, wrapped, int8, uint16, float).
+    --->    fdata(colour, wrapped, int8, uint16, @T@).
 
 :- func make(int) = fdata.
 :- func use(fdata) = string.
@@ -154,16 +165,16 @@ use(eight(D)) = "eight(" ++ use(D) ++ ")".
 make(N) = fdata(
     ( if N mod 3 = 0 then red else if N mod 3 = 1 then green else blue ),
     wrapped(N * 100), int8.det_from_int(-N), uint16.det_from_int(N * 1000),
-    float(N) * 0.25).
+    @FROM_INT@(N) * 0.25@S@).
 
 use(fdata(C, wrapped(W), I, U, F)) =
     string.string(C) ++ " " ++ string.int_to_string(W) ++ " " ++
     string.int_to_string(int8.to_int(I)) ++ " " ++
     string.int_to_string(uint16.to_int(U)) ++ " " ++
-    string.float_to_string(F).
+    string.@T@_to_string(F).
 """,
         "an enumeration, a notag and a record of numbers",
-        ["int8", "uint16"]),
+        ["int8", "uint16", "@TM@"]),
     Feature(
         "closures-as-data", "Calling higher-order terms",
         ["int", "string"],
@@ -522,7 +533,7 @@ use(L) =
 # calls ("dispatches on a type class, which cannot be done in a GPU process
 # yet").
 GPU_VARIANTS = {
-    "layouts": (["int", "float"], """
+    "layouts": (["int", "@TM@"], """
     % More functors with arguments than a pointer has tags, and constants,
     % of fixed size: a flat union.
 :- type fdata
@@ -530,11 +541,11 @@ GPU_VARIANTS = {
     ;       c1
     ;       one(int)
     ;       two(int, int)
-    ;       three(float, int)
+    ;       three(@T@, int)
     ;       four(int, int, int, int)
-    ;       five(float)
+    ;       five(@T@)
     ;       six(int)
-    ;       seven(int, float, int).
+    ;       seven(int, @T@, int).
 
 :- func make(int) = fdata.
 :- func use(fdata) = int.
@@ -544,11 +555,11 @@ make(N) = D :-
     ( if K = 0 then D = c0
     else if K = 1 then D = one(N)
     else if K = 2 then D = two(N, -N)
-    else if K = 3 then D = three(float(N) / 2.0, N)
+    else if K = 3 then D = three(@FROM_INT@(N) / 2.0@S@, N)
     else if K = 4 then D = four(N, 1, 2, 3)
-    else if K = 5 then D = five(float(N) * 4.0)
+    else if K = 5 then D = five(@FROM_INT@(N) * 4.0@S@)
     else if K = 6 then D = six(N * N)
-    else if K = 7 then D = seven(N, 0.5, N)
+    else if K = 7 then D = seven(N, 0.5@S@, N)
     else D = c1
     ).
 
@@ -556,13 +567,13 @@ use(c0) = 1000.
 use(c1) = 2000.
 use(one(I)) = I.
 use(two(I, J)) = I * 10 + J.
-use(three(F, I)) = truncate_to_int(F * 10.0) + I.
+use(three(F, I)) = truncate_to_int(F * 10.0@S@) + I.
 use(four(A, B, C, D)) = A * 1000 + B * 100 + C * 10 + D.
 use(five(F)) = truncate_to_int(F).
 use(six(I)) = I + 7.
-use(seven(A, F, B)) = A + truncate_to_int(F * 100.0) + B.
+use(seven(A, F, B)) = A + truncate_to_int(F * 100.0@S@) + B.
 """),
-    "flat-values": (["int", "int8", "uint16", "float"], """
+    "flat-values": (["int", "int8", "uint16", "@TM@"], """
 :- type colour
     --->    red
     ;       green
@@ -573,7 +584,7 @@ use(seven(A, F, B)) = A + truncate_to_int(F * 100.0) + B.
 
     % A record of one functor of numbers, an enumeration and a notag.
 :- type fdata
-    --->    fdata(colour, wrapped, int8, uint16, float).
+    --->    fdata(colour, wrapped, int8, uint16, @T@).
 
 :- func make(int) = fdata.
 :- func use(fdata) = int.
@@ -581,11 +592,11 @@ use(seven(A, F, B)) = A + truncate_to_int(F * 100.0) + B.
 make(N) = fdata(
     ( if N mod 3 = 0 then red else if N mod 3 = 1 then green else blue ),
     wrapped(N * 100), int8.det_from_int(-N), uint16.det_from_int(N * 1000),
-    float(N) * 0.25).
+    @FROM_INT@(N) * 0.25@S@).
 
 use(fdata(C, wrapped(W), I, U, F)) =
     colour_code(C) + W + int8.to_int(I) + uint16.to_int(U) +
-    truncate_to_int(F * 100.0).
+    truncate_to_int(F * 100.0@S@).
 
 :- func colour_code(colour) = int.
 
@@ -1070,6 +1081,14 @@ def mercury_name(*parts):
     return "_".join(p.replace("-", "_") for p in parts)
 
 
+def suffix(feature):
+    """The suffix of the feature's tests and modules: templates' or not."""
+    return ".mt" if feature.templated else ".m"
+
+
+FLOAT_TYPES = "% DESIGN: Sized floating point types"
+
+
 def imports_line(names):
     return ":- import_module " + ", ".join(sorted(names)) + "."
 
@@ -1085,6 +1104,8 @@ def test_text(feature, context):
         header.append("% DESIGN: " + context.manual)
     elif context.manual != feature.manual:
         header.append("% MANUAL: " + context.manual)
+    if feature.templated:
+        header.append(FLOAT_TYPES)
     header += textwrap.wrap(
         "Interaction: %s, in %s." % (feature.summary, context.summary),
         width=76, initial_indent="% ", subsequent_indent="% ")
@@ -1101,7 +1122,8 @@ def test_text(feature, context):
     translation = None
     if context.plain or feature.plain:
         translation = module + "_translation"
-        header.append("%% TRANSLATION: Inputs/%s.m" % translation)
+        header.append("%% TRANSLATION: Inputs/%s%s" % (translation,
+                                                       suffix(feature)))
     others = []
     main_imports = {"io", "int", "list", "string"} | context.imports
     plain_imports = main_imports - {"process"}
@@ -1109,21 +1131,24 @@ def test_text(feature, context):
     plain_implementation = feature.plain or feature.implementation
     if context.name == "another-module":
         library = module + "_lib"
-        header.append("%% MODULES: Inputs/%s.m" % library)
+        header.append("%% MODULES: Inputs/%s%s" % (library, suffix(feature)))
         main_imports.add(library)
         others.append((library, library_text(
             library, feature, feature.imports, implementation,
-            "%% The feature of run-%s.m, as another module." % feature.name)))
+            "%% The feature of run-%s%s, as another module." % (
+                feature.name, suffix(feature)))))
         body_feature = plain_feature = ""
         if feature.plain:
             plain_library = library + "_translation"
             plain_imports.add(plain_library)
             # For mmc only, which builds the translation.
-            header.append("%% FILES: Inputs/%s.m" % plain_library)
+            header.append("%% FILES: Inputs/%s%s" % (plain_library,
+                                                     suffix(feature)))
             others.append((plain_library, library_text(
                 plain_library, feature, feature.plain_imports,
                 plain_implementation,
-                "%% The translation of Inputs/%s.m for mmc." % library)))
+                "%% The translation of Inputs/%s%s for mmc." % (
+                    library, suffix(feature)))))
         else:
             plain_imports.add(library)
     else:
@@ -1136,8 +1161,8 @@ def test_text(feature, context):
                                       context.code, context.io))
     if translation:
         others.append((translation, "\n".join(
-            ["%% The translation of run-%s.m in %s for mmc: the same"
-             % (feature.name, context.name),
+            ["%% The translation of run-%s%s in %s for mmc: the same"
+             % (feature.name, suffix(feature), context.name),
              "% program in plain Mercury, which must print the same."] +
             program(translation, plain_imports, plain_feature,
                     context.plain or context.code, context.io))))
@@ -1240,6 +1265,8 @@ def nested_text(feature, outer, inner):
                  for c in (feature, outer, inner)]:
         if line not in header:
             header.append(line)
+    if feature.templated:
+        header.append(FLOAT_TYPES)
     header += textwrap.wrap(
         "Interaction: %s, in %s, in %s." % (feature.summary, inner.summary,
                                             outer.summary),
@@ -1256,12 +1283,13 @@ def nested_text(feature, outer, inner):
         header.append("% MERKC-FLAGS: " + " ".join(flags))
     plain = outer.plain or inner.plain or feature.plain
     translation = module + "_translation"
+    ext = suffix(feature)
     if plain:
-        header.append("%% TRANSLATION: Inputs/%s.m" % translation)
-    header.append("%% MODULES: Inputs/%s.m" % library)
+        header.append("%% TRANSLATION: Inputs/%s%s" % (translation, ext))
+    header.append("%% MODULES: Inputs/%s%s" % (library, ext))
     plain_library = library + "_translation"
     if inner.plain or feature.plain:
-        header.append("%% FILES: Inputs/%s.m" % plain_library)
+        header.append("%% FILES: Inputs/%s%s" % (plain_library, ext))
     else:
         plain_library = library
     interface = feature.interface + "\n\n:- func inner_run(int) = string."
@@ -1273,7 +1301,8 @@ def nested_text(feature, outer, inner):
         return library_text(
             name, lib_feature, imports | inner.imports | {"string"},
             implementation + "\n\n" + inner_code(code),
-            "%% The feature and inner context of run-%s.m." % feature.name)
+            "%% The feature and inner context of run-%s%s." % (
+                feature.name, suffix(feature)))
 
     others = [(library, lib(library, feature.implementation,
                             feature.imports, inner.code))]
@@ -1288,8 +1317,8 @@ def nested_text(feature, outer, inner):
     if plain:
         plain_imports = (main_imports - {"process", library}) | {plain_library}
         others.append((translation, "\n".join(
-            ["%% The translation of run-%s.m in %s in %s for mmc: the"
-             % (feature.name, inner.name, outer.name),
+            ["%% The translation of run-%s%s in %s in %s for mmc: the"
+             % (feature.name, ext, inner.name, outer.name),
              "% same program in plain Mercury, which must print the same."] +
             program(translation, plain_imports, NESTED.strip("\n") + "\n",
                     outer_code(outer.plain or outer.code), outer.io))))
@@ -1297,20 +1326,39 @@ def nested_text(feature, outer, inner):
 
 
 def gpu_test(feature, context):
-    """The test that runs a GPU context's test on the GPU."""
-    test = "run-%s.m" % feature.name
+    """The test that runs a GPU context's test on the GPU; a template's
+    instance for each floating point type."""
+    test = "run-%s%s" % (feature.name, suffix(feature))
     flags = " ".join(context.flags)
-    return "\n".join([
+    lines = [
         "%s's GPU process on the machine's GPU, which prints what it" % test,
         "prints at the host, the output the oracle checked. Written by",
         "utils/conformance/generate-interactions.py.",
+    ] + (["It runs the instance for each floating point type."]
+         if feature.templated else []) + [
         "REQUIRES: amdgpu-gpu",
-        "",
-        "RUN: merkc -O2 %s --offload-arch=%%offload-arch %%libomp-flags "
-        "%%S/%s -o %%t2" % (flags, test),
-        "RUN: %%gpu-env timeout -k 1 60 %%t2 gpu 2>&1 | FileCheck %%S/%s "
-        "--check-prefix=OUTPUT --match-full-lines --strict-whitespace" % test,
-        ""])
+    ]
+    if not feature.templated:
+        return "\n".join(lines + [
+            "",
+            "RUN: merkc -O2 %s --offload-arch=%%offload-arch %%libomp-flags "
+            "%%S/%s -o %%t2" % (flags, test),
+            "RUN: %%gpu-env timeout -k 1 60 %%t2 gpu 2>&1 | FileCheck %%S/%s "
+            "--check-prefix=OUTPUT --match-full-lines --strict-whitespace"
+            % test,
+            ""])
+    module = mercury_name(context.name, feature.name)
+    for t in instantiate.DEFAULT_TYPES:
+        lines += [
+            "",
+            "RUN: %%instantiate %%S/%s %s %%t.%s.d" % (test, t, t),
+            "RUN: merkc -O2 %s --offload-arch=%%offload-arch %%libomp-flags "
+            "%%t.%s.d/%s_%s.m -o %%t.%s" % (flags, t, module, t, t),
+            "RUN: %%gpu-env timeout -k 1 60 %%t.%s gpu 2>&1 | FileCheck "
+            "%%S/%s --check-prefix=OUTPUT-%s --match-full-lines "
+            "--strict-whitespace" % (t, test, t.upper()),
+        ]
+    return "\n".join(lines + [""])
 
 
 def program(module, imports, feature, code, io):
@@ -1351,7 +1399,7 @@ def main():
     parser.add_argument("--out", default=OUT)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    changed = []
+    changed, written = [], []
     for context in CONTEXTS:
         directory = os.path.join(args.out, context.name)
         for feature in FEATURES:
@@ -1363,32 +1411,45 @@ def main():
                 feature = Feature(feature.name, feature.manual, imports,
                                   interface, implementation, feature.summary)
             text, others = test_text(feature, context)
-            files = [(os.path.join(directory, "run-%s.m" % feature.name),
-                      text)]
+            ext = suffix(feature)
+            files = [(os.path.join(directory, "run-%s%s" % (feature.name,
+                                                            ext)), text)]
             for name, other in others:
                 files.append((os.path.join(directory, "Inputs",
-                                           name + ".m"), other))
+                                           name + ext), other))
             if context.gpu:
                 files.append((os.path.join(
                     directory, "run-%s-gpu.test" % feature.name),
                     gpu_test(feature, context)))
             for path, content in files:
                 write_if_changed(path, content, args.check, changed)
+                written.append(path)
     by_name = {c.name: c for c in CONTEXTS}
     features = {f.name: f for f in FEATURES}
     for f, o, i in nested_triples():
         directory = os.path.join(args.out, "nested", "%s-%s" % (o, i))
         text, others = nested_text(features[f], by_name[o], by_name[i])
-        files = [(os.path.join(directory, "run-%s.m" % f), text)]
+        ext = suffix(features[f])
+        files = [(os.path.join(directory, "run-%s%s" % (f, ext)), text)]
         for name, other in others:
-            files.append((os.path.join(directory, "Inputs", name + ".m"),
+            files.append((os.path.join(directory, "Inputs", name + ext),
                           other))
         for path, content in files:
             write_if_changed(path, content, args.check, changed)
+            written.append(path)
+    removed = []
+    for path in written:
+        if path.endswith(".mt") and os.path.exists(path[:-1]):
+            removed.append(path[:-1])
+            if not args.check:
+                os.remove(path[:-1])
     for path in changed:
         print(("would change: " if args.check else "wrote: ") +
               os.path.relpath(path))
-    sys.exit(1 if args.check and changed else 0)
+    for path in removed:
+        print(("would remove: " if args.check else "removed: ") +
+              os.path.relpath(path) + ", which a template replaces")
+    sys.exit(1 if args.check and (changed or removed) else 0)
 
 
 def write_if_changed(path, content, check, changed):

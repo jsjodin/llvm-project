@@ -207,8 +207,8 @@ class Test:
         if self.template:
             if self.kind != "run":
                 raise TestError("only a run- test is a template")
-            if self.nodes or self.modules:
-                raise TestError("a template has no NODES or MODULES yet")
+            if self.nodes:
+                raise TestError("a template has no NODES yet")
             if self.mmc_program and not self.mmc_program.endswith(".mt"):
                 raise TestError("a template's TRANSLATION is a template, "
                                 ".mt")
@@ -243,8 +243,17 @@ class Test:
                     source, type_name, directory, mmc=True, emulation=True)
             except ValueError as e:
                 raise TestError(str(e))
-            for path in [os.path.join(here, f) for f in self.files]:
-                shutil.copy(path, directory)
+            for path in self.module_paths() + [os.path.join(here, f)
+                                               for f in self.files]:
+                if path.endswith(".mt"):
+                    try:
+                        instantiate.write_instance(path, type_name, directory,
+                                                   mmc=True, rename=False)
+                    except ValueError as e:
+                        raise TestError(str(e))
+                else:
+                    shutil.copy(path, directory)
+            copy_stand_ins(directory)
             return module
         module = self.module
         if self.mmc_program:
@@ -400,14 +409,34 @@ def mmc_error_texts(test, mmc):
 
 def merkc_arguments(test, lit, source=None):
     """merkc's flags, search directories and sources, as a RUN line writes
-    them, or as paths for the triage; a template's instance's, `source'."""
+    them, or as paths for the triage; a template's instance's, `source',
+    whose modules that are templates are instantiated beside it."""
     here = "%S" if lit else os.path.dirname(test.path)
-    directories = sorted({os.path.dirname(m) for m in test.modules})
+    instances = os.path.dirname(source) if source else None
+    directories, modules = [], []
+    for m in test.modules:
+        if m.endswith(".mt"):
+            d = instances
+            modules.append(instances + "/" + instance_name(test, m) + ".m")
+        else:
+            d = (here + "/" + os.path.dirname(m) if os.path.dirname(m)
+                 else here)
+            modules.append(here + "/" + m)
+        if d not in directories:
+            directories.append(d)
     return (test.flags +
-            [a for d in directories for a in ("-I", here + "/" + d if d
-                                               else here)] +
-            [source or ("%s" if lit else test.path)] +
-            [here + "/" + m for m in test.modules])
+            [a for d in sorted(directories) for a in ("-I", d)] +
+            [source or ("%s" if lit else test.path)] + modules)
+
+
+def instance_name(test, template):
+    """The module of one of a template's other modules, a template too."""
+    path = os.path.join(os.path.dirname(test.path), template)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return instantiate.declared_name(f.read())
+    except (OSError, ValueError) as e:
+        raise TestError("%s: %s" % (template, e))
 
 
 def libomp_dirs(merkc):
@@ -440,6 +469,11 @@ def merkc_build(test, merkc, level, directory, sequential=False,
     if test.template:
         source, _ = instantiate.write_instance(test.path, type_name,
                                                directory)
+        here = os.path.dirname(test.path)
+        for m in test.modules:
+            if m.endswith(".mt"):
+                instantiate.write_instance(os.path.join(here, m), type_name,
+                                           directory, rename=False)
     arguments = merkc_arguments(test, False, source)
     if test.openmp():
         if sequential:
@@ -514,6 +548,8 @@ def run_lines(test, status, type_name=None):
             "%t." + type_name + ".", "OUTPUT-" + type_name.upper())]
         return (lines[:1] if lines[0].startswith("% REQUIRES:") else []) + [
             "% RUN: %instantiate %s " + type_name + " " + directory] + [
+            "% RUN: %instantiate --keep-name %S/" + m + " " + type_name +
+            " " + directory for m in test.modules if m.endswith(".mt")] + [
                 l for l in lines if not l.startswith("% REQUIRES:")]
     return run_lines_for(test, status, None, "%t", "OUTPUT")
 

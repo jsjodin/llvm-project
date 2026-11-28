@@ -1,7 +1,13 @@
-run-flat-values.m's GPU process on the machine's GPU, which prints what it
+run-flat-values.mt's GPU process on the machine's GPU, which prints what it
 prints at the host, the output the oracle checked. Written by
 utils/conformance/generate-interactions.py.
+It runs the instance for each floating point type.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/run-flat-values.m -o %t2
-RUN: %gpu-env timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %S/run-flat-values.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: %instantiate %S/run-flat-values.mt float %t.float.d
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %t.float.d/gpu_process_flat_values_float.m -o %t.float
+RUN: %gpu-env timeout -k 1 60 %t.float gpu 2>&1 | FileCheck %S/run-flat-values.mt --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+
+RUN: %instantiate %S/run-flat-values.mt float32 %t.float32.d
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %t.float32.d/gpu_process_flat_values_float32.m -o %t.float32
+RUN: %gpu-env timeout -k 1 60 %t.float32 gpu 2>&1 | FileCheck %S/run-flat-values.mt --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace

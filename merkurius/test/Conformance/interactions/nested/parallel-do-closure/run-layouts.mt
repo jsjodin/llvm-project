@@ -1,0 +1,94 @@
+% MANUAL: Discriminated unions
+% DESIGN: Loops / Under a parallel directive
+% MANUAL: Creating higher-order terms
+% DESIGN: Sized floating point types
+% Interaction: a type of more functors than a pointer has tags, in closures
+% that make, capture and use the values, in a parallel loop's iterations,
+% which make and use the values.
+% Written by utils/conformance/generate-interactions.py; change
+% the generator rather than this file.
+% MERKC-FLAGS: -fdo-loops -fopenmp
+% TRANSLATION: Inputs/nested_parallel_do_closure_layouts_translation.mt
+% MODULES: Inputs/nested_parallel_do_closure_layouts_lib.mt
+%
+% REQUIRES: libomp
+% RUN: %instantiate %s float %t.float.d
+% RUN: %instantiate --keep-name %S/Inputs/nested_parallel_do_closure_layouts_lib.mt float %t.float.d
+% RUN: merkc -O0 -fdo-loops -fopenmp -I %t.float.d %t.float.d/nested_parallel_do_closure_layouts_float.m %t.float.d/nested_parallel_do_closure_layouts_lib.m %libomp-flags -o %t.float.0
+% RUN: %libomp-env OMP_NUM_THREADS=4 %t.float.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: %libomp-env OMP_NUM_THREADS=4 MERK_GC_EVERY_ALLOC=1 %t.float.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fdo-loops -fopenmp -I %t.float.d %t.float.d/nested_parallel_do_closure_layouts_float.m %t.float.d/nested_parallel_do_closure_layouts_lib.m %libomp-flags -o %t.float.2
+% RUN: %libomp-env OMP_NUM_THREADS=4 %t.float.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: %libomp-env OMP_NUM_THREADS=4 MERK_GC_EVERY_ALLOC=1 %t.float.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: merkc -O0 -fdo-loops -I %t.float.d %t.float.d/nested_parallel_do_closure_layouts_float.m %t.float.d/nested_parallel_do_closure_layouts_lib.m -o %t.float.0s
+% RUN: %t.float.0s 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fdo-loops -I %t.float.d %t.float.d/nested_parallel_do_closure_layouts_float.m %t.float.d/nested_parallel_do_closure_layouts_lib.m -o %t.float.2s
+% RUN: %t.float.2s 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT --match-full-lines --strict-whitespace
+% OUTPUT-FLOAT:1: seven(three(0.5, one(1), 3), two(1, s1)) / seven(three(0.5, one(1), 3), two(1, s1)) | seven(three(0.5, one(1), 3), two(1, s1)) | seven(three(1.0, one(2), 6), eight(c0)) | seven(three(1.0, one(2), 6), eight(c0)) / seven(three(1.0, one(2), 6), eight(c0)) | seven(three(1.0, one(2), 6), eight(c0)) | seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(1.5, one(3), 9), four(x, 9)) / seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) / seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.5, one(5), 15), two(5, s5))
+% OUTPUT-FLOAT-NEXT:2: seven(three(1.0, one(2), 6), eight(c0)) / seven(three(1.0, one(2), 6), eight(c0)) | seven(three(1.0, one(2), 6), eight(c0)) | seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(1.5, one(3), 9), four(x, 9)) / seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) / seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) / seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(3.0, one(6), 18), eight(c0))
+% OUTPUT-FLOAT-NEXT:3: seven(three(1.5, one(3), 9), four(x, 9)) / seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) / seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) / seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.0, one(6), 18), eight(c0)) / seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.5, one(7), 21), two(7, s7))
+% OUTPUT-FLOAT-NEXT:4: seven(three(2.0, one(4), 12), eight(c0)) / seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) / seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.0, one(6), 18), eight(c0)) / seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.5, one(7), 21), two(7, s7)) | seven(three(3.5, one(7), 21), two(7, s7)) / seven(three(3.5, one(7), 21), two(7, s7)) | seven(three(3.5, one(7), 21), two(7, s7)) | seven(three(4.0, one(8), 24), eight(c0))
+% OUTPUT-FLOAT-NOT:{{.}}
+% RUN: %instantiate %s float32 %t.float32.d
+% RUN: %instantiate --keep-name %S/Inputs/nested_parallel_do_closure_layouts_lib.mt float32 %t.float32.d
+% RUN: merkc -O0 -fdo-loops -fopenmp -I %t.float32.d %t.float32.d/nested_parallel_do_closure_layouts_float32.m %t.float32.d/nested_parallel_do_closure_layouts_lib.m %libomp-flags -o %t.float32.0
+% RUN: %libomp-env OMP_NUM_THREADS=4 %t.float32.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: %libomp-env OMP_NUM_THREADS=4 MERK_GC_EVERY_ALLOC=1 %t.float32.0 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fdo-loops -fopenmp -I %t.float32.d %t.float32.d/nested_parallel_do_closure_layouts_float32.m %t.float32.d/nested_parallel_do_closure_layouts_lib.m %libomp-flags -o %t.float32.2
+% RUN: %libomp-env OMP_NUM_THREADS=4 %t.float32.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: %libomp-env OMP_NUM_THREADS=4 MERK_GC_EVERY_ALLOC=1 %t.float32.2 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: merkc -O0 -fdo-loops -I %t.float32.d %t.float32.d/nested_parallel_do_closure_layouts_float32.m %t.float32.d/nested_parallel_do_closure_layouts_lib.m -o %t.float32.0s
+% RUN: %t.float32.0s 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fdo-loops -I %t.float32.d %t.float32.d/nested_parallel_do_closure_layouts_float32.m %t.float32.d/nested_parallel_do_closure_layouts_lib.m -o %t.float32.2s
+% RUN: %t.float32.2s 2>&1 | FileCheck %s --check-prefix=OUTPUT-FLOAT32 --match-full-lines --strict-whitespace
+% OUTPUT-FLOAT32:1: seven(three(0.5, one(1), 3), two(1, s1)) / seven(three(0.5, one(1), 3), two(1, s1)) | seven(three(0.5, one(1), 3), two(1, s1)) | seven(three(1.0, one(2), 6), eight(c0)) | seven(three(1.0, one(2), 6), eight(c0)) / seven(three(1.0, one(2), 6), eight(c0)) | seven(three(1.0, one(2), 6), eight(c0)) | seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(1.5, one(3), 9), four(x, 9)) / seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) / seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.5, one(5), 15), two(5, s5))
+% OUTPUT-FLOAT32-NEXT:2: seven(three(1.0, one(2), 6), eight(c0)) / seven(three(1.0, one(2), 6), eight(c0)) | seven(three(1.0, one(2), 6), eight(c0)) | seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(1.5, one(3), 9), four(x, 9)) / seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) / seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) / seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(3.0, one(6), 18), eight(c0))
+% OUTPUT-FLOAT32-NEXT:3: seven(three(1.5, one(3), 9), four(x, 9)) / seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(1.5, one(3), 9), four(x, 9)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) / seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) / seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.0, one(6), 18), eight(c0)) / seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.5, one(7), 21), two(7, s7))
+% OUTPUT-FLOAT32-NEXT:4: seven(three(2.0, one(4), 12), eight(c0)) / seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.0, one(4), 12), eight(c0)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) / seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(2.5, one(5), 15), two(5, s5)) | seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.0, one(6), 18), eight(c0)) / seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.0, one(6), 18), eight(c0)) | seven(three(3.5, one(7), 21), two(7, s7)) | seven(three(3.5, one(7), 21), two(7, s7)) / seven(three(3.5, one(7), 21), two(7, s7)) | seven(three(3.5, one(7), 21), two(7, s7)) | seven(three(4.0, one(8), 24), eight(c0))
+% OUTPUT-FLOAT32-NOT:{{.}}
+:- module nested_parallel_do_closure_layouts.
+:- interface.
+:- import_module io.
+:- pred main(io::di, io::uo) is det.
+:- implementation.
+:- import_module array, int, list, nested_parallel_do_closure_layouts_lib, string.
+
+    % The feature's values, with what the inner context makes of the same
+    % number, which runs as the outer context uses them.
+:- type nested
+    --->    nested(int, fdata).
+
+:- func make_nested(int) = nested.
+
+make_nested(N) = nested(N, make(N)).
+
+:- func use_nested(nested) = string.
+
+use_nested(nested(K, V)) = use(V) ++ " / " ++ inner_run(K).
+
+    % Each iteration of a parallel loop, on one of four threads, makes a
+    % value and stores what use_nested makes of it.
+:- pred fill(int::in, array(string)::array_di, array(string)::array_uo)
+    is det.
+
+fill(N, !A) :-
+    %$omp parallel do
+    ( for(I, 0, 3) do
+        V = make_nested(N + I),
+        !A ^ unsafe_elem(I) := use_nested(V)
+    ).
+
+:- func run(int) = string.
+
+run(N) = S :-
+    array.init(4, "", A0),
+    fill(N, A0, A),
+    S = string.join_list(" | ", array.to_list(A)).
+
+main(!IO) :-
+    list.foldl(show, 1 .. 4, !IO).
+
+:- pred show(int::in, io::di, io::uo) is det.
+
+show(N, !IO) :-
+    io.format("%d: %s\n", [i(N), s(run(N))], !IO).

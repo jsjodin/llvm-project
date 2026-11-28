@@ -18,7 +18,9 @@ these placeholders, which each type's instance replaces:
   @FROM_FLOAT@ the conversion of a float: nothing, float32.from_float
 
 and the module, `:- module run_x.', is run_x_float32 in float32's
-instance, in a file of that name. io.write_float32 is io.write_@T@, and
+instance, in a file of that name. A test's other modules may be templates
+too, and keep their names (--keep-name): each type's instance is in a
+directory of its own. io.write_float32 is io.write_@T@, and
 string.float32_to_string is string.@T@_to_string.
 
 For mmc (--mmc), which has no float32, a float32 instance uses the stand-in
@@ -28,7 +30,7 @@ string.float32_to_string become the stand-in's. What mmc's program prints
 is normalised with normalise(): the stand-in's float32_value(X) becomes X
 as merkc's programs write a float32, 1.5f32.
 
-  instantiate.py [--mmc] TEMPLATE TYPE DIRECTORY
+  instantiate.py [--mmc] [--emulation] [--keep-name] TEMPLATE TYPE DIRECTORY
 
 writes the instance to DIRECTORY, made if need be, as MODULE.m, and prints
 its path. With --emulation it also copies the stand-in modules there.
@@ -76,11 +78,15 @@ def float_types(text):
     return types
 
 
-def module_name(text, type_name):
+def declared_name(text):
     m = re.search(r"^:- module ([a-z][A-Za-z0-9_]*)\.", text, re.M)
     if not m:
         raise ValueError("no `:- module' declaration")
-    return m.group(1) + "_" + type_name
+    return m.group(1)
+
+
+def module_name(text, type_name):
+    return declared_name(text) + "_" + type_name
 
 
 def code_segments(text):
@@ -132,12 +138,15 @@ def for_mmc(text, type_name):
     return "".join(out)
 
 
-def instantiate(text, type_name, mmc=False):
+def instantiate(text, type_name, mmc=False, rename=True):
     """The template's instance for the type, and its module's name."""
-    module = module_name(text, type_name)
+    if not rename:
+        module = declared_name(text)
+    else:
+        module = module_name(text, type_name)
+        text = re.sub(r"^(:- (?:end_)?module) [a-z][A-Za-z0-9_]*\.",
+                      r"\1 " + module + ".", text, flags=re.M)
     replacements = TYPES[type_name]
-    text = re.sub(r"^(:- (?:end_)?module) [a-z][A-Za-z0-9_]*\.",
-                  r"\1 " + module + ".", text, flags=re.M)
     for key, value in replacements.items():
         text = text.replace("@" + key + "@", value)
     unknown = re.search(r"@[A-Z_]+@", text)
@@ -178,9 +187,9 @@ def normalise(output, type_name):
 
 
 def write_instance(template, type_name, directory, mmc=False,
-                   emulation=False):
+                   emulation=False, rename=True):
     with open(template, encoding="utf-8") as f:
-        text, module = instantiate(f.read(), type_name, mmc)
+        text, module = instantiate(f.read(), type_name, mmc, rename)
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, module + ".m")
     with open(path, "w", encoding="utf-8") as f:
@@ -197,13 +206,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mmc", action="store_true")
     parser.add_argument("--emulation", action="store_true")
+    parser.add_argument("--keep-name", action="store_true")
     parser.add_argument("template")
     parser.add_argument("type", choices=sorted(TYPES))
     parser.add_argument("directory")
     args = parser.parse_args()
     try:
         path, _ = write_instance(args.template, args.type, args.directory,
-                                 args.mmc, args.emulation)
+                                 args.mmc, args.emulation,
+                                 not args.keep_name)
     except ValueError as e:
         sys.exit("instantiate.py: %s: %s" % (args.template, e))
     print(path)

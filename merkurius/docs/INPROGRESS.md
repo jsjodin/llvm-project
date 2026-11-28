@@ -9669,10 +9669,19 @@ or a NaN has none, as it has no literal.
        run-double.m), flat-records/run-record-arrays.mt,
        openmp/parallel-do/run-reductions.mt with its translation, and
        openmp/target/run-arrays.mt with run-arrays-gpu.test, which checks
-       that float32's arrays map fewer bytes. Next: the other tests of
-       that kind, by directory, and generate-interactions.py's tests,
-       which the generator makes templates of. CodeGen tests that check
-       IR need their own float32 checks, to decide when they come up.
+       that float32's arrays map fewer bytes.
+     - Interactions: generate-interactions.py writes its two float
+       features, layouts and flat-values, with the placeholders, so all
+       their tests are templates, 40 with the nested ones, and the GPU
+       process's -gpu.tests run both types on the GPU. A template's
+       other modules (MODULES, FILES, the TRANSLATION) may be templates
+       too; they keep their names, as each type's instance is in a
+       directory of its own.
+     - Next: the hand-written tests of that kind, by directory (OpenMP
+       target, GPU processes, type classes, existential types, open
+       types, the standard ordering, exceptions). Distribution tests
+       wait for NODES in templates. CodeGen tests that check IR need
+       their own float32 checks, to decide when they come up.
 3. `float16` and `bfloat16`, the same, arrays packed as the sized
    integers' are, arithmetic left to the backend; the driver's `-march`
    and `-mcpu` for the host, passed to `-fc1`'s `-target-cpu` and
